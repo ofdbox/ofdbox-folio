@@ -89,6 +89,8 @@ pub struct FontAsset {
     pub data: Arc<[u8]>,
     /// 字体集合内的 face 索引。
     pub face_index: u32,
+    /// 字体名称，对应 OFD `FontName`。
+    pub font_name: Option<String>,
     /// 字体家族名。
     pub family: Option<String>,
     /// PostScript 名称。
@@ -102,9 +104,16 @@ impl FontAsset {
             id: AssetId::UNASSIGNED,
             data,
             face_index,
+            font_name: None,
             family: None,
             postscript_name: None,
         }
+    }
+
+    /// 设置字体名称。
+    pub fn with_font_name(mut self, name: impl Into<String>) -> Self {
+        self.font_name = Some(name.into());
+        self
     }
 
     /// 设置字体家族名。
@@ -246,19 +255,22 @@ impl ResourceStore {
             id,
             data,
             face_index,
+            font_name: None,
             family: None,
             postscript_name: None,
         }));
         id
     }
 
-    /// 添加带元数据的字体；相同字节和 face 索引会复用已有资源。
+    /// 添加带元数据的字体；相同字节、face 索引与名称会复用已有资源。
     pub fn add_font_asset(&mut self, mut asset: FontAsset) -> AssetId {
-        if let Some(existing) = self
-            .fonts
-            .iter()
-            .find(|font| font.face_index == asset.face_index && font.data == asset.data)
-        {
+        if let Some(existing) = self.fonts.iter().find(|font| {
+            font.face_index == asset.face_index
+                && font.data == asset.data
+                && font.font_name == asset.font_name
+                && font.family == asset.family
+                && font.postscript_name == asset.postscript_name
+        }) {
             return existing.id;
         }
         asset.id = self.allocate();
@@ -328,7 +340,7 @@ fn same_image(a: &ImageAsset, b: &ImageAsset) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{AssetId, ImageAsset, ImageFormat, ResourceStore};
+    use super::{AssetId, FontAsset, ImageAsset, ImageFormat, ResourceStore};
     use std::sync::Arc;
 
     #[test]
@@ -342,6 +354,18 @@ mod tests {
         assert_eq!(store.font_count(), 2);
         assert!(first.get() >= 1);
         assert!(store.font(first).is_some());
+    }
+
+    #[test]
+    fn fonts_keep_distinct_names_for_same_bytes() {
+        let mut store = ResourceStore::new();
+        let bytes: Arc<[u8]> = Arc::from(&b"font"[..]);
+        let first = store.add_font_asset(FontAsset::new(Arc::clone(&bytes), 0).with_family("A"));
+        let second = store.add_font_asset(FontAsset::new(Arc::clone(&bytes), 0).with_family("B"));
+        let same = store.add_font_asset(FontAsset::new(bytes, 0).with_family("A"));
+        assert_ne!(first, second);
+        assert_eq!(first, same);
+        assert_eq!(store.font_count(), 2);
     }
 
     #[test]

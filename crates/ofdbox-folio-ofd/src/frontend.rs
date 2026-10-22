@@ -249,6 +249,17 @@ struct FontResource {
     fixed_width: bool,
 }
 
+fn font_asset(data: Arc<[u8]>, resource: &FontResource) -> FontAsset {
+    let mut asset = FontAsset::new(data, 0);
+    if let Some(name) = &resource.name {
+        asset = asset.with_font_name(name.clone());
+    }
+    if let Some(family) = &resource.family {
+        asset = asset.with_family(family.clone());
+    }
+    asset
+}
+
 #[derive(Clone)]
 pub(crate) struct ResolvedFont {
     asset: Arc<FontAsset>,
@@ -1064,7 +1075,11 @@ impl Builder<'_> {
                     object.id(),
                     "字体资源缺失，文本层使用估算布局",
                 );
-                let id = self.store.add_font(Arc::from(&b""[..]), 0);
+                let asset = match self.resources.fonts.get(font_id) {
+                    Some(resource) => font_asset(Arc::from(&b""[..]), resource),
+                    None => FontAsset::new(Arc::from(&b""[..]), 0),
+                };
+                let id = self.store.add_font_asset(asset);
                 match self.store.font(id).cloned() {
                     Some(font) => (font, true),
                     None => return Vec::new(),
@@ -1155,12 +1170,17 @@ impl Builder<'_> {
                         .unwrap_or_else(|| vec![0]),
                 };
                 let cluster_glyph_start = glyphs.len() as u32;
+                // DeltaX 是排版者给出的实际步进，必须保留到 IR；否则写出时
+                // 用字体度量重算会累积偏差，行尾被裁剪。
+                let delta_x = run.delta_x.get(delta_index).copied();
+                let delta_y = run.delta_y.get(delta_index).copied();
                 for glyph_id in slot_glyphs.iter().copied() {
                     let advance = if has_face {
                         glyph_advance(face.as_ref(), glyph_id, size)
                     } else {
                         estimate_advance(*character, size)
                     };
+                    let effective_advance = delta_x.unwrap_or(advance * h_scale.max(0.0));
                     if transform_glyphs {
                         let transform = Matrix::scale(h_scale.max(0.0), 1.0)
                             .then(shear)
@@ -1193,11 +1213,9 @@ impl Builder<'_> {
                             id: glyph_id,
                             x,
                             y,
-                            advance,
+                            advance: effective_advance,
                         });
                     }
-                    let delta_x = run.delta_x.get(delta_index).copied();
-                    let delta_y = run.delta_y.get(delta_index).copied();
                     if let Some(delta) = delta_x {
                         x += delta;
                     } else {
@@ -1507,7 +1525,7 @@ impl Builder<'_> {
             };
             (provider.load(&request).ok()??, true)
         };
-        let asset_id = self.store.add_font(data, 0);
+        let asset_id = self.store.add_font_asset(font_asset(data, &resource));
         let asset = self
             .store
             .font(asset_id)

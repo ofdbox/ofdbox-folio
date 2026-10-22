@@ -15,10 +15,8 @@ categories = ["parser-implementations", "text-processing"]
 ofdbox-folio-ir.workspace = true
 ofdbox-core.workspace = true
 ttf-parser.workspace = true
-thiserror.workspace = true
-
-[dev-dependencies]
 zip.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

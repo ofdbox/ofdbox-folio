@@ -2,7 +2,7 @@
 
 OFDBox Folio 是一个以“页”为中心的多格式文档引擎：读取 OFD、PDF、DOCX，统一到 Flow IR / Fixed IR，完成排版、渲染与写出。
 
-**当前状态：IR 契约已冻结，OFD → 图片、Reader 页面缓存、跨页选择与搜索已打通。** 217 份 OFD 语料中 211 份可渲染（6 份源文件损坏）；11 个代表样本与旧 render 对比，9 份像素完全一致，2 份平均误差约 1%。布局、DOCX/PDF 适配尚未接入。
+**当前状态：IR 契约已冻结，OFD → 图片、Fixed IR → OFD 写出、Reader 页面缓存、跨页选择与搜索均已打通。** 217 份 OFD 语料中 211 份可读（6 份源文件损坏）。对可读语料做 OFD → Fixed IR → OFD 往返后渲染首页，189 份与源文件像素完全一致，211 份中 203 份差异像素低于 0.2%，平均 MAE 0.011。布局、DOCX/PDF 适配尚未接入。
 
 ## 目标
 
@@ -143,6 +143,19 @@ let fixed = ofdbox_folio::layout(&flow, &mut fonts, &LayoutOptions::default())?;
 let ofd = ofdbox_folio::to_ofd(&fixed, &OfdWriteOptions::default())?;
 ```
 
+## OFD 写出
+
+```rust
+use ofdbox_folio::ir::FixedDocument;
+use ofdbox_folio::ofd::{OfdWriteOptions, write_fixed};
+
+let bytes = write_fixed(&document, &OfdWriteOptions::default())?;
+```
+
+写出器消费 Fixed IR，输出 OFD 1.1 包：路径、文本（含 `CGTransform` 与 `DeltaX/DeltaY`）、图片、组裁剪、透明度、轴向/径向渐变、字体名称与内嵌字体字节。对象 `Boundary` 取整页，实际位置由 `CTM` 承载；行的位置差直接来自字形局部坐标，避免字体度量引入偏差。默认使用固定 ZIP 时间戳和内容摘要 `DocID`，相同输入产生相同字节。
+
+已知限制：图案与网格填充尚未写出（回退为首个色标），组透明度分配到子元素颜色 alpha，不保留独立图层语义。
+
 ## 路线
 
 | 阶段 | 内容 | 验收 |
@@ -152,7 +165,7 @@ let ofd = ofdbox_folio::to_ofd(&fixed, &OfdWriteOptions::default())?;
 | R3 PDF 阅读硬化 | 字体与 CMap、图案/渐变、透明、加密、坏文件容错 | 真实 PDF 语料可读，降级有报告 |
 | R4 文档能力 | 注释/表单、附件、大纲编辑、GPU 后端 | 阅读器功能闭环 |
 
-当前完成 R1 的 OFD 读取、CPU 位图、Reader 页面缓存与跨页选择/搜索。下一步进入 Flow IR 与布局，并继续收敛字体回退与模板层语义。
+当前完成 R1 的 OFD 读取、CPU 位图、OFD 写出、Reader 页面缓存与跨页选择/搜索。下一步移植 PDF 读取/写出与 wgpu 后端，再迁移 CLI。
 
 当前已知限制：
 

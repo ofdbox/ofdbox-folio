@@ -1,12 +1,12 @@
 //! OFDBox Folio 的 OFD 适配层。
 //!
 //! 负责把 OFD 包解析为 Fixed IR 页面，以及把 Fixed IR 写出为 OFD 包。
-//! 当前实现提供读取路径；写出与签名能力随后补齐。对外不暴露
-//! `ofdbox-core` 的类型。
+//! 对外不暴露 `ofdbox-core` 的类型。
 
 #![allow(clippy::too_many_lines)]
 
 mod frontend;
+mod writer;
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
@@ -21,6 +21,7 @@ use ofdbox_folio_ir::{
 };
 
 pub use frontend::{OfdReadOptions, UnsupportedPolicy};
+pub use writer::{OfdWriteOptions, write_fixed};
 
 /// 探测字节是否为 OFD 包。
 ///
