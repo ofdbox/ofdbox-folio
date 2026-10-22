@@ -22,6 +22,14 @@ use ofdbox_folio_ir::{
 
 pub use frontend::{OfdReadOptions, UnsupportedPolicy};
 
+/// 探测字节是否为 OFD 包。
+///
+/// 复用 `ofdbox-core` 的 ZIP 读取，因此能容忍前置字节、空 EOCD 等
+/// 真实文件里常见的非标准封装；不解析页面。
+pub fn probe(bytes: &[u8]) -> bool {
+    OfdPackage::probe(bytes).unwrap_or(false)
+}
+
 /// OFD 适配层错误。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

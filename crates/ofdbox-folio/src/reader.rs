@@ -438,17 +438,14 @@ fn detect_format(bytes: &[u8]) -> Result<SourceFormat, Error> {
     if bytes.starts_with(b"%PDF") {
         return Ok(SourceFormat::Pdf);
     }
-    if bytes.starts_with(b"PK\x03\x04") {
-        let archive = zip::ZipArchive::new(Cursor::new(bytes))
-            .map_err(|error| DocumentError::Corrupt(error.to_string()))?;
-        let mut archive = archive;
-        if archive.by_name("OFD.xml").is_ok() {
-            return Ok(SourceFormat::Ofd);
-        }
-        if archive.by_name("word/document.xml").is_ok() {
-            return Ok(SourceFormat::Docx);
-        }
-        return Err(DocumentError::UnsupportedFormat.into());
+    #[cfg(feature = "ofd")]
+    if ofdbox_folio_ofd::probe(bytes) {
+        return Ok(SourceFormat::Ofd);
+    }
+    if let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(bytes))
+        && archive.by_name("word/document.xml").is_ok()
+    {
+        return Ok(SourceFormat::Docx);
     }
     Err(DocumentError::UnsupportedFormat.into())
 }

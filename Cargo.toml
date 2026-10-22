@@ -44,3 +44,6 @@ ofdbox-folio-render = { path = "crates/ofdbox-folio-render", version = "0.0.1" }
 ofdbox-folio-ofd = { path = "crates/ofdbox-folio-ofd", version = "0.0.1" }
 ofdbox-folio-pdf = { path = "crates/ofdbox-folio-pdf", version = "0.0.1" }
 ofdbox-folio-docx = { path = "crates/ofdbox-folio-docx", version = "0.0.1" }
+
+[patch.crates-io]
+ofdbox-core = { path = "../ofdbox/crates/ofdbox-core" }
