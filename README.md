@@ -194,7 +194,7 @@ let rgba = target.read_rgba(backend.context())?;
 | R3 PDF 阅读硬化 | 字体与 CMap、图案/渐变、透明、加密、坏文件容错 | 真实 PDF 语料可读，降级有报告 |
 | R4 文档能力 | 注释/表单、附件、大纲编辑、GPU 后端 | 阅读器功能闭环 |
 
-当前完成 R1 的 OFD/PDF 读写、CPU 位图与 wgpu 后端骨架、Reader 页面缓存与跨页选择/搜索。下一步把 CLI 迁移到 Reader 并移除旧 `ofdbox-render`。
+当前完成 R1 的 OFD/PDF 读写、CPU 位图与 wgpu 后端骨架、Reader 页面缓存与跨页选择/搜索；CLI 已迁移到 `ofdbox-reader`，旧 `ofdbox-render` 已删除。下一步进入 R2 的 Flow IR、布局与 DOCX。
 
 当前已知限制：
 
