@@ -1046,10 +1046,13 @@ impl Builder<'_> {
                 Arc::<[u8]>::from(stream.content.clone()),
             )
         } else if filter == Some(b"CCITTFaxDecode") {
-            (
-                ImageFormat::Ccitt,
-                Arc::<[u8]>::from(stream.content.clone()),
-            )
+            match self.ccitt_image(stream, width as u32, height as u32) {
+                Some(bytes) => (ImageFormat::Png, Arc::from(bytes)),
+                None => {
+                    self.diagnostic(DiagnosticCode::Image, "PDF CCITT 图片解码失败");
+                    return Ok(());
+                }
+            }
         } else {
             match self.raw_image_rgba(stream, width as u32, height as u32) {
                 Some(bytes) => (ImageFormat::Png, Arc::from(bytes)),
@@ -1084,6 +1087,45 @@ impl Builder<'_> {
             }),
         );
         Ok(())
+    }
+
+    /// 解码 CCITT G3/G4 传真编码，并转成 RGBA PNG。
+    fn ccitt_image(&self, stream: &lopdf::Stream, width: u32, height: u32) -> Option<Vec<u8>> {
+        let params = stream
+            .dict
+            .get(b"DecodeParms")
+            .ok()
+            .and_then(|object| self.resolve(object))
+            .and_then(|object| match object {
+                Object::Dictionary(dictionary) => Some(dictionary.clone()),
+                Object::Array(values) => values
+                    .first()
+                    .and_then(|value| self.resolve(value))
+                    .and_then(|value| value.as_dict().ok())
+                    .cloned(),
+                _ => None,
+            });
+        let number = |key: &[u8]| {
+            params
+                .as_ref()
+                .and_then(|dictionary| dictionary.get(key).ok())
+                .and_then(object_number)
+        };
+        let boolean = |key: &[u8], default: bool| {
+            params
+                .as_ref()
+                .and_then(|dictionary| dictionary.get(key).ok())
+                .and_then(|object| object.as_bool().ok())
+                .unwrap_or(default)
+        };
+        let settings = CcittParams {
+            k: number(b"K").unwrap_or(0.0) as i64,
+            black_is_1: boolean(b"BlackIs1", false),
+            end_of_line: boolean(b"EndOfLine", false),
+            encoded_byte_align: boolean(b"EncodedByteAlign", false),
+        };
+        let rgba = decode_ccitt_rgba(&stream.content, width, height, settings)?;
+        encode_rgba_png(width, height, &rgba)
     }
 
     /// 把 8 位、无预测器的原始像素编码成 RGBA PNG。
@@ -1139,14 +1181,7 @@ impl Builder<'_> {
                 pixel[3] = alpha;
             }
         }
-        let mut png_bytes = Vec::new();
-        let mut encoder = png::Encoder::new(&mut png_bytes, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().ok()?;
-        writer.write_image_data(&rgba).ok()?;
-        writer.finish().ok()?;
-        Some(png_bytes)
+        encode_rgba_png(width, height, &rgba)
     }
 
     fn color_space(&self, object: &Object) -> Option<usize> {
@@ -1191,6 +1226,76 @@ fn paint_with_alpha(paint: &Paint, alpha: f32) -> Option<Paint> {
         }
         other => Some(other.clone()),
     }
+}
+
+#[derive(Clone, Copy, Default)]
+struct CcittParams {
+    k: i64,
+    black_is_1: bool,
+    end_of_line: bool,
+    encoded_byte_align: bool,
+}
+
+/// 解码 CCITT G3/G4 位流为 RGBA8；1 位表示黑色，0 位表示白色。
+fn decode_ccitt_rgba(data: &[u8], width: u32, height: u32, params: CcittParams) -> Option<Vec<u8>> {
+    let encoding = if params.k < 0 {
+        hayro_ccitt::EncodingMode::Group4
+    } else if params.k == 0 {
+        hayro_ccitt::EncodingMode::Group3_1D
+    } else {
+        hayro_ccitt::EncodingMode::Group3_2D { k: params.k as u32 }
+    };
+    let settings = hayro_ccitt::DecodeSettings {
+        columns: width,
+        rows: height,
+        end_of_block: true,
+        end_of_line: params.end_of_line,
+        rows_are_byte_aligned: params.encoded_byte_align,
+        encoding,
+        invert_black: params.black_is_1,
+    };
+    let mut context = hayro_ccitt::DecoderContext::new(settings);
+    let mut bitmap = BitmapDecoder::default();
+    hayro_ccitt::decode(data, &mut bitmap, &mut context).ok()?;
+    let expected = width as usize * height as usize;
+    if bitmap.pixels.len() < expected {
+        return None;
+    }
+    let mut rgba = Vec::with_capacity(expected * 4);
+    for white in bitmap.pixels.into_iter().take(expected) {
+        let value = if white { 255 } else { 0 };
+        rgba.extend_from_slice(&[value, value, value, 255]);
+    }
+    Some(rgba)
+}
+
+#[derive(Default)]
+struct BitmapDecoder {
+    pixels: Vec<bool>,
+}
+
+impl hayro_ccitt::Decoder for BitmapDecoder {
+    fn push_pixel(&mut self, white: bool) {
+        self.pixels.push(white);
+    }
+
+    fn push_pixel_chunk(&mut self, white: bool, chunk_count: u32) {
+        self.pixels
+            .extend(std::iter::repeat_n(white, chunk_count as usize * 8));
+    }
+
+    fn next_line(&mut self) {}
+}
+
+fn encode_rgba_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    let mut png_bytes = Vec::new();
+    let mut encoder = png::Encoder::new(&mut png_bytes, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().ok()?;
+    writer.write_image_data(rgba).ok()?;
+    writer.finish().ok()?;
+    Some(png_bytes)
 }
 
 fn glyph_char(face: &ttf_parser::Face<'_>, glyph: u16) -> Option<char> {
@@ -1422,4 +1527,31 @@ fn object_name(object: &Object) -> Option<&[u8]> {
 #[allow(dead_code)]
 fn resolve<'a>(document: &'a Document, object: &'a Object) -> Option<&'a Object> {
     document.dereference(object).ok().map(|(_, object)| object)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CcittParams, decode_ccitt_rgba};
+
+    #[test]
+    fn decodes_group4_ccitt() {
+        // Pillow 生成的 16x8 Group 4 位流：白底、x=4..10 / y=2..5 有黑块。
+        let data = [0x26, 0xa0, 0xbf, 0x2f, 0xff, 0xff, 0x1e, 0x00, 0x20, 0x02];
+        let rgba = decode_ccitt_rgba(
+            &data,
+            16,
+            8,
+            CcittParams {
+                k: -1,
+                // TIFF 以 Photometric=1 (0=黑) 存储，需按相反极性解释。
+                black_is_1: true,
+                ..CcittParams::default()
+            },
+        )
+        .expect("decode");
+        let pixel = |x: usize, y: usize| &rgba[(y * 16 + x) * 4..][..4];
+        assert_eq!(pixel(0, 0), [255, 255, 255, 255]);
+        assert_eq!(pixel(5, 3), [0, 0, 0, 255]);
+        assert_eq!(pixel(15, 7), [255, 255, 255, 255]);
+    }
 }

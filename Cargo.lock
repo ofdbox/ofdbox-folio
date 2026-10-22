@@ -613,6 +613,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hayro-ccitt"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f4d0e94ddd48749f06bbe4e5389fb9799a0c45bcaf00495042076ef05e3241a"
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1106,6 +1112,7 @@ version = "0.0.1"
 dependencies = [
  "bmp",
  "flate2",
+ "hayro-ccitt",
  "justbig2",
  "kurbo",
  "lopdf",

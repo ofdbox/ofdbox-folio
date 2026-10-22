@@ -15,6 +15,7 @@ categories = ["parser-implementations", "text-processing"]
 ofdbox-folio-ir.workspace = true
 bmp.workspace = true
 flate2.workspace = true
+hayro-ccitt.workspace = true
 justbig2.workspace = true
 kurbo.workspace = true
 lopdf.workspace = true
