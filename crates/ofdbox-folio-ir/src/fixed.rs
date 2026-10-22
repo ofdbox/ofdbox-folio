@@ -94,6 +94,22 @@ impl Page {
         self.links.iter().find(|link| link.rect.contains(point))
     }
 
+    /// 粗略估计页面结构占用的字节数，用于阅读器缓存预算。
+    ///
+    /// 字体和图片字节属于文档级共享资源，不计入单页成本；文本 run 与
+    /// `TextLayer` 共享的负载只计一次。
+    pub fn estimated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + scene_bytes(&self.content)
+            + text_layer_bytes(&self.text)
+            + self.links.len() * std::mem::size_of::<LinkArea>()
+            + self
+                .templates
+                .iter()
+                .map(|template| template.estimated_bytes())
+                .sum::<usize>()
+    }
+
     /// 校验页面几何与文本映射的基本一致性。
     pub fn validate(&self) -> Result<(), ValidationError> {
         if !self.info.media_box.is_finite() || !self.info.crop_box.is_finite() {
@@ -346,6 +362,54 @@ pub enum ValidationError {
     InvalidTextCluster,
 }
 
+impl TemplateLayer {
+    /// 粗略估计模板结构占用的字节数。
+    pub fn estimated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.name.as_ref().map_or(0, String::len)
+            + scene_bytes(&self.scene)
+    }
+}
+
+fn scene_bytes(scene: &Scene) -> usize {
+    std::mem::size_of::<Scene>()
+        + group_bytes(&scene.root)
+        + scene
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.len() + 32)
+            .sum::<usize>()
+}
+
+fn group_bytes(group: &Group) -> usize {
+    let clip = group.clip.as_ref().map_or(0, |clip| path_bytes(&clip.path));
+    clip + group
+        .children
+        .iter()
+        .map(|element| match element {
+            Element::Group(group) => std::mem::size_of::<Group>() + group_bytes(group),
+            Element::Path(path) => std::mem::size_of::<PathElement>() + path_bytes(&path.path),
+            Element::Text(text) => {
+                std::mem::size_of::<TextElement>()
+                    + text.run.text.len()
+                    + text.run.glyphs.len() * std::mem::size_of::<crate::text::Glyph>()
+                    + text.run.clusters.len() * std::mem::size_of::<crate::text::Cluster>()
+            }
+            Element::Image(_) => std::mem::size_of::<ImageElement>(),
+        })
+        .sum::<usize>()
+}
+
+fn path_bytes(path: &Path) -> usize {
+    std::mem::size_of_val(path.segments())
+}
+
+fn text_layer_bytes(layer: &TextLayer) -> usize {
+    std::mem::size_of::<TextLayer>()
+        + layer.items.len() * std::mem::size_of::<crate::text::TextItem>()
+        + layer.lines.len() * std::mem::size_of::<crate::text::TextLine>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Page, PageInfo, Scene, ValidationError};
@@ -367,6 +431,7 @@ mod tests {
         );
         assert!(page.validate().is_ok());
         assert_eq!(page.display_size(), Size::new(210.0, 297.0));
+        assert!(page.estimated_bytes() > 0);
     }
 
     #[test]

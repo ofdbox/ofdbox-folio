@@ -2,7 +2,7 @@
 
 OFDBox Folio 是一个以“页”为中心的多格式文档引擎：读取 OFD、PDF、DOCX，统一到 Flow IR / Fixed IR，完成排版、渲染与写出。
 
-**当前状态：IR 契约已冻结，OFD → 图片主链路已打通。** 217 份 OFD 语料中 211 份可渲染（6 份源文件损坏）；11 个代表样本与旧 render 对比，9 份像素完全一致，2 份平均误差约 1%。布局、DOCX/PDF 适配、页面缓存与选择/搜索 API 尚未接入。
+**当前状态：IR 契约已冻结，OFD → 图片主链路与 Reader 页面缓存已打通。** 217 份 OFD 语料中 211 份可渲染（6 份源文件损坏）；11 个代表样本与旧 render 对比，9 份像素完全一致，2 份平均误差约 1%。布局、DOCX/PDF 适配、选择/搜索门面 API 尚未接入。
 
 ## 目标
 
@@ -147,19 +147,41 @@ let ofd = ofdbox_folio::to_ofd(&fixed, &OfdWriteOptions::default())?;
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| R1 阅读器内核 | IR、OFD 读取、CPU 渲染、文本层、页面/资源缓存 | 惰性加载、选择/搜索可用、页级错误隔离、wasm 构建 |
+| R1 阅读器内核 | IR、OFD 读取、CPU 渲染、文本层、页面缓存 | OFD→图片帧一致、选择/搜索可用、页级错误隔离、wasm 构建 |
 | R2 流式文档 | Flow IR、布局、DOCX 读写、创建 API | Word → OFD/PDF/位图链路打通，布局确定 |
 | R3 PDF 阅读硬化 | 字体与 CMap、图案/渐变、透明、加密、坏文件容错 | 真实 PDF 语料可读，降级有报告 |
 | R4 文档能力 | 注释/表单、附件、大纲编辑、GPU 后端 | 阅读器功能闭环 |
 
-当前完成 R1 的 OFD 读取与 CPU 位图主链路。下一步接入 Reader 页面缓存、选择/搜索 API，并继续收敛字体回退与模板层语义。
+当前完成 R1 的 OFD 读取、CPU 位图与 Reader 页面缓存。下一步接入选择/搜索门面 API，并继续收敛字体回退与模板层语义。
 
 当前已知限制：
 
 - OFD 未内嵌字体时依赖调用方注入 `FontProvider`；示例使用系统字体。
 - 模板页目前拍平进页面内容，`Page.templates` 语义尚未拆分。
-- `load_page()` 每次都重新解析页面，Reader 字节预算缓存尚未接入。
-- 文本行按 TextObject 粗略分组，跨对象行合并待完善。
+- 页面缓存只计页面结构；字体和图片属于文档级共享资源，单独计价。
+- 文本层已提供命中/选择/搜索函数，但门面尚未封装跨页选择与搜索接口。
+
+## 阅读器缓存
+
+```rust
+use ofdbox_folio::{CacheOptions, Document, OpenOptions};
+
+let mut document = Document::open_path(
+    "input.ofd",
+    OpenOptions {
+        cache: CacheOptions { max_bytes: 64 * 1024 * 1024 },
+        ..OpenOptions::default()
+    },
+)?;
+
+let page = document.page(0)?;      // 首次解析并写入缓存
+let page_again = document.page(0)?; // 命中缓存，返回同一个 Arc<Page>
+document.prefetch(1)?;              // 预取下一页
+let stats = document.cache_stats();
+```
+
+缓存按页面结构字节数计费，LRU 淘汰；`max_bytes = 0` 可禁用。
+
 
 ## 快速验证
 

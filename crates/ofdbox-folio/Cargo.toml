@@ -19,6 +19,7 @@ ofdbox-folio-ofd = { workspace = true, optional = true }
 ofdbox-folio-pdf = { workspace = true, optional = true }
 ofdbox-folio-docx = { workspace = true, optional = true }
 thiserror.workspace = true
+zip.workspace = true
 
 [features]
 default = ["ofd", "pdf", "docx", "layout", "cpu"]

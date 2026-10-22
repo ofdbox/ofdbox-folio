@@ -11,9 +11,9 @@ use std::io::BufWriter;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use ofdbox_folio::ir::{DocumentSource, FontError, FontProvider, FontRequest};
-use ofdbox_folio::ofd::{OfdDocument, OfdReadOptions};
+use ofdbox_folio::ir::{FontError, FontProvider, FontRequest};
 use ofdbox_folio::render::{CpuRenderer, RasterTarget, RenderOptions};
+use ofdbox_folio::{Document, OpenOptions};
 
 /// 按字体名从系统字体目录选择字体。
 type FontCache = Arc<Mutex<HashMap<PathBuf, Option<Arc<[u8]>>>>>;
@@ -133,12 +133,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?
         .unwrap_or(96.0);
 
-    let mut document = OfdDocument::open_path_with_fonts(
+    let mut document = Document::open_path(
         &input,
-        OfdReadOptions::default(),
-        Some(Box::new(SystemFonts::new())),
+        OpenOptions {
+            font_provider: Some(Box::new(SystemFonts::new())),
+            ..OpenOptions::default()
+        },
     )?;
-    let page = document.load_page(page_index)?;
+    let page = document.page(page_index)?;
     let size = page.display_size();
     let mut target = RasterTarget::from_size(size, dpi)?;
     let mut renderer = CpuRenderer::new(RenderOptions::default());

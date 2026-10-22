@@ -700,6 +700,7 @@ dependencies = [
  "ofdbox-folio-render",
  "png",
  "thiserror",
+ "zip",
 ]
 
 [[package]]

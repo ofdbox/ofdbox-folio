@@ -4,9 +4,18 @@
 //! 内部 crate。具体接口按冻结的公开 API 契约逐步实现。
 //!
 //! - [`ir`]：Flow IR、Fixed IR 与阅读器契约；
+//! - [`Document`]：带字节预算缓存的按需阅读器；
 //! - `layout`：Flow 到 Fixed 的单向排版；
 //! - `render`：Fixed IR 的位图渲染；
 //! - `ofd` / `pdf` / `docx`：格式适配器。
+
+mod error;
+mod reader;
+
+/// 统一门面错误。
+pub use error::Error;
+/// 阅读器与缓存类型。
+pub use reader::{CacheOptions, CacheStats, Document, OpenOptions, ReaderOptions};
 
 /// Flow IR、Fixed IR 与阅读器契约。
 pub use ofdbox_folio_ir as ir;
