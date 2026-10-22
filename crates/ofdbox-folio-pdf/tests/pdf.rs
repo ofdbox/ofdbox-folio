@@ -455,3 +455,74 @@ fn reads_shading_pattern_fill() {
     assert!(gradient.stops[0].color.r > 240);
     assert!(gradient.stops.last().expect("last").color.b > 240);
 }
+
+#[test]
+fn reads_inline_image() {
+    use lopdf::{Document as SourceDocument, Object, Stream, dictionary};
+
+    let mut source = SourceDocument::with_version("1.7");
+    let pages_id = source.new_object_id();
+    let resources = dictionary! {};
+    let content_id = source.add_object(Stream::new(
+        dictionary! {},
+        b"q 10 0 0 10 20 20 cm BI /W 1 /H 1 /CS /RGB /BPC 8 ID \xff\x00\x00\nEI Q".to_vec(),
+    ));
+    let page_id = source.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => Object::Reference(pages_id),
+        "MediaBox" => Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(100),
+            Object::Integer(100),
+        ]),
+        "Resources" => Object::Dictionary(resources),
+        "Contents" => Object::Reference(content_id),
+    });
+    source.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            "Count" => Object::Integer(1),
+        }),
+    );
+    let catalog_id = source.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => Object::Reference(pages_id),
+    });
+    source.trailer.set("Root", catalog_id);
+    let mut bytes = Vec::new();
+    source.save_to(&mut bytes).expect("save");
+
+    let mut document = PdfDocument::open_bytes(bytes, PdfReadOptions::default()).expect("open");
+    let page = document.load_page(0).expect("page");
+
+    fn find_image(group: &Group) -> Option<&ImageElement> {
+        for child in &group.children {
+            match child {
+                Element::Group(group) => {
+                    if let Some(image) = find_image(group) {
+                        return Some(image);
+                    }
+                }
+                Element::Image(image) => return Some(image),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    let image = find_image(&page.content.root).expect("inline image should be read");
+    assert_eq!(image.image.pixel_width, 1);
+    assert_eq!(image.image.pixel_height, 1);
+    assert_eq!(image.image.format, ImageFormat::Png);
+
+    let decoder = png::Decoder::new(std::io::Cursor::new(image.image.encoded.to_vec()));
+    let mut reader = decoder.read_info().expect("png info");
+    let mut buffer = vec![0; reader.output_buffer_size().expect("buffer size")];
+    let info = reader.next_frame(&mut buffer).expect("png frame");
+    assert_eq!(info.width, 1);
+    assert_eq!(info.height, 1);
+    assert_eq!(&buffer[..4], &[255, 0, 0, 255]);
+}

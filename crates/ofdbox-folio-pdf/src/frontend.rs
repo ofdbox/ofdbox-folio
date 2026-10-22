@@ -731,7 +731,12 @@ impl Builder<'_> {
                         }
                     }
                 }
-                b"BI" | b"ID" | b"EI" => {}
+                b"BI" => {
+                    if let Some(Object::Stream(stream)) = operands.first() {
+                        self.draw_image_stream(stream, scene, state)?;
+                    }
+                }
+                b"ID" | b"EI" => {}
                 _ => {}
             }
         }
@@ -1031,7 +1036,7 @@ impl Builder<'_> {
         else {
             return Ok(());
         };
-        let Ok(stream) = object.as_stream() else {
+        let Ok(stream) = object.as_stream().cloned() else {
             return Ok(());
         };
         let subtype = stream
@@ -1088,21 +1093,22 @@ impl Builder<'_> {
         if subtype != b"Image" {
             return Ok(());
         }
-        let Some(width) = stream
-            .dict
-            .get(b"Width")
-            .ok()
-            .and_then(object_number)
-            .filter(|width| *width > 0.0)
+        self.draw_image_stream(&stream, scene, state)
+    }
+
+    /// 绘制图片流；XObject 与内联图片共用。
+    fn draw_image_stream(
+        &mut self,
+        stream: &lopdf::Stream,
+        scene: &mut Scene,
+        state: &State,
+    ) -> Result<(), PdfError> {
+        let Some(width) = stream_number(&stream.dict, b"Width", b"W").filter(|width| *width > 0.0)
         else {
             return Ok(());
         };
-        let Some(height) = stream
-            .dict
-            .get(b"Height")
-            .ok()
-            .and_then(object_number)
-            .filter(|height| *height > 0.0)
+        let Some(height) =
+            stream_number(&stream.dict, b"Height", b"H").filter(|height| *height > 0.0)
         else {
             return Ok(());
         };
@@ -1110,15 +1116,11 @@ impl Builder<'_> {
             self.diagnostic(DiagnosticCode::LimitExceeded, "PDF 图片超过像素限制");
             return Ok(());
         }
-        let filter = stream
-            .dict
-            .get(b"Filter")
-            .ok()
-            .and_then(|object| match object {
-                Object::Name(name) => Some(name.as_slice()),
-                Object::Array(values) => values.first().and_then(|value| value.as_name().ok()),
-                _ => None,
-            });
+        let filter = stream_value(&stream.dict, b"Filter", b"F").and_then(|object| match object {
+            Object::Name(name) => Some(name.as_slice()),
+            Object::Array(values) => values.first().and_then(|value| value.as_name().ok()),
+            _ => None,
+        });
         let (format, bytes) = if filter == Some(b"DCTDecode") {
             (ImageFormat::Jpeg, Arc::<[u8]>::from(stream.content.clone()))
         } else if filter == Some(b"JPXDecode") {
@@ -1445,10 +1447,7 @@ impl Builder<'_> {
 
     /// 解码 CCITT G3/G4 传真编码，并转成 RGBA PNG。
     fn ccitt_image(&self, stream: &lopdf::Stream, width: u32, height: u32) -> Option<Vec<u8>> {
-        let params = stream
-            .dict
-            .get(b"DecodeParms")
-            .ok()
+        let params = stream_value(&stream.dict, b"DecodeParms", b"DP")
             .and_then(|object| self.resolve(object))
             .and_then(|object| match object {
                 Object::Dictionary(dictionary) => Some(dictionary.clone()),
@@ -1484,19 +1483,11 @@ impl Builder<'_> {
 
     /// 把 8 位、无预测器的原始像素编码成 RGBA PNG。
     fn raw_image_rgba(&self, stream: &lopdf::Stream, width: u32, height: u32) -> Option<Vec<u8>> {
-        let bits = stream
-            .dict
-            .get(b"BitsPerComponent")
-            .ok()
-            .and_then(object_number)
-            .unwrap_or(8.0);
+        let bits = stream_number(&stream.dict, b"BitsPerComponent", b"BPC").unwrap_or(8.0);
         if bits != 8.0 {
             return None;
         }
-        let colorspace = stream
-            .dict
-            .get(b"ColorSpace")
-            .ok()
+        let colorspace = stream_value(&stream.dict, b"ColorSpace", b"CS")
             .and_then(|object| self.color_space(object))?;
         let data = stream
             .decompressed_content()
@@ -1940,6 +1931,21 @@ fn cmyk_operands(operands: &[Object]) -> Option<Rgba> {
             255,
         )
     })
+}
+
+fn stream_value<'a>(
+    dictionary: &'a Dictionary,
+    name: &[u8],
+    abbreviated: &[u8],
+) -> Option<&'a Object> {
+    dictionary
+        .get(name)
+        .ok()
+        .or_else(|| dictionary.get(abbreviated).ok())
+}
+
+fn stream_number(dictionary: &Dictionary, name: &[u8], abbreviated: &[u8]) -> Option<f64> {
+    stream_value(dictionary, name, abbreviated).and_then(object_number)
 }
 
 fn object_number(object: &Object) -> Option<f64> {
