@@ -120,6 +120,14 @@ pub trait DocumentSource {
 
     /// 读取附件字节。
     fn load_attachment(&mut self, id: AttachmentId) -> Result<std::sync::Arc<[u8]>, PageError>;
+
+    /// 文档声明的字体名称；不支持时返回空列表。
+    fn font_names(&mut self) -> Result<Vec<String>, PageError> {
+        Ok(Vec::new())
+    }
+
+    /// 清空源内部缓存；字体或策略变化后由阅读器调用。
+    fn clear_caches(&mut self) {}
 }
 
 #[cfg(test)]

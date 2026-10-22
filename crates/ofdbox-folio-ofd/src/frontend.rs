@@ -1484,8 +1484,8 @@ impl Builder<'_> {
     fn font(&mut self, id: &str) -> Option<ResolvedFont> {
         let resource = self.resources.fonts.get(id).cloned()?;
         let key = format!("{}/{id}", resource.dir);
-        if let Some(cached) = self.font_cache.get(&key) {
-            return cached.clone();
+        if let Some(Some(cached)) = self.font_cache.get(&key) {
+            return Some(cached.clone());
         }
         let embedded = resource.file.as_deref().and_then(|file| {
             read_resource(self.package, &resource.dir, resource.base.as_deref(), file).ok()

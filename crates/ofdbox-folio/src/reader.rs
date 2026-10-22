@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::sync::Arc;
 
@@ -280,6 +281,23 @@ impl Document {
         Ok(self.page(index)?.text.plain_text())
     }
 
+    /// 把页面内的字符偏移转换为文本位置。
+    ///
+    /// `char_offset` 按页面文本项的逻辑顺序累计，超出范围时返回页末位置。
+    pub fn text_position(&mut self, page: usize, char_offset: u32) -> Result<TextPosition, Error> {
+        let page = self.page(page)?;
+        let layer = &page.text;
+        let mut remaining = char_offset;
+        for (index, item) in layer.items.iter().enumerate() {
+            let length = item.run.char_count() as u32;
+            if remaining <= length {
+                return Ok(TextPosition::new(layer.page, index as u32, remaining));
+            }
+            remaining -= length;
+        }
+        Ok(layer.end_position())
+    }
+
     /// 跨页搜索；回调返回 `false` 时提前停止。
     ///
     /// 返回已访问的命中数量。页面按需加载并进入缓存。
@@ -392,6 +410,12 @@ impl Document {
     /// 清空页面缓存。
     pub fn clear_cache(&mut self) {
         self.cache.clear();
+        self.source.clear_caches();
+    }
+
+    /// 文档声明的字体名称。
+    pub fn font_names(&mut self) -> Result<Vec<String>, Error> {
+        Ok(self.source.font_names()?)
     }
 }
 

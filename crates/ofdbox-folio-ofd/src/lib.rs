@@ -9,7 +9,8 @@
 mod frontend;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::sync::Arc;
 
@@ -205,6 +206,41 @@ impl DocumentSource for OfdDocument {
 
     fn load_attachment(&mut self, _id: AttachmentId) -> Result<Arc<[u8]>, PageError> {
         Err(PageError::Unsupported("附件读取尚未实现".to_owned()))
+    }
+
+    fn font_names(&mut self) -> Result<Vec<String>, PageError> {
+        let mut package = self.package.borrow_mut();
+        let document = package
+            .parse_document()
+            .map_err(|error| PageError::Decode(error.to_string()))?;
+        let mut locations = Vec::new();
+        if let Some(common) = document.common_data() {
+            locations.extend(common.public_res().map(str::to_owned));
+            locations.extend(common.document_res().map(str::to_owned));
+        }
+        let mut names = BTreeSet::new();
+        for location in locations {
+            let resources = package
+                .parse_res_from_document(&location)
+                .map_err(|error| PageError::Decode(error.to_string()))?;
+            for font in resources.fonts() {
+                for name in [font.font_name(), font.family_name()].into_iter().flatten() {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        names.insert(name.to_owned());
+                    }
+                }
+            }
+        }
+        Ok(names.into_iter().collect())
+    }
+
+    fn clear_caches(&mut self) {
+        self.package.borrow_mut().clear_cache();
+        self.font_cache.clear();
+        if let Ok(mut infos) = self.page_infos.try_borrow_mut() {
+            infos.fill(None);
+        }
     }
 }
 
