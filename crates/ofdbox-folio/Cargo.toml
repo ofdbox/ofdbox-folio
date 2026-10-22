@@ -1,0 +1,32 @@
+[package]
+name = "ofdbox-folio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+description = "OFDBox Folio 多格式文档引擎门面。"
+keywords = ["ofd", "pdf", "docx", "document", "layout"]
+categories = ["text-processing", "graphics"]
+
+[dependencies]
+ofdbox-folio-ir.workspace = true
+ofdbox-folio-layout = { workspace = true, optional = true }
+ofdbox-folio-render = { workspace = true, optional = true }
+ofdbox-folio-ofd = { workspace = true, optional = true }
+ofdbox-folio-pdf = { workspace = true, optional = true }
+ofdbox-folio-docx = { workspace = true, optional = true }
+thiserror.workspace = true
+
+[features]
+default = ["ofd", "pdf", "docx", "layout", "cpu"]
+ofd = ["dep:ofdbox-folio-ofd"]
+pdf = ["dep:ofdbox-folio-pdf"]
+docx = ["dep:ofdbox-folio-docx"]
+layout = ["dep:ofdbox-folio-layout"]
+cpu = ["dep:ofdbox-folio-render"]
+
+[lints]
+workspace = true

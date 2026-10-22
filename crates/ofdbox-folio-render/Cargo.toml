@@ -1,0 +1,19 @@
+[package]
+name = "ofdbox-folio-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+description = "OFDBox Folio 的 Fixed IR 渲染与缓存。"
+keywords = ["rendering", "raster", "document", "scene"]
+categories = ["graphics"]
+
+[dependencies]
+ofdbox-folio-ir.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

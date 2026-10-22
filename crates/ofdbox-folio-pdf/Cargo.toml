@@ -1,0 +1,20 @@
+[package]
+name = "ofdbox-folio-pdf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+description = "OFDBox Folio 的 PDF 与 Fixed IR 读写适配。"
+keywords = ["pdf", "document", "reader", "writer"]
+categories = ["parser-implementations", "text-processing"]
+
+[dependencies]
+ofdbox-folio-ir.workspace = true
+lopdf.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "ofdbox-folio-layout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+description = "OFDBox Folio 的 Flow IR 到 Fixed IR 单向排版引擎。"
+keywords = ["layout", "typesetting", "document", "pagination"]
+categories = ["text-processing", "graphics"]
+
+[dependencies]
+ofdbox-folio-ir.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
