@@ -25,6 +25,7 @@ ttf-parser.workspace = true
 
 [dev-dependencies]
 flate2.workspace = true
+lopdf.workspace = true
 png.workspace = true
 ttf-parser.workspace = true
 

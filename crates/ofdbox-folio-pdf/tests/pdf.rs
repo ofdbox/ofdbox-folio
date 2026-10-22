@@ -293,3 +293,165 @@ fn embeds_and_reads_text() {
     let page = reader.load_page(0).expect("page");
     assert!(page.text.plain_text().contains('A'));
 }
+
+#[test]
+fn reads_gradient_shading() {
+    let mut scene = scene();
+    let mut path = Path::new();
+    path.move_to(Point::new(10.0, 10.0));
+    path.line_to(Point::new(90.0, 10.0));
+    path.line_to(Point::new(90.0, 90.0));
+    path.close();
+    scene.root.children.push(Element::Path(PathElement {
+        path: Arc::new(path),
+        transform: Matrix::IDENTITY,
+        fill: Some(Paint::LinearGradient(LinearGradient {
+            start: Point::new(10.0, 50.0),
+            end: Point::new(90.0, 50.0),
+            stops: vec![
+                GradientStop {
+                    offset: 0.0,
+                    color: Rgba::from_rgb(255, 0, 0),
+                },
+                GradientStop {
+                    offset: 1.0,
+                    color: Rgba::from_rgb(0, 0, 255),
+                },
+            ],
+            extend: GradientExtend::Pad,
+        })),
+        stroke: None,
+        rule: FillRule::NonZero,
+    }));
+    let pdf = write_fixed(&fixed(scene), &PdfOptions::default()).expect("pdf");
+    let mut document = PdfDocument::open_bytes(pdf, PdfReadOptions::default()).expect("open");
+    let page = document.load_page(0).expect("page");
+
+    fn find_gradient(group: &Group) -> Option<Paint> {
+        for child in &group.children {
+            match child {
+                Element::Group(group) => {
+                    if let Some(paint) = find_gradient(group) {
+                        return Some(paint);
+                    }
+                }
+                Element::Path(path) => {
+                    if let Some(paint @ Paint::LinearGradient(_)) = &path.fill {
+                        return Some(paint.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    let Some(Paint::LinearGradient(gradient)) = find_gradient(&page.content.root) else {
+        panic!("gradient shading should be read back");
+    };
+    assert_eq!(gradient.start, Point::new(10.0, 50.0));
+    assert_eq!(gradient.end, Point::new(90.0, 50.0));
+    assert!(gradient.stops.len() >= 2);
+    assert!(gradient.stops[0].color.r > 240);
+    assert!(gradient.stops[0].color.b < 20);
+    let last = gradient.stops.last().expect("last stop");
+    assert!(last.color.b > 240);
+    assert!(last.color.r < 20);
+}
+
+#[test]
+fn reads_shading_pattern_fill() {
+    use lopdf::{Document as SourceDocument, Object, Stream, dictionary};
+
+    let mut source = SourceDocument::with_version("1.7");
+    let pages_id = source.new_object_id();
+    let function_id = source.add_object(dictionary! {
+        "FunctionType" => Object::Integer(2),
+        "Domain" => Object::Array(vec![Object::Integer(0), Object::Integer(1)]),
+        "C0" => Object::Array(vec![Object::Integer(1), Object::Integer(0), Object::Integer(0)]),
+        "C1" => Object::Array(vec![Object::Integer(0), Object::Integer(0), Object::Integer(1)]),
+        "N" => Object::Integer(1),
+    });
+    let shading_id = source.add_object(dictionary! {
+        "ShadingType" => Object::Integer(2),
+        "ColorSpace" => Object::Name(b"DeviceRGB".to_vec()),
+        "Coords" => Object::Array(vec![
+            Object::Integer(10),
+            Object::Integer(10),
+            Object::Integer(90),
+            Object::Integer(10),
+        ]),
+        "Extend" => Object::Array(vec![Object::Boolean(true), Object::Boolean(true)]),
+        "Function" => Object::Reference(function_id),
+    });
+    let pattern_id = source.add_object(dictionary! {
+        "PatternType" => Object::Integer(2),
+        "Shading" => Object::Reference(shading_id),
+    });
+    let resources = dictionary! {
+        "Pattern" => dictionary! {
+            "P1" => Object::Reference(pattern_id),
+        },
+    };
+    let content_id = source.add_object(Stream::new(
+        dictionary! {},
+        b"q /Pattern cs /P1 scn 10 10 80 80 re f Q".to_vec(),
+    ));
+    let page_id = source.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => Object::Reference(pages_id),
+        "MediaBox" => Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(100),
+            Object::Integer(100),
+        ]),
+        "Resources" => Object::Dictionary(resources),
+        "Contents" => Object::Reference(content_id),
+    });
+    source.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            "Count" => Object::Integer(1),
+        }),
+    );
+    let catalog_id = source.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => Object::Reference(pages_id),
+    });
+    source.trailer.set("Root", catalog_id);
+    let mut bytes = Vec::new();
+    source.save_to(&mut bytes).expect("save");
+
+    let mut document = PdfDocument::open_bytes(bytes, PdfReadOptions::default()).expect("open");
+    let page = document.load_page(0).expect("page");
+
+    fn find_gradient(group: &Group) -> Option<Paint> {
+        for child in &group.children {
+            match child {
+                Element::Group(group) => {
+                    if let Some(paint) = find_gradient(group) {
+                        return Some(paint);
+                    }
+                }
+                Element::Path(path) => {
+                    if let Some(paint @ Paint::LinearGradient(_)) = &path.fill {
+                        return Some(paint.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    let Some(Paint::LinearGradient(gradient)) = find_gradient(&page.content.root) else {
+        panic!("shading pattern should be read as a gradient fill");
+    };
+    assert_eq!(gradient.start, Point::new(10.0, 10.0));
+    assert_eq!(gradient.end, Point::new(90.0, 10.0));
+    assert!(gradient.stops[0].color.r > 240);
+    assert!(gradient.stops.last().expect("last").color.b > 240);
+}

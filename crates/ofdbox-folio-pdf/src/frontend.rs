@@ -12,10 +12,10 @@ use lopdf::{Dictionary, Document, Object, ObjectId};
 
 use ofdbox_folio_ir::{
     Clip, Cluster, Diagnostic, DiagnosticCode, Element, FillRule, FontAsset, FontProvider,
-    FontRequest, Glyph, GlyphRun, Group, ImageAsset, ImageElement, ImageFormat, LineCap, LineJoin,
-    Matrix, Page, PageInfo, Paint, Path, PathElement, PathSegment, Point, Rect, ResourceStore,
-    Rgba, Rotation, Scene, Size, StrokePaint, StrokeStyle, TextElement, TextItem, TextLayer,
-    TextLine,
+    FontRequest, Glyph, GlyphRun, GradientExtend, GradientStop, Group, ImageAsset, ImageElement,
+    ImageFormat, LineCap, LineJoin, LinearGradient, Matrix, Page, PageInfo, Paint, Path,
+    PathElement, PathSegment, Point, RadialGradient, Rect, ResourceStore, Rgba, Rotation, Scene,
+    Size, StrokePaint, StrokeStyle, TextElement, TextItem, TextLayer, TextLine,
 };
 
 use crate::error::{PdfError, parse_error};
@@ -66,6 +66,10 @@ struct State {
     ctm: Matrix,
     fill: Paint,
     stroke: Paint,
+    fill_pattern: Option<Vec<u8>>,
+    stroke_pattern: Option<Vec<u8>>,
+    fill_space: Option<Vec<u8>>,
+    stroke_space: Option<Vec<u8>>,
     style: StrokeStyle,
     fill_alpha: f32,
     stroke_alpha: f32,
@@ -87,6 +91,10 @@ impl Default for State {
             ctm: Matrix::IDENTITY,
             fill: Paint::Color(Rgba::BLACK),
             stroke: Paint::Color(Rgba::BLACK),
+            fill_pattern: None,
+            stroke_pattern: None,
+            fill_space: None,
+            stroke_space: None,
             style: StrokeStyle::default(),
             fill_alpha: 1.0,
             stroke_alpha: 1.0,
@@ -396,8 +404,10 @@ impl Builder<'_> {
                     if let Some(color) = rgb_operands(operands) {
                         if op == b"rg" {
                             state.fill = Paint::Color(color);
+                            state.fill_pattern = None;
                         } else {
                             state.stroke = Paint::Color(color);
+                            state.stroke_pattern = None;
                         }
                     }
                 }
@@ -407,8 +417,10 @@ impl Builder<'_> {
                         let color = Rgba::new(value, value, value, 255);
                         if op == b"g" {
                             state.fill = Paint::Color(color);
+                            state.fill_pattern = None;
                         } else {
                             state.stroke = Paint::Color(color);
+                            state.stroke_pattern = None;
                         }
                     }
                 }
@@ -416,8 +428,48 @@ impl Builder<'_> {
                     if let Some(color) = cmyk_operands(operands) {
                         if op == b"k" {
                             state.fill = Paint::Color(color);
+                            state.fill_pattern = None;
                         } else {
                             state.stroke = Paint::Color(color);
+                            state.stroke_pattern = None;
+                        }
+                    }
+                }
+                b"cs" | b"CS" => {
+                    if let Some(name) = operands.first().and_then(object_name) {
+                        if op == b"cs" {
+                            state.fill_space = Some(name.to_vec());
+                            state.fill_pattern = None;
+                        } else {
+                            state.stroke_space = Some(name.to_vec());
+                            state.stroke_pattern = None;
+                        }
+                    }
+                }
+                b"sc" | b"scn" | b"SC" | b"SCN" => {
+                    let fill = matches!(op, b"sc" | b"scn");
+                    let space = if fill {
+                        state.fill_space.as_deref()
+                    } else {
+                        state.stroke_space.as_deref()
+                    };
+                    let pattern = operands
+                        .last()
+                        .and_then(object_name)
+                        .filter(|_| space == Some(b"Pattern"));
+                    if let Some(name) = pattern {
+                        if fill {
+                            state.fill_pattern = Some(name.to_vec());
+                        } else {
+                            state.stroke_pattern = Some(name.to_vec());
+                        }
+                    } else if let Some(color) = components_operands(operands) {
+                        if fill {
+                            state.fill = Paint::Color(color);
+                            state.fill_pattern = None;
+                        } else {
+                            state.stroke = Paint::Color(color);
+                            state.stroke_pattern = None;
                         }
                     }
                 }
@@ -509,11 +561,9 @@ impl Builder<'_> {
                         push_clip(state, clip);
                     }
                     if !path.is_empty() {
-                        let fill = fill
-                            .then(|| paint_with_alpha(&state.fill, state.fill_alpha))
-                            .flatten();
+                        let fill = fill.then(|| self.fill_paint(state, resources)).flatten();
                         let stroke = stroke
-                            .then(|| paint_with_alpha(&state.stroke, state.stroke_alpha))
+                            .then(|| self.stroke_paint(state, resources))
                             .flatten()
                             .map(|paint| StrokePaint {
                                 paint,
@@ -601,7 +651,7 @@ impl Builder<'_> {
                 }
                 b"Tj" => {
                     if let Some(Object::String(bytes, _)) = operands.first() {
-                        self.write_text(bytes, scene, state);
+                        self.write_text(bytes, resources, scene, state);
                     }
                 }
                 b"'" => {
@@ -609,7 +659,7 @@ impl Builder<'_> {
                         Matrix::translate(0.0, -state.leading).then(state.line_matrix);
                     state.text_matrix = state.line_matrix;
                     if let Some(Object::String(bytes, _)) = operands.first() {
-                        self.write_text(bytes, scene, state);
+                        self.write_text(bytes, resources, scene, state);
                     }
                 }
                 b"\"" => {
@@ -623,7 +673,7 @@ impl Builder<'_> {
                         Matrix::translate(0.0, -state.leading).then(state.line_matrix);
                     state.text_matrix = state.line_matrix;
                     if let Some(Object::String(bytes, _)) = operands.get(2) {
-                        self.write_text(bytes, scene, state);
+                        self.write_text(bytes, resources, scene, state);
                     }
                 }
                 b"TJ" => {
@@ -631,7 +681,7 @@ impl Builder<'_> {
                         for item in items {
                             match item {
                                 Object::String(bytes, _) => {
-                                    self.write_text(bytes, scene, state);
+                                    self.write_text(bytes, resources, scene, state);
                                 }
                                 other => {
                                     if let Some(adjust) = object_number(other) {
@@ -653,7 +703,35 @@ impl Builder<'_> {
                         self.draw_xobject(name, resources, scene, state, depth)?;
                     }
                 }
-                b"sh" | b"BI" | b"ID" | b"EI" => {}
+                b"sh" => {
+                    if let Some(name) = operands.first().and_then(object_name) {
+                        match self.shading_paint(name, resources) {
+                            Some(paint) => {
+                                let path =
+                                    Rect::new(-10_000.0, -10_000.0, 20_000.0, 20_000.0).to_path();
+                                self.push_element(
+                                    scene,
+                                    state,
+                                    Element::Path(PathElement {
+                                        path: Arc::new(path),
+                                        transform: Matrix::IDENTITY,
+                                        fill: Some(paint),
+                                        stroke: None,
+                                        rule: FillRule::NonZero,
+                                    }),
+                                );
+                            }
+                            None => self.diagnostic(
+                                DiagnosticCode::Paint,
+                                format!(
+                                    "PDF Shading 缺失或暂不支持: {}",
+                                    String::from_utf8_lossy(name)
+                                ),
+                            ),
+                        }
+                    }
+                }
+                b"BI" | b"ID" | b"EI" => {}
                 _ => {}
             }
         }
@@ -784,7 +862,13 @@ impl Builder<'_> {
         }))
     }
 
-    fn write_text(&mut self, bytes: &[u8], scene: &mut Scene, state: &mut State) {
+    fn write_text(
+        &mut self,
+        bytes: &[u8],
+        resources: &Dictionary,
+        scene: &mut Scene,
+        state: &mut State,
+    ) {
         let Some(font_state) = state.font.clone() else {
             return;
         };
@@ -879,10 +963,10 @@ impl Builder<'_> {
         // PDF 文本默认只填充；只有 Tr 指定时才描边。模式 3/7 不可见，
         // 但仍保留文本层，供搜索与选择使用。
         let fill = matches!(state.render_mode, 0 | 2 | 4 | 6)
-            .then(|| paint_with_alpha(&state.fill, state.fill_alpha))
+            .then(|| self.fill_paint(state, resources))
             .flatten();
         let stroke = matches!(state.render_mode, 1 | 2 | 5 | 6)
-            .then(|| paint_with_alpha(&state.stroke, state.stroke_alpha))
+            .then(|| self.stroke_paint(state, resources))
             .flatten()
             .map(|paint| StrokePaint {
                 paint,
@@ -1089,6 +1173,276 @@ impl Builder<'_> {
         Ok(())
     }
 
+    fn fill_paint(&self, state: &State, resources: &Dictionary) -> Option<Paint> {
+        match &state.fill_pattern {
+            Some(name) => self.pattern_paint(name, resources),
+            None => paint_with_alpha(&state.fill, state.fill_alpha),
+        }
+    }
+
+    fn stroke_paint(&self, state: &State, resources: &Dictionary) -> Option<Paint> {
+        match &state.stroke_pattern {
+            Some(name) => self.pattern_paint(name, resources),
+            None => paint_with_alpha(&state.stroke, state.stroke_alpha),
+        }
+    }
+
+    /// 着色图案（PatternType 2）。
+    fn pattern_paint(&self, name: &[u8], resources: &Dictionary) -> Option<Paint> {
+        let patterns = resources
+            .get(b"Pattern")
+            .ok()
+            .and_then(|object| self.resolve(object))
+            .and_then(|object| object.as_dict().ok())?;
+        let object = patterns.get(name).ok()?;
+        let dictionary = self
+            .resolve(object)
+            .and_then(|object| object.as_dict().ok())?;
+        let pattern_type = dictionary
+            .get(b"PatternType")
+            .ok()
+            .and_then(|object| self.resolve_number(object))? as i64;
+        if pattern_type != 2 {
+            return None;
+        }
+        let shading = dictionary.get(b"Shading").ok()?;
+        let shading = self
+            .resolve(shading)
+            .and_then(|object| object.as_dict().ok())?;
+        let paint = self.shading_from_dict(shading)?;
+        let Some(matrix) = dictionary
+            .get(b"Matrix")
+            .ok()
+            .and_then(|object| self.resolve(object))
+            .and_then(|object| object.as_array().ok())
+            .and_then(|values| matrix_from_values(values))
+        else {
+            return Some(paint);
+        };
+        Some(transform_paint(paint, matrix))
+    }
+
+    /// 把 PDF Shading 资源转换为 Fixed IR 渐变。
+    fn shading_paint(&self, name: &[u8], resources: &Dictionary) -> Option<Paint> {
+        let shadings = resources
+            .get(b"Shading")
+            .ok()
+            .and_then(|object| self.resolve(object))
+            .and_then(|object| object.as_dict().ok())?;
+        let object = shadings.get(name).ok()?;
+        let dictionary = self
+            .resolve(object)
+            .and_then(|object| object.as_dict().ok())?;
+        self.shading_from_dict(dictionary)
+    }
+
+    fn shading_from_dict(&self, dictionary: &Dictionary) -> Option<Paint> {
+        let shading_type = dictionary
+            .get(b"ShadingType")
+            .ok()
+            .and_then(|object| self.resolve_number(object))? as i64;
+        let coords = self.number_array(dictionary, b"Coords")?;
+        let function = dictionary.get(b"Function").ok()?;
+        let stops = self.shading_stops(function)?;
+        match shading_type {
+            2 if coords.len() >= 4 => Some(Paint::LinearGradient(LinearGradient {
+                start: Point::new(coords[0], coords[1]),
+                end: Point::new(coords[2], coords[3]),
+                stops,
+                extend: GradientExtend::Pad,
+            })),
+            3 if coords.len() >= 6 => Some(Paint::RadialGradient(RadialGradient {
+                start_center: Point::new(coords[0], coords[1]),
+                start_radius: coords[2].max(0.0),
+                end_center: Point::new(coords[3], coords[4]),
+                end_radius: coords[5].max(0.0),
+                stops,
+                extend: GradientExtend::Pad,
+                eccentricity: 0.0,
+                angle: 0.0,
+            })),
+            _ => None,
+        }
+    }
+
+    fn shading_stops(&self, function: &Object) -> Option<Vec<GradientStop>> {
+        const SAMPLES: usize = 32;
+        let mut stops = Vec::with_capacity(SAMPLES + 1);
+        for index in 0..=SAMPLES {
+            let t = index as f64 / SAMPLES as f64;
+            let values = self.eval_function(function, t)?;
+            stops.push(GradientStop {
+                offset: t,
+                color: rgba_from_components(&values)?,
+            });
+        }
+        Some(stops)
+    }
+
+    fn eval_function(&self, object: &Object, t: f64) -> Option<Vec<f64>> {
+        let object = self.resolve(object)?;
+        match object {
+            Object::Stream(stream) => self.eval_sampled_function(stream, t),
+            Object::Dictionary(dictionary) => self.eval_function_dict(dictionary, t),
+            _ => None,
+        }
+    }
+
+    fn eval_function_dict(&self, dictionary: &Dictionary, t: f64) -> Option<Vec<f64>> {
+        let function_type = dictionary
+            .get(b"FunctionType")
+            .ok()
+            .and_then(|object| self.resolve_number(object))? as i64;
+        let domain = self
+            .number_array(dictionary, b"Domain")
+            .unwrap_or_else(|| vec![0.0, 1.0]);
+        if domain.len() < 2 || domain[1] <= domain[0] {
+            return None;
+        }
+        let input = t.clamp(domain[0], domain[1]);
+        match function_type {
+            2 => {
+                let c0 = self.number_array(dictionary, b"C0")?;
+                let c1 = self.number_array(dictionary, b"C1")?;
+                if c0.len() != c1.len() {
+                    return None;
+                }
+                let exponent = dictionary
+                    .get(b"N")
+                    .ok()
+                    .and_then(|object| self.resolve_number(object))
+                    .unwrap_or(1.0);
+                let position = (input - domain[0]) / (domain[1] - domain[0]);
+                let position = if (exponent - 1.0).abs() < f64::EPSILON {
+                    position
+                } else {
+                    position.max(0.0).powf(exponent)
+                };
+                Some(
+                    c0.iter()
+                        .zip(&c1)
+                        .map(|(start, end)| start + (end - start) * position)
+                        .collect(),
+                )
+            }
+            3 => {
+                let bounds = self.number_array(dictionary, b"Bounds").unwrap_or_default();
+                let encode = self.number_array(dictionary, b"Encode").unwrap_or_default();
+                let functions = dictionary
+                    .get(b"Functions")
+                    .ok()
+                    .and_then(|object| self.resolve(object))
+                    .and_then(|object| object.as_array().ok())?;
+                if functions.is_empty() {
+                    return None;
+                }
+                let mut index = 0;
+                while index < bounds.len() && input > bounds[index] {
+                    index += 1;
+                }
+                let low = if index == 0 {
+                    domain[0]
+                } else {
+                    bounds[index - 1]
+                };
+                let high = bounds.get(index).copied().unwrap_or(domain[1]);
+                let local = if high > low {
+                    (input - low) / (high - low)
+                } else {
+                    0.0
+                };
+                let (encode_start, encode_end) = if encode.len() >= 2 * index + 2 {
+                    (encode[2 * index], encode[2 * index + 1])
+                } else {
+                    (0.0, 1.0)
+                };
+                let sub_t = encode_start + (encode_end - encode_start) * local;
+                self.eval_function(functions.get(index)?, sub_t)
+            }
+            _ => None,
+        }
+    }
+
+    /// 采样函数（FunctionType 0）：一维输入、单通道输出。
+    fn eval_sampled_function(&self, stream: &lopdf::Stream, t: f64) -> Option<Vec<f64>> {
+        let function_type = stream
+            .dict
+            .get(b"FunctionType")
+            .ok()
+            .and_then(|object| self.resolve_number(object))? as i64;
+        if function_type != 0 {
+            return None;
+        }
+        let size = self.number_array(&stream.dict, b"Size")?;
+        if size.is_empty() || size.iter().any(|value| *value < 1.0) {
+            return None;
+        }
+        let count = size[0] as usize;
+        let domain = self
+            .number_array(&stream.dict, b"Domain")
+            .unwrap_or_else(|| vec![0.0, 1.0]);
+        if domain.len() < 2 || domain[1] <= domain[0] {
+            return None;
+        }
+        let encode = self
+            .number_array(&stream.dict, b"Encode")
+            .unwrap_or_else(|| vec![0.0, (count - 1) as f64]);
+        let decode = self
+            .number_array(&stream.dict, b"Decode")
+            .unwrap_or_else(|| vec![0.0, 1.0]);
+        let bits = stream
+            .dict
+            .get(b"BitsPerSample")
+            .ok()
+            .and_then(|object| self.resolve_number(object))
+            .unwrap_or(8.0) as usize;
+        let input = t.clamp(domain[0], domain[1]);
+        let position = if domain[1] > domain[0] {
+            (input - domain[0]) / (domain[1] - domain[0])
+        } else {
+            0.0
+        };
+        let sample = encode[0] + (encode[1] - encode[0]) * position;
+        let index = if size.len() == 1 {
+            (sample.round().max(0.0) as usize).min(count - 1)
+        } else {
+            // 多维采样函数取全零输入，得到常量输出。
+            0
+        };
+        let data = stream
+            .decompressed_content()
+            .unwrap_or_else(|_| stream.content.clone());
+        let raw = match bits {
+            8 => f64::from(*data.get(index)?) / 255.0,
+            16 => {
+                let bytes = data.get(index * 2..index * 2 + 2)?;
+                f64::from(u16::from_be_bytes([bytes[0], bytes[1]])) / 65535.0
+            }
+            _ => return None,
+        };
+        let value = decode[0] + (decode.get(1).copied().unwrap_or(1.0) - decode[0]) * raw;
+        Some(vec![value])
+    }
+
+    fn resolve_number(&self, object: &Object) -> Option<f64> {
+        let object = self.resolve(object).unwrap_or(object);
+        object_number(object)
+    }
+
+    fn number_array(&self, dictionary: &Dictionary, key: &[u8]) -> Option<Vec<f64>> {
+        dictionary
+            .get(key)
+            .ok()
+            .and_then(|object| self.resolve(object))
+            .and_then(|object| object.as_array().ok())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| self.resolve_number(value))
+                    .collect()
+            })
+    }
+
     /// 解码 CCITT G3/G4 传真编码，并转成 RGBA PNG。
     fn ccitt_image(&self, stream: &lopdf::Stream, width: u32, height: u32) -> Option<Vec<u8>> {
         let params = stream
@@ -1215,6 +1569,57 @@ impl Builder<'_> {
 
 fn push_clip(state: &mut State, clip: ClipState) {
     state.clips.push(clip);
+}
+
+/// 把图案矩阵应用到渐变坐标；非均匀缩放按平均比例近似半径。
+fn transform_paint(paint: Paint, matrix: Matrix) -> Paint {
+    match paint {
+        Paint::LinearGradient(mut gradient) => {
+            gradient.start = matrix.transform_point(gradient.start);
+            gradient.end = matrix.transform_point(gradient.end);
+            Paint::LinearGradient(gradient)
+        }
+        Paint::RadialGradient(mut gradient) => {
+            let scale = (matrix.a.hypot(matrix.b) + matrix.c.hypot(matrix.d)) * 0.5;
+            gradient.start_center = matrix.transform_point(gradient.start_center);
+            gradient.end_center = matrix.transform_point(gradient.end_center);
+            if scale.is_finite() && scale > 0.0 {
+                gradient.start_radius *= scale;
+                gradient.end_radius *= scale;
+            }
+            Paint::RadialGradient(gradient)
+        }
+        other => other,
+    }
+}
+
+fn rgba_from_components(values: &[f64]) -> Option<Rgba> {
+    let channel = |value: f64| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    match values.len() {
+        1 => {
+            let value = channel(values[0]);
+            Some(Rgba::new(value, value, value, 255))
+        }
+        3 => Some(Rgba::new(
+            channel(values[0]),
+            channel(values[1]),
+            channel(values[2]),
+            255,
+        )),
+        _ if values.len() >= 4 => {
+            let c = values[0].clamp(0.0, 1.0);
+            let m = values[1].clamp(0.0, 1.0);
+            let y = values[2].clamp(0.0, 1.0);
+            let k = values[3].clamp(0.0, 1.0);
+            Some(Rgba::new(
+                channel((1.0 - c) * (1.0 - k)),
+                channel((1.0 - m) * (1.0 - k)),
+                channel((1.0 - y) * (1.0 - k)),
+                255,
+            ))
+        }
+        _ => None,
+    }
 }
 
 fn paint_with_alpha(paint: &Paint, alpha: f32) -> Option<Paint> {
@@ -1478,6 +1883,31 @@ fn rect_operands(operands: &[Object]) -> Option<(f64, f64, f64, f64)> {
         .filter_map(object_number)
         .collect::<Vec<_>>();
     (values.len() >= 4).then(|| (values[0], values[1], values[2], values[3]))
+}
+
+fn components_operands(operands: &[Object]) -> Option<Rgba> {
+    let values = operands
+        .iter()
+        .filter_map(object_number)
+        .collect::<Vec<_>>();
+    match values.as_slice() {
+        [gray] => {
+            let value = (gray.clamp(0.0, 1.0) * 255.0).round() as u8;
+            Some(Rgba::new(value, value, value, 255))
+        }
+        [r, g, b] => Some(Rgba::new(
+            (r.clamp(0.0, 1.0) * 255.0).round() as u8,
+            (g.clamp(0.0, 1.0) * 255.0).round() as u8,
+            (b.clamp(0.0, 1.0) * 255.0).round() as u8,
+            255,
+        )),
+        [c, m, y, k] => {
+            let k = k.clamp(0.0, 1.0);
+            let channel = |value: f64| ((1.0 - value.clamp(0.0, 1.0)) * (1.0 - k) * 255.0) as u8;
+            Some(Rgba::new(channel(*c), channel(*m), channel(*y), 255))
+        }
+        _ => None,
+    }
 }
 
 fn rgb_operands(operands: &[Object]) -> Option<Rgba> {
