@@ -166,9 +166,9 @@ let page = source.load_page(0)?;
 let bytes = write_fixed(&fixed, &PdfOptions::default())?;
 ```
 
-读取覆盖路径、文本（Identity-H 与简单字体，`ToUnicode`、`Tr` 渲染模式、字距与水平缩放）、图片（含 CCITT G3/G4）、`sh` 着色与 PatternType 2 渐变图案、Form XObject、裁剪、透明度与页面旋转；`PdfDocument` 实现 `DocumentSource`，提供页面尺寸、文本层、字体名与资源表。写出覆盖路径、裁剪、图片、渐变、透明组、文字（嵌入 TrueType 字体并子集化，失败时退化为字形轮廓）、元数据与书签；JPEG 以 `DCTDecode` 原样嵌入，PNG/JBIG2/BMP 解码后以 `FlateDecode` 嵌入。
+读取覆盖路径、文本（Identity-H 与简单字体，`ToUnicode`、`Tr` 渲染模式、字距与水平缩放）、图片（含 CCITT G3/G4）、`sh` 着色与 PatternType 2 渐变图案、内联图片、Form XObject、裁剪、透明度、页面旋转、大纲与附件；`PdfDocument` 实现 `DocumentSource`，提供页面尺寸、文本层、字体名与资源表。写出覆盖路径、裁剪、图片、渐变、透明组、文字（嵌入 TrueType 字体并子集化，失败时退化为字形轮廓）、元数据与书签；JPEG 以 `DCTDecode` 原样嵌入，PNG/JBIG2/BMP 解码后以 `FlateDecode` 嵌入。
 
-已知限制：PatternType 1 分块图案、内联图片、JPEG2000、PDF 附件尚未读取；加密 PDF 返回 `Encrypted` 而不尝试密码解密；写出时 TIFF/CCITT 图片资源仍不支持（PDF 读取的 CCITT 会先解码为 PNG）。
+已知限制：PatternType 1 分块图案与 JPEG2000 尚未读取；加密 PDF 返回 `Encrypted` 而不尝试密码解密；写出时 TIFF/CCITT 图片资源仍不支持（PDF 读取的 CCITT 会先解码为 PNG）。
 
 ## GPU 后端
 

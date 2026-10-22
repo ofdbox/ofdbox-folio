@@ -7,6 +7,7 @@
 #![allow(clippy::too_many_lines)]
 
 mod backend;
+mod catalog;
 mod error;
 mod frontend;
 
@@ -44,6 +45,7 @@ pub struct PdfDocument {
     font_cache: HashMap<Vec<u8>, Option<Arc<frontend::FontState>>>,
     font_provider: Option<Box<dyn FontProvider>>,
     options: PdfReadOptions,
+    attachment_objects: Vec<(AttachmentId, ObjectId)>,
 }
 
 impl PdfDocument {
@@ -63,12 +65,14 @@ impl PdfDocument {
             return Err(PdfError::Encrypted);
         }
         let pages = frontend::page_ids(&document);
+        let outline = catalog::outline(&document, &pages);
+        let (attachments, attachment_objects) = catalog::attachments(&document);
         let info = DocumentInfo {
             format: SourceFormat::Pdf,
             metadata: metadata(&document),
             page_count: pages.len(),
-            outline: Vec::new(),
-            attachments: Vec::new(),
+            outline,
+            attachments,
         };
         Ok(Self {
             document,
@@ -78,6 +82,7 @@ impl PdfDocument {
             font_cache: HashMap::new(),
             font_provider,
             options,
+            attachment_objects,
         })
     }
 
@@ -144,8 +149,24 @@ impl DocumentSource for PdfDocument {
         .map_err(PageError::from)
     }
 
-    fn load_attachment(&mut self, _id: AttachmentId) -> Result<Arc<[u8]>, PageError> {
-        Err(PageError::Unsupported("PDF 附件读取尚未实现".to_owned()))
+    fn load_attachment(&mut self, id: AttachmentId) -> Result<Arc<[u8]>, PageError> {
+        let object = self
+            .attachment_objects
+            .iter()
+            .find(|(attachment, _)| *attachment == id)
+            .map(|(_, object)| *object)
+            .ok_or_else(|| PageError::Decode(format!("附件不存在: {}", id.get())))?;
+        let object = self
+            .document
+            .get_object(object)
+            .map_err(|error| PageError::Decode(error.to_string()))?;
+        let stream = object
+            .as_stream()
+            .map_err(|error| PageError::Decode(error.to_string()))?;
+        let bytes = stream
+            .decompressed_content()
+            .unwrap_or_else(|_| stream.content.clone());
+        Ok(Arc::from(bytes))
     }
 
     fn font_names(&mut self) -> Result<Vec<String>, PageError> {
@@ -236,7 +257,7 @@ fn metadata(document: &Document) -> Metadata {
 }
 
 /// 解码 PDF 文本字符串：UTF-16BE（带 BOM）或 PDFDocEncoding/latin-1。
-fn decode_pdf_string(bytes: &[u8]) -> String {
+pub(crate) fn decode_pdf_string(bytes: &[u8]) -> String {
     if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
         let units = rest
             .as_chunks::<2>()

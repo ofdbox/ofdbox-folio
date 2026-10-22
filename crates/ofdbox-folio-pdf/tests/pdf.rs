@@ -218,6 +218,14 @@ fn writes_metadata_and_outlines() {
     assert!(text.contains("/PageMode /UseOutlines"));
     assert!(text.contains("/Title (First)"));
     assert_eq!(text.matches("/Dest [").count(), 2);
+
+    let reader = PdfDocument::open_bytes(pdf, PdfReadOptions::default()).expect("read");
+    let outline = &reader.info().outline;
+    assert_eq!(outline.len(), 2);
+    assert_eq!(outline[0].title, "First");
+    assert_eq!(outline[0].destination.page, 0);
+    assert_eq!(outline[1].title, "Second");
+    assert_eq!(outline[1].destination.page, 1);
 }
 
 #[test]
@@ -525,4 +533,72 @@ fn reads_inline_image() {
     assert_eq!(info.width, 1);
     assert_eq!(info.height, 1);
     assert_eq!(&buffer[..4], &[255, 0, 0, 255]);
+}
+
+#[test]
+fn reads_attachments() {
+    use lopdf::{Document as SourceDocument, Object, Stream, dictionary};
+
+    let mut source = SourceDocument::with_version("1.7");
+    let pages_id = source.new_object_id();
+    let stream_id = source.add_object(Stream::new(
+        dictionary! {
+            "Type" => "EmbeddedFile",
+            "Subtype" => Object::Name(b"text#2Fplain".to_vec()),
+        },
+        b"hello".to_vec(),
+    ));
+    let filespec_id = source.add_object(dictionary! {
+        "Type" => "Filespec",
+        "F" => Object::String(b"readme.txt".to_vec(), lopdf::StringFormat::Literal),
+        "UF" => Object::String(b"readme.txt".to_vec(), lopdf::StringFormat::Literal),
+        "EF" => dictionary! { "F" => Object::Reference(stream_id) },
+    });
+    let names = dictionary! {
+        "EmbeddedFiles" => dictionary! {
+            "Names" => Object::Array(vec![
+                Object::String(b"readme.txt".to_vec(), lopdf::StringFormat::Literal),
+                Object::Reference(filespec_id),
+            ]),
+        },
+    };
+    let content_id = source.add_object(Stream::new(dictionary! {}, b"".to_vec()));
+    let page_id = source.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => Object::Reference(pages_id),
+        "MediaBox" => Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Integer(100),
+            Object::Integer(100),
+        ]),
+        "Contents" => Object::Reference(content_id),
+    });
+    source.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            "Count" => Object::Integer(1),
+        }),
+    );
+    let catalog_id = source.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => Object::Reference(pages_id),
+        "Names" => Object::Dictionary(names),
+    });
+    source.trailer.set("Root", catalog_id);
+    let mut bytes = Vec::new();
+    source.save_to(&mut bytes).expect("save");
+
+    let mut reader = PdfDocument::open_bytes(bytes, PdfReadOptions::default()).expect("open");
+    let attachments = reader.info().attachments.clone();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].name, "readme.txt");
+    assert_eq!(attachments[0].format.as_deref(), Some("text/plain"));
+    assert_eq!(attachments[0].size, 5);
+    let data = reader
+        .load_attachment(attachments[0].id)
+        .expect("attachment");
+    assert_eq!(&data[..], b"hello");
 }
