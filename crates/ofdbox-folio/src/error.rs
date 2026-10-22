@@ -16,6 +16,10 @@ pub enum Error {
     #[cfg(feature = "ofd")]
     #[error(transparent)]
     Ofd(#[from] ofdbox_folio_ofd::OfdError),
+    /// PDF 适配层错误。
+    #[cfg(feature = "pdf")]
+    #[error(transparent)]
+    Pdf(#[from] ofdbox_folio_pdf::PdfError),
     /// 渲染错误。
     #[cfg(feature = "cpu")]
     #[error(transparent)]

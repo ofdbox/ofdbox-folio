@@ -1,0 +1,295 @@
+//! PDF 读写集成测试。
+
+use std::io::Read as _;
+use std::sync::Arc;
+
+use ofdbox_folio_ir::{
+    Cluster, DocumentSource, Element, FillRule, FixedDocument, FontAsset, Glyph, GlyphRun,
+    GradientExtend, GradientStop, Group, ImageAsset, ImageElement, ImageFormat, LinearGradient,
+    Matrix, Metadata, Page, PageInfo, Paint, Path, PathElement, Point, Rect, Rgba, Rotation, Scene,
+    Size, TextElement,
+};
+use ofdbox_folio_pdf::{PdfBackend, PdfDocument, PdfOptions, PdfReadOptions, probe, write_fixed};
+
+fn scene() -> Scene {
+    Scene {
+        size: Size::new(100.0, 100.0),
+        root: Group::default(),
+        diagnostics: Vec::new(),
+    }
+}
+
+fn page(scene: Scene) -> Page {
+    Page::new(
+        PageInfo {
+            media_box: Rect::new(0.0, 0.0, 100.0, 100.0),
+            crop_box: Rect::new(0.0, 0.0, 100.0, 100.0),
+            rotation: Rotation::None,
+            label: None,
+        },
+        scene,
+    )
+}
+
+fn fixed(scene: Scene) -> FixedDocument {
+    let mut document = FixedDocument::default();
+    document.pages.push(page(scene));
+    document
+}
+
+fn rect_path(scene: &mut Scene) {
+    let mut path = Path::new();
+    path.move_to(Point::new(10.0, 10.0));
+    path.line_to(Point::new(90.0, 10.0));
+    path.line_to(Point::new(90.0, 90.0));
+    path.close();
+    scene.root.children.push(Element::Path(PathElement {
+        path: Arc::new(path),
+        transform: Matrix::IDENTITY,
+        fill: Some(Paint::Color(Rgba::from_rgb(255, 0, 0))),
+        stroke: None,
+        rule: FillRule::NonZero,
+    }));
+}
+
+fn pdf_text(pdf: &[u8]) -> String {
+    let mut text = String::from_utf8_lossy(pdf).into_owned();
+    let mut rest = pdf;
+    while let Some(start) = rest.windows(7).position(|window| window == b"stream\n") {
+        let body = &rest[start + 7..];
+        let Some(end) = body.windows(9).position(|window| window == b"endstream") else {
+            break;
+        };
+        let mut decoded = String::new();
+        if flate2::read::ZlibDecoder::new(&body[..end])
+            .read_to_string(&mut decoded)
+            .is_ok()
+        {
+            text.push_str(&decoded);
+        }
+        rest = &body[end + 9..];
+    }
+    text
+}
+
+#[test]
+fn writes_empty_page() {
+    let pdf = write_fixed(&fixed(scene()), &PdfOptions::default()).expect("pdf");
+    let text = pdf_text(&pdf);
+    assert!(text.starts_with("%PDF-1.7"));
+    assert!(text.contains("/MediaBox [0 0 283.4646 283.4646]"));
+    assert!(pdf.ends_with(b"%%EOF\n"));
+}
+
+#[test]
+fn writes_path_commands() {
+    let mut scene = scene();
+    rect_path(&mut scene);
+    let pdf = write_fixed(&fixed(scene), &PdfOptions::default()).expect("pdf");
+    let text = pdf_text(&pdf);
+    assert!(text.contains("10 10 m"));
+    assert!(text.contains("90 90 l"));
+    assert!(text.contains("1 0 0 rg"));
+    assert!(text.contains("f\n"));
+}
+
+#[test]
+fn writes_image_xobject() {
+    let mut png_bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png_bytes, 2, 2);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer
+            .write_image_data(&[
+                0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255,
+            ])
+            .expect("png data");
+        writer.finish().expect("png finish");
+    }
+    let mut scene = scene();
+    scene.root.children.push(Element::Image(ImageElement {
+        image: Arc::new(ImageAsset::new(
+            ImageFormat::Png,
+            Arc::from(png_bytes),
+            2,
+            2,
+        )),
+        rect: Rect::new(0.0, 0.0, 2.0, 2.0),
+        transform: Matrix::IDENTITY,
+        alpha: 1.0,
+    }));
+    let pdf = write_fixed(&fixed(scene), &PdfOptions::default()).expect("pdf");
+    let text = pdf_text(&pdf);
+    assert!(text.contains("/XObject"));
+    assert!(text.contains("/Im1"));
+    assert!(text.contains("/Im1 Do"));
+}
+
+#[test]
+fn writes_linear_shading() {
+    let mut scene = scene();
+    let mut path = Path::new();
+    path.move_to(Point::new(10.0, 10.0));
+    path.line_to(Point::new(90.0, 10.0));
+    path.line_to(Point::new(90.0, 90.0));
+    path.close();
+    scene.root.children.push(Element::Path(PathElement {
+        path: Arc::new(path),
+        transform: Matrix::IDENTITY,
+        fill: Some(Paint::LinearGradient(LinearGradient {
+            start: Point::new(10.0, 50.0),
+            end: Point::new(90.0, 50.0),
+            stops: vec![
+                GradientStop {
+                    offset: 0.0,
+                    color: Rgba::from_rgb(255, 0, 0),
+                },
+                GradientStop {
+                    offset: 1.0,
+                    color: Rgba::from_rgb(0, 0, 255),
+                },
+            ],
+            extend: GradientExtend::Pad,
+        })),
+        stroke: None,
+        rule: FillRule::NonZero,
+    }));
+    let pdf = write_fixed(&fixed(scene), &PdfOptions::default()).expect("pdf");
+    let text = pdf_text(&pdf);
+    assert!(text.contains("/ShadingType 2"));
+    assert!(text.contains("/FunctionType 2"));
+    assert!(text.contains(" sh\n"));
+}
+
+#[test]
+fn writes_group_opacity() {
+    let mut scene = scene();
+    let mut inner = Group::new(Matrix::IDENTITY);
+    inner.opacity = 0.5;
+    let mut path = Path::new();
+    path.move_to(Point::new(10.0, 10.0));
+    path.line_to(Point::new(90.0, 90.0));
+    inner.children.push(Element::Path(PathElement {
+        path: Arc::new(path),
+        transform: Matrix::IDENTITY,
+        fill: Some(Paint::Color(Rgba::from_rgb(255, 0, 0))),
+        stroke: None,
+        rule: FillRule::NonZero,
+    }));
+    scene.root.children.push(Element::Group(inner));
+    let pdf = write_fixed(&fixed(scene), &PdfOptions::default()).expect("pdf");
+    let text = pdf_text(&pdf);
+    assert!(text.contains("/ExtGState"));
+    assert!(text.contains(" gs\n"));
+}
+
+#[test]
+fn writes_metadata_and_outlines() {
+    let mut document = fixed(scene());
+    document.pages.push(document.pages[0].clone());
+    document.metadata = Metadata {
+        title: Some("Test".to_owned()),
+        author: Some("OFDBox".to_owned()),
+        ..Metadata::default()
+    };
+    document.outline.push(ofdbox_folio_ir::OutlineItem {
+        title: "First".to_owned(),
+        destination: ofdbox_folio_ir::Destination {
+            page: 0,
+            point: Point::new(0.0, 0.0),
+        },
+        children: Vec::new(),
+    });
+    document.outline.push(ofdbox_folio_ir::OutlineItem {
+        title: "Second".to_owned(),
+        destination: ofdbox_folio_ir::Destination {
+            page: 1,
+            point: Point::new(0.0, 0.0),
+        },
+        children: Vec::new(),
+    });
+    let pdf = write_fixed(&document, &PdfOptions::default()).expect("pdf");
+    let text = pdf_text(&pdf);
+    assert!(text.contains("/Info"));
+    assert!(text.contains("/Title (Test)"));
+    assert!(text.contains("/Outlines"));
+    assert!(text.contains("/PageMode /UseOutlines"));
+    assert!(text.contains("/Title (First)"));
+    assert_eq!(text.matches("/Dest [").count(), 2);
+}
+
+#[test]
+fn backend_writes_single_page() {
+    let pdf = PdfBackend::new().render(&scene()).expect("pdf");
+    assert!(pdf.starts_with(b"%PDF-1.7"));
+}
+
+#[test]
+fn generated_page_reads_back() {
+    let mut scene = scene();
+    rect_path(&mut scene);
+    let pdf = write_fixed(&fixed(scene), &PdfOptions::default()).expect("pdf");
+    assert!(probe(&pdf));
+    let mut document = PdfDocument::open_bytes(pdf, PdfReadOptions::default()).expect("open");
+    assert_eq!(document.info().page_count, 1);
+    let info = document.page_info(0).expect("info");
+    assert!((info.crop_box.width - 100.0).abs() < 0.01);
+    assert!((info.crop_box.height - 100.0).abs() < 0.01);
+    assert_eq!(info.rotation, Rotation::None);
+    let page = document.load_page(0).expect("page");
+    assert!(!page.content.root.children.is_empty());
+}
+
+#[cfg(windows)]
+fn text_page() -> Option<Page> {
+    let bytes = std::fs::read("C:/Windows/Fonts/arial.ttf").ok()?;
+    let face = ttf_parser::Face::parse(&bytes, 0).ok()?;
+    let glyph = face.glyph_index('A')?;
+    let font = Arc::new(FontAsset::new(Arc::from(bytes), 0).with_family("Arial"));
+    let run = Arc::new(GlyphRun::new(
+        "A".to_owned(),
+        vec![Glyph {
+            id: u32::from(glyph.0),
+            x: 0.0,
+            y: 0.0,
+            advance: 10.0,
+        }],
+        vec![Cluster {
+            text_start: 0,
+            text_end: 1,
+            glyph_start: 0,
+            glyph_end: 1,
+        }],
+    ));
+    let mut scene = scene();
+    scene.root.children.push(Element::Text(TextElement {
+        font,
+        font_size: 10.0,
+        transform: Matrix::IDENTITY,
+        run,
+        fill: Some(Paint::Color(Rgba::BLACK)),
+        stroke: None,
+    }));
+    Some(page(scene))
+}
+
+#[cfg(windows)]
+#[test]
+fn embeds_and_reads_text() {
+    let Some(page) = text_page() else {
+        return;
+    };
+    let mut document = FixedDocument::default();
+    document.pages.push(page);
+    let pdf = write_fixed(&document, &PdfOptions::default()).expect("pdf");
+    let text = pdf_text(&pdf);
+    assert!(text.contains("/Type0"));
+    assert!(text.contains(" Tj\n"));
+    assert!(text.contains("/ToUnicode"));
+
+    let mut reader = PdfDocument::open_bytes(pdf, PdfReadOptions::default()).expect("read");
+    let page = reader.load_page(0).expect("page");
+    assert!(page.text.plain_text().contains('A'));
+}

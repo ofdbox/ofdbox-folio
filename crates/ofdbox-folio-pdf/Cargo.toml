@@ -13,8 +13,19 @@ categories = ["parser-implementations", "text-processing"]
 
 [dependencies]
 ofdbox-folio-ir.workspace = true
+bmp.workspace = true
+flate2.workspace = true
+justbig2.workspace = true
+kurbo.workspace = true
 lopdf.workspace = true
+png.workspace = true
 thiserror.workspace = true
+ttf-parser.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true
+png.workspace = true
+ttf-parser.workspace = true
 
 [lints]
 workspace = true

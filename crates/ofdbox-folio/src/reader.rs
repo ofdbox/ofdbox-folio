@@ -198,8 +198,15 @@ impl Document {
                 ofdbox_folio_ofd::OfdReadOptions::default(),
                 font_provider,
             )?),
+            #[cfg(feature = "pdf")]
+            SourceFormat::Pdf => Box::new(ofdbox_folio_pdf::PdfDocument::open_bytes_with_fonts(
+                bytes,
+                ofdbox_folio_pdf::PdfReadOptions::default(),
+                font_provider,
+            )?),
+            #[cfg(not(feature = "pdf"))]
             SourceFormat::Pdf => {
-                return Err(Error::UnsupportedFormat("PDF 适配尚未实现".to_owned()));
+                return Err(Error::UnsupportedFormat("未启用 PDF 支持".to_owned()));
             }
             SourceFormat::Docx => {
                 return Err(Error::UnsupportedFormat("DOCX 适配尚未实现".to_owned()));
@@ -435,6 +442,11 @@ fn page_range(page: &Page, range: &TextRange, index: usize) -> Option<TextRange>
 }
 
 fn detect_format(bytes: &[u8]) -> Result<SourceFormat, Error> {
+    #[cfg(feature = "pdf")]
+    if ofdbox_folio_pdf::probe(bytes) {
+        return Ok(SourceFormat::Pdf);
+    }
+    #[cfg(not(feature = "pdf"))]
     if bytes.starts_with(b"%PDF") {
         return Ok(SourceFormat::Pdf);
     }
@@ -455,8 +467,8 @@ mod tests {
     use super::{CacheOptions, Document, OpenOptions, ReaderOptions};
     use ofdbox_folio_ir::{
         AttachmentId, Cluster, DocumentInfo, DocumentSource, FontAsset, Glyph, GlyphRun, Matrix,
-        Page, PageError, PageInfo, Rect, Scene, SearchQuery, Selection, Size, TextItem, TextLayer,
-        TextLine, TextPosition,
+        Page, PageError, PageInfo, Rect, Rotation, Scene, SearchQuery, Selection, Size,
+        SourceFormat, TextItem, TextLayer, TextLine, TextPosition,
     };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -689,5 +701,32 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(error, super::Error::Document(_)));
+    }
+
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn opens_pdf_and_reads_pages() {
+        use ofdbox_folio_ir::FixedDocument;
+        let mut document = FixedDocument::default();
+        document.pages.push(Page::new(
+            PageInfo {
+                media_box: Rect::new(0.0, 0.0, 100.0, 80.0),
+                crop_box: Rect::new(0.0, 0.0, 100.0, 80.0),
+                rotation: Rotation::None,
+                label: None,
+            },
+            Scene {
+                size: Size::new(100.0, 80.0),
+                ..Scene::default()
+            },
+        ));
+        let bytes =
+            crate::pdf::write_fixed(&document, &crate::pdf::PdfOptions::default()).expect("pdf");
+        let mut reader = Document::open_bytes(bytes, OpenOptions::default()).expect("open");
+        assert_eq!(reader.format(), SourceFormat::Pdf);
+        assert_eq!(reader.info().page_count, 1);
+        let page = reader.page(0).expect("page");
+        assert!((page.display_size().width - 100.0).abs() < 0.01);
+        assert!((page.display_size().height - 80.0).abs() < 0.01);
     }
 }

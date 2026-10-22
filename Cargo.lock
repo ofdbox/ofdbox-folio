@@ -741,9 +741,15 @@ dependencies = [
 name = "ofdbox-folio-pdf"
 version = "0.0.1"
 dependencies = [
+ "bmp",
+ "flate2",
+ "justbig2",
+ "kurbo",
  "lopdf",
  "ofdbox-folio-ir",
+ "png",
  "thiserror",
+ "ttf-parser",
 ]
 
 [[package]]

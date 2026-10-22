@@ -2,7 +2,7 @@
 
 OFDBox Folio 是一个以“页”为中心的多格式文档引擎：读取 OFD、PDF、DOCX，统一到 Flow IR / Fixed IR，完成排版、渲染与写出。
 
-**当前状态：IR 契约已冻结，OFD → 图片、Fixed IR → OFD 写出、Reader 页面缓存、跨页选择与搜索均已打通。** 217 份 OFD 语料中 211 份可读（6 份源文件损坏）。对可读语料做 OFD → Fixed IR → OFD 往返后渲染首页，189 份与源文件像素完全一致，211 份中 203 份差异像素低于 0.2%，平均 MAE 0.011。布局、DOCX/PDF 适配尚未接入。
+**当前状态：IR 契约已冻结，OFD → 图片、Fixed IR → OFD/PDF 写出、PDF → Fixed IR、Reader 页面缓存、跨页选择与搜索均已打通。** 217 份 OFD 语料中 211 份可读（6 份源文件损坏）。对可读语料做 OFD → Fixed IR → OFD 往返后渲染首页，189 份与源文件像素完全一致，211 份中 203 份差异像素低于 0.2%，平均 MAE 0.011。PDF 读写已接入：211 份由旧管线导出的 PDF 中 200 份可与 OFD 源对应，首页比对平均差异像素 1.5%，主要来自导出时文字轮廓化与像素取整；PDF 自身往返（读入 → 写出 → 再渲染）的代表样本差异低于 0.6%。布局与 DOCX 适配尚未接入。
 
 ## 目标
 
@@ -156,6 +156,20 @@ let bytes = write_fixed(&document, &OfdWriteOptions::default())?;
 
 已知限制：图案与网格填充尚未写出（回退为首个色标），组透明度分配到子元素颜色 alpha，不保留独立图层语义。
 
+## PDF 读写
+
+```rust
+use ofdbox_folio::pdf::{PdfDocument, PdfOptions, PdfReadOptions, write_fixed};
+
+let mut source = PdfDocument::open_path("input.pdf", PdfReadOptions::default())?;
+let page = source.load_page(0)?;
+let bytes = write_fixed(&fixed, &PdfOptions::default())?;
+```
+
+读取覆盖路径、文本（Identity-H 与简单字体，`ToUnicode`、`Tr` 渲染模式、字距与水平缩放）、图片、Form XObject、裁剪、透明度与页面旋转；`PdfDocument` 实现 `DocumentSource`，提供页面尺寸、文本层、字体名与资源表。写出覆盖路径、裁剪、图片、渐变、透明组、文字（嵌入 TrueType 字体并子集化，失败时退化为字形轮廓）、元数据与书签；JPEG 以 `DCTDecode` 原样嵌入，PNG/JBIG2/BMP 解码后以 `FlateDecode` 嵌入。
+
+已知限制：`sh` 着色与图案、内联图片、JPEG2000、PDF 附件尚未读取；加密 PDF 返回 `Encrypted` 而不尝试密码解密；TIFF/CCITT 图片暂不支持写出。
+
 ## 路线
 
 | 阶段 | 内容 | 验收 |
@@ -165,7 +179,7 @@ let bytes = write_fixed(&document, &OfdWriteOptions::default())?;
 | R3 PDF 阅读硬化 | 字体与 CMap、图案/渐变、透明、加密、坏文件容错 | 真实 PDF 语料可读，降级有报告 |
 | R4 文档能力 | 注释/表单、附件、大纲编辑、GPU 后端 | 阅读器功能闭环 |
 
-当前完成 R1 的 OFD 读取、CPU 位图、OFD 写出、Reader 页面缓存与跨页选择/搜索。下一步移植 PDF 读取/写出与 wgpu 后端，再迁移 CLI。
+当前完成 R1 的 OFD/PDF 读写、CPU 位图、Reader 页面缓存与跨页选择/搜索。下一步移植 wgpu 后端，再把 CLI 迁移到 Reader 并移除旧 `ofdbox-render`。
 
 当前已知限制：
 
