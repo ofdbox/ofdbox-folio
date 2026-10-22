@@ -60,10 +60,7 @@ impl PdfDocument {
         options: PdfReadOptions,
         font_provider: Option<Box<dyn FontProvider>>,
     ) -> Result<Self, PdfError> {
-        let document = Document::load_mem(&bytes).map_err(crate::error::parse_error)?;
-        if document.is_encrypted() {
-            return Err(PdfError::Encrypted);
-        }
+        let document = load_document(&bytes, options.password.as_deref())?;
         let pages = frontend::page_ids(&document);
         let outline = catalog::outline(&document, &pages);
         let (attachments, attachment_objects) = catalog::attachments(&document);
@@ -214,6 +211,156 @@ impl DocumentSource for PdfDocument {
 
     fn clear_caches(&mut self) {
         self.font_cache.clear();
+    }
+}
+
+/// 加载并解密 PDF；区分密码错误与一般的解析失败。
+fn load_document(bytes: &[u8], password: Option<&str>) -> Result<Document, PdfError> {
+    // 部分生成器把 /Encrypt 字典直接写在 trailer 里，lopdf 只识别间接对象。
+    let normalized = normalize_inline_encryption(bytes);
+    let bytes = normalized.as_deref().unwrap_or(bytes);
+    let load_options = lopdf::LoadOptions {
+        // 仅有权限密码的 PDF 用空用户密码即可解锁。
+        password: Some(password.unwrap_or_default().to_owned()),
+        ..lopdf::LoadOptions::default()
+    };
+    match Document::load_mem_with_options(bytes, load_options) {
+        Ok(document) if !document.is_encrypted() => Ok(document),
+        Ok(_) => Err(password_error(password)),
+        Err(error) => {
+            if error.to_string().to_ascii_lowercase().contains("password") {
+                return Err(password_error(password));
+            }
+            match Document::load_mem(bytes) {
+                Ok(document) if document.is_encrypted() => Err(password_error(password)),
+                _ => Err(crate::error::parse_error(error)),
+            }
+        }
+    }
+}
+
+/// 把 trailer 中的直接 `/Encrypt <<...>>` 改写为间接对象，并让 xref 重建。
+fn normalize_inline_encryption(bytes: &[u8]) -> Option<Vec<u8>> {
+    let marker = b"/Encrypt";
+    let mut search_end = bytes.len();
+    while let Some(position) = bytes[..search_end]
+        .windows(marker.len())
+        .rposition(|window| window == marker)
+    {
+        let mut start = position + marker.len();
+        while start < bytes.len() && bytes[start].is_ascii_whitespace() {
+            start += 1;
+        }
+        if bytes.get(start..start + 2) == Some(b"<<")
+            && let Some(end) = dictionary_end(bytes, start)
+        {
+            let dictionary = &bytes[start..end];
+            let object_id = 999u32;
+            let mut output = Vec::with_capacity(bytes.len() + dictionary.len() + 64);
+            output.extend_from_slice(&bytes[..position]);
+            output.extend_from_slice(format!("/Encrypt {object_id} 0 R").as_bytes());
+            output.extend_from_slice(&bytes[end..]);
+            output.extend_from_slice(
+                format!(
+                    "
+{object_id} 0 obj
+"
+                )
+                .as_bytes(),
+            );
+            output.extend_from_slice(dictionary);
+            output.extend_from_slice(
+                b"
+endobj
+",
+            );
+            force_xref_recovery(&mut output);
+            return Some(output);
+        }
+        search_end = position;
+    }
+    None
+}
+
+fn dictionary_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut index = start;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_hex = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b')' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        if in_hex {
+            if byte == b'>' {
+                in_hex = false;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'(' => in_string = true,
+            b'<' if bytes.get(index..index + 2) == Some(b"<<") => {
+                depth += 1;
+                index += 2;
+                continue;
+            }
+            b'<' => in_hex = true,
+            b'>' if bytes.get(index..index + 2) == Some(b">>") => {
+                depth = depth.saturating_sub(1);
+                index += 2;
+                if depth == 0 {
+                    return Some(index);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// 追加对象后原 xref 不再完整，令 lopdf 扫描重建。
+fn force_xref_recovery(bytes: &mut [u8]) {
+    let marker = b"startxref";
+    let Some(position) = bytes
+        .windows(marker.len())
+        .rposition(|window| window == marker)
+    else {
+        return;
+    };
+    let mut index = position + marker.len();
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    if index < bytes.len() && bytes[index].is_ascii_digit() {
+        bytes[index] = b'0';
+        for byte in &mut bytes[index + 1..] {
+            if byte.is_ascii_digit() {
+                *byte = b' ';
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+fn password_error(password: Option<&str>) -> PdfError {
+    if password.is_some() {
+        PdfError::PasswordIncorrect
+    } else {
+        PdfError::PasswordRequired
     }
 }
 

@@ -9,9 +9,12 @@ pub enum PdfError {
     /// PDF 结构解析失败。
     #[error("PDF 解析失败: {0}")]
     Parse(String),
-    /// 文档已加密。
-    #[error("PDF 已加密")]
-    Encrypted,
+    /// 文档已加密，需要密码。
+    #[error("PDF 已加密，需要密码")]
+    PasswordRequired,
+    /// 提供的密码不正确。
+    #[error("PDF 密码不正确")]
+    PasswordIncorrect,
     /// 页面索引越界。
     #[error("页面索引越界: {0}")]
     InvalidPage(usize),

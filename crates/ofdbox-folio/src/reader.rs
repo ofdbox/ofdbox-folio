@@ -45,6 +45,8 @@ pub struct OpenOptions {
     pub cache: CacheOptions,
     /// 缺失字体的来源。
     pub font_provider: Option<Box<dyn FontProvider>>,
+    /// 加密文档的密码。
+    pub password: Option<String>,
 }
 
 /// 缓存统计。
@@ -186,11 +188,14 @@ impl Document {
             format,
             cache,
             font_provider,
+            password,
         } = options;
         let format = match format {
             Some(format) => format,
             None => detect_format(&bytes)?,
         };
+        #[cfg(not(feature = "pdf"))]
+        let _ = &password;
         let source: Box<dyn DocumentSource> = match format {
             #[cfg(feature = "ofd")]
             SourceFormat::Ofd => Box::new(ofdbox_folio_ofd::OfdDocument::open_bytes_with_fonts(
@@ -201,7 +206,10 @@ impl Document {
             #[cfg(feature = "pdf")]
             SourceFormat::Pdf => Box::new(ofdbox_folio_pdf::PdfDocument::open_bytes_with_fonts(
                 bytes,
-                ofdbox_folio_pdf::PdfReadOptions::default(),
+                ofdbox_folio_pdf::PdfReadOptions {
+                    password,
+                    ..ofdbox_folio_pdf::PdfReadOptions::default()
+                },
                 font_provider,
             )?),
             #[cfg(not(feature = "pdf"))]

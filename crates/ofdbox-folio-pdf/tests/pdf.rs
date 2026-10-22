@@ -602,3 +602,39 @@ fn reads_attachments() {
         .expect("attachment");
     assert_eq!(&data[..], b"hello");
 }
+
+#[test]
+fn opens_encrypted_pdf_with_password() {
+    use ofdbox_folio_pdf::PdfError;
+
+    let bytes = include_bytes!("fixtures/encrypted_user.pdf").to_vec();
+    let error = PdfDocument::open_bytes(bytes.clone(), PdfReadOptions::default())
+        .err()
+        .expect("password should be required");
+    assert!(matches!(error, PdfError::PasswordRequired));
+
+    let options = PdfReadOptions {
+        password: Some("wrong".to_owned()),
+        ..PdfReadOptions::default()
+    };
+    let error = PdfDocument::open_bytes(bytes.clone(), options)
+        .err()
+        .expect("wrong password should fail");
+    assert!(matches!(error, PdfError::PasswordIncorrect));
+
+    let options = PdfReadOptions {
+        password: Some("user".to_owned()),
+        ..PdfReadOptions::default()
+    };
+    let mut document = PdfDocument::open_bytes(bytes, options).expect("open");
+    assert_eq!(document.info().page_count, 1);
+    let page = document.load_page(0).expect("page");
+    assert!(!page.content.root.children.is_empty());
+}
+
+#[test]
+fn opens_permission_only_encrypted_pdf() {
+    let bytes = include_bytes!("fixtures/encrypted_owner.pdf").to_vec();
+    let document = PdfDocument::open_bytes(bytes, PdfReadOptions::default()).expect("open");
+    assert_eq!(document.info().page_count, 1);
+}

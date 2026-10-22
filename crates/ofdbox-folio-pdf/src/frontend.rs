@@ -25,7 +25,7 @@ const PT_TO_MM: f64 = 25.4 / 72.0;
 type PageBox = (f64, f64, f64, f64);
 
 /// PDF 读取选项。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct PdfReadOptions {
     /// 单页内容流的最大字节数。
     pub max_page_bytes: usize,
@@ -33,6 +33,8 @@ pub struct PdfReadOptions {
     pub max_image_pixels: u64,
     /// Form XObject 的最大嵌套层数。
     pub max_recursion_depth: u32,
+    /// 加密 PDF 的密码；用户密码与所有者密码均可。
+    pub password: Option<String>,
 }
 
 impl Default for PdfReadOptions {
@@ -42,6 +44,7 @@ impl Default for PdfReadOptions {
             max_page_bytes: limits.max_page_bytes,
             max_image_pixels: limits.max_image_pixels,
             max_recursion_depth: limits.max_recursion_depth,
+            password: None,
         }
     }
 }
