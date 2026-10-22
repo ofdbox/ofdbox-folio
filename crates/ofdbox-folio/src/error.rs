@@ -21,7 +21,7 @@ pub enum Error {
     #[error(transparent)]
     Pdf(#[from] ofdbox_folio_pdf::PdfError),
     /// 渲染错误。
-    #[cfg(feature = "cpu")]
+    #[cfg(any(feature = "cpu", feature = "gpu"))]
     #[error(transparent)]
     Render(#[from] ofdbox_folio_render::RenderError),
     /// 尚未接入的格式。

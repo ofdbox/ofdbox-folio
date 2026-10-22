@@ -7,8 +7,12 @@ mod error;
 mod image;
 mod options;
 mod renderer;
+mod wgpu;
 
 pub use error::RenderError;
 pub use image::{DecodedImage, decode_image, detect_format};
 pub use options::RenderOptions;
 pub use renderer::{CpuRenderer, RasterTarget};
+pub use wgpu::WgpuBackend;
+#[cfg(feature = "wgpu")]
+pub use wgpu::{WgpuCapabilities, WgpuContext, WgpuTarget};

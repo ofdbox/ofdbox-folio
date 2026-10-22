@@ -20,7 +20,13 @@ png.workspace = true
 skrifa.workspace = true
 thiserror.workspace = true
 tiff.workspace = true
+ttf-parser.workspace = true
 vello_cpu.workspace = true
+wgpu = { workspace = true, optional = true }
+pollster = { workspace = true, optional = true }
+
+[features]
+wgpu = ["dep:wgpu", "dep:pollster"]
 
 [lints]
 workspace = true

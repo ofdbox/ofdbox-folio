@@ -39,6 +39,8 @@ tiff = "0.9"
 justbig2 = "0.2"
 flate2 = "1"
 kurbo = "0.13"
+wgpu = "30"
+pollster = "1"
 
 ofdbox-folio-ir = { path = "crates/ofdbox-folio-ir", version = "0.0.1" }
 ofdbox-folio-layout = { path = "crates/ofdbox-folio-layout", version = "0.0.1" }

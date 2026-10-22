@@ -28,6 +28,7 @@ pdf = ["dep:ofdbox-folio-pdf"]
 docx = ["dep:ofdbox-folio-docx"]
 layout = ["dep:ofdbox-folio-layout"]
 cpu = ["dep:ofdbox-folio-render"]
+gpu = ["dep:ofdbox-folio-render", "ofdbox-folio-render/wgpu"]
 
 [dev-dependencies]
 png.workspace = true

@@ -26,8 +26,8 @@ pub use ofdbox_folio_ir as ir;
 #[cfg(feature = "layout")]
 pub use ofdbox_folio_layout as layout;
 
-/// Fixed IR 的 CPU 渲染。
-#[cfg(feature = "cpu")]
+/// Fixed IR 的位图渲染。
+#[cfg(any(feature = "cpu", feature = "gpu"))]
 pub use ofdbox_folio_render as render;
 
 /// OFD 与 Fixed IR 的读写适配。
