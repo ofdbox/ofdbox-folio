@@ -190,7 +190,7 @@ impl DocumentSource for OfdDocument {
             .cloned()
             .ok_or(PageError::NotFound(index))?;
         let mut package = self.package.borrow_mut();
-        frontend::build_page(
+        let mut page = frontend::build_page(
             &mut package,
             &page,
             &self.options,
@@ -198,7 +198,9 @@ impl DocumentSource for OfdDocument {
             &mut self.font_cache,
             &mut self.font_provider,
         )
-        .map_err(PageError::from)
+        .map_err(PageError::from)?;
+        page.text.page = index;
+        Ok(page)
     }
 
     fn load_attachment(&mut self, _id: AttachmentId) -> Result<Arc<[u8]>, PageError> {

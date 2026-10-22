@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use ofdbox_folio_ir::{
     AttachmentId, AttachmentInfo, DocumentError, DocumentInfo, DocumentSource, FontProvider,
-    Metadata, OutlineItem, Page, PageInfo, SourceFormat,
+    Metadata, OutlineItem, Page, PageInfo, SearchHit, SearchQuery, Selection, SourceFormat,
+    TextPosition, TextRange,
 };
 
 use crate::error::Error;
@@ -60,6 +61,15 @@ pub struct CacheStats {
     pub misses: u64,
     /// 淘汰次数。
     pub evictions: u64,
+}
+
+/// 一页上的选择矩形。
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageSelection {
+    /// 页面索引。
+    pub page: usize,
+    /// 页面空间的矩形。
+    pub rects: Vec<ofdbox_folio_ir::Rect>,
 }
 
 struct CachedPage {
@@ -265,6 +275,96 @@ impl Document {
         Ok(())
     }
 
+    /// 返回一页的纯文本。
+    pub fn page_text(&mut self, index: usize) -> Result<String, Error> {
+        Ok(self.page(index)?.text.plain_text())
+    }
+
+    /// 跨页搜索；回调返回 `false` 时提前停止。
+    ///
+    /// 返回已访问的命中数量。页面按需加载并进入缓存。
+    pub fn search(
+        &mut self,
+        query: &SearchQuery,
+        mut visit: impl FnMut(&SearchHit) -> bool,
+    ) -> Result<usize, Error> {
+        let mut count = 0;
+        for index in 0..self.page_count() {
+            let page = self.page(index)?;
+            for hit in ofdbox_folio_ir::search(&page.text, query) {
+                count += 1;
+                if !visit(&hit) {
+                    return Ok(count);
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    /// 跨页搜索并收集全部命中。
+    pub fn search_all(&mut self, query: &SearchQuery) -> Result<Vec<SearchHit>, Error> {
+        let mut hits = Vec::new();
+        self.search(query, |hit| {
+            hits.push(hit.clone());
+            true
+        })?;
+        Ok(hits)
+    }
+
+    /// 返回跨页选择对应的文本；不同页之间用换行符连接。
+    pub fn selection_text(&mut self, selection: &Selection) -> Result<String, Error> {
+        let range = selection.range();
+        if range.is_empty() {
+            return Ok(String::new());
+        }
+        self.validate_pages(range.start.page, range.end.page)?;
+        let mut output = String::new();
+        for index in range.start.page..=range.end.page {
+            let page = self.page(index)?;
+            let Some(local) = page_range(&page, &range, index) else {
+                continue;
+            };
+            let text = ofdbox_folio_ir::selection_text(&page.text, &local);
+            if text.is_empty() {
+                continue;
+            }
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&text);
+        }
+        Ok(output)
+    }
+
+    /// 返回跨页选择覆盖的页面矩形。
+    pub fn selection_rects(&mut self, selection: &Selection) -> Result<Vec<PageSelection>, Error> {
+        let range = selection.range();
+        if range.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.validate_pages(range.start.page, range.end.page)?;
+        let mut pages = Vec::new();
+        for index in range.start.page..=range.end.page {
+            let page = self.page(index)?;
+            let Some(local) = page_range(&page, &range, index) else {
+                continue;
+            };
+            let rects = ofdbox_folio_ir::selection_rects(&page.text, &local);
+            if !rects.is_empty() {
+                pages.push(PageSelection { page: index, rects });
+            }
+        }
+        Ok(pages)
+    }
+
+    fn validate_pages(&self, start: usize, end: usize) -> Result<(), Error> {
+        let count = self.page_count();
+        if start >= count || end >= count {
+            return Err(ofdbox_folio_ir::PageError::NotFound(start.max(end)).into());
+        }
+        Ok(())
+    }
+
     /// 预取指定页前后若干页。
     pub fn prefetch_around(&mut self, index: usize, radius: usize) -> Result<(), Error> {
         let page_count = self.page_count();
@@ -295,6 +395,21 @@ impl Document {
     }
 }
 
+fn page_range(page: &Page, range: &TextRange, index: usize) -> Option<TextRange> {
+    let layer = &page.text;
+    let start = if index == range.start.page {
+        TextPosition::new(index, range.start.item, range.start.char_offset)
+    } else {
+        layer.start_position()
+    };
+    let end = if index == range.end.page {
+        TextPosition::new(index, range.end.item, range.end.char_offset)
+    } else {
+        layer.end_position()
+    };
+    (start < end).then(|| TextRange::new(start, end))
+}
+
 fn detect_format(bytes: &[u8]) -> Result<SourceFormat, Error> {
     if bytes.starts_with(b"%PDF") {
         return Ok(SourceFormat::Pdf);
@@ -318,7 +433,9 @@ fn detect_format(bytes: &[u8]) -> Result<SourceFormat, Error> {
 mod tests {
     use super::{CacheOptions, Document, OpenOptions, ReaderOptions};
     use ofdbox_folio_ir::{
-        AttachmentId, DocumentInfo, DocumentSource, Page, PageError, PageInfo, Rect, Scene, Size,
+        AttachmentId, Cluster, DocumentInfo, DocumentSource, FontAsset, Glyph, GlyphRun, Matrix,
+        Page, PageError, PageInfo, Rect, Scene, SearchQuery, Selection, Size, TextItem, TextLayer,
+        TextLine, TextPosition,
     };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -332,7 +449,7 @@ mod tests {
     impl MockSource {
         fn new(count: usize) -> (Self, Arc<AtomicUsize>) {
             let loads = Arc::new(AtomicUsize::new(0));
-            let pages = (0..count).map(|_| sample_page()).collect();
+            let pages = (0..count).map(sample_page).collect();
             let info = DocumentInfo {
                 page_count: count,
                 ..DocumentInfo::default()
@@ -373,19 +490,60 @@ mod tests {
         }
     }
 
-    fn sample_page() -> Page {
-        Page::new(
-            PageInfo {
+    fn sample_page(page: usize) -> Page {
+        let text = "Hello";
+        let glyphs = text
+            .chars()
+            .enumerate()
+            .map(|(index, _)| Glyph {
+                id: index as u32,
+                x: index as f64 * 10.0,
+                y: 10.0,
+                advance: 10.0,
+            })
+            .collect::<Vec<_>>();
+        let clusters = text
+            .chars()
+            .enumerate()
+            .map(|(index, _)| Cluster {
+                text_start: index as u32,
+                text_end: index as u32 + 1,
+                glyph_start: index as u32,
+                glyph_end: index as u32 + 1,
+            })
+            .collect::<Vec<_>>();
+        let run = Arc::new(GlyphRun::new(text, glyphs, clusters));
+        let font = Arc::new(FontAsset::new(Arc::from(&b""[..]), 0));
+        let bbox = Rect::new(0.0, 0.0, 50.0, 12.0);
+        Page {
+            info: PageInfo {
                 media_box: Rect::new(0.0, 0.0, 100.0, 100.0),
                 crop_box: Rect::new(0.0, 0.0, 100.0, 100.0),
                 rotation: ofdbox_folio_ir::Rotation::None,
                 label: None,
             },
-            Scene {
+            content: Scene {
                 size: Size::new(100.0, 100.0),
                 ..Scene::default()
             },
-        )
+            text: TextLayer {
+                page,
+                items: vec![TextItem {
+                    run,
+                    transform: Matrix::IDENTITY,
+                    bbox,
+                    font,
+                    font_size: 10.0,
+                }],
+                lines: vec![TextLine {
+                    items: 0..1,
+                    bbox,
+                    baseline: 10.0,
+                }],
+            },
+            templates: Vec::new(),
+            links: Vec::new(),
+        }
     }
 
     fn document(count: usize, max_bytes: usize) -> (Document, Arc<AtomicUsize>) {
@@ -417,7 +575,7 @@ mod tests {
 
     #[test]
     fn evicts_pages_over_budget() {
-        let cost = sample_page().estimated_bytes().max(1);
+        let cost = sample_page(0).estimated_bytes().max(1);
         let (mut document, loads) = document(2, cost);
         document.page(0).expect("page 0");
         document.page(1).expect("page 1");
@@ -453,6 +611,54 @@ mod tests {
         assert_eq!(document.cache_stats().pages, 0);
         document.page(0).expect("second");
         assert_eq!(loads.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn searches_across_pages() {
+        let (mut document, _) = document(2, 1024 * 1024);
+        let query = SearchQuery {
+            text: "Hello".to_owned(),
+            ..SearchQuery::default()
+        };
+        let hits = document.search_all(&query).expect("search");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].range.start.page, 0);
+        assert_eq!(hits[1].range.start.page, 1);
+    }
+
+    #[test]
+    fn search_can_stop_early() {
+        let (mut document, _) = document(3, 1024 * 1024);
+        let query = SearchQuery {
+            text: "Hello".to_owned(),
+            ..SearchQuery::default()
+        };
+        let count = document.search(&query, |_| false).expect("search");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn selection_spans_pages() {
+        let (mut document, _) = document(2, 1024 * 1024);
+        let selection = Selection {
+            anchor: TextPosition::new(0, 0, 2),
+            focus: TextPosition::new(1, 0, 5),
+        };
+        assert_eq!(
+            document.selection_text(&selection).expect("text"),
+            "llo\nHello"
+        );
+        let pages = document.selection_rects(&selection).expect("rects");
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].page, 0);
+        assert_eq!(pages[1].page, 1);
+        assert!(!pages[0].rects.is_empty());
+    }
+
+    #[test]
+    fn page_text_uses_cached_text_layer() {
+        let (mut document, _) = document(1, 1024 * 1024);
+        assert_eq!(document.page_text(0).expect("text"), "Hello");
     }
 
     #[test]

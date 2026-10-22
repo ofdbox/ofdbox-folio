@@ -2,7 +2,7 @@
 
 OFDBox Folio 是一个以“页”为中心的多格式文档引擎：读取 OFD、PDF、DOCX，统一到 Flow IR / Fixed IR，完成排版、渲染与写出。
 
-**当前状态：IR 契约已冻结，OFD → 图片主链路与 Reader 页面缓存已打通。** 217 份 OFD 语料中 211 份可渲染（6 份源文件损坏）；11 个代表样本与旧 render 对比，9 份像素完全一致，2 份平均误差约 1%。布局、DOCX/PDF 适配、选择/搜索门面 API 尚未接入。
+**当前状态：IR 契约已冻结，OFD → 图片、Reader 页面缓存、跨页选择与搜索已打通。** 217 份 OFD 语料中 211 份可渲染（6 份源文件损坏）；11 个代表样本与旧 render 对比，9 份像素完全一致，2 份平均误差约 1%。布局、DOCX/PDF 适配尚未接入。
 
 ## 目标
 
@@ -152,14 +152,14 @@ let ofd = ofdbox_folio::to_ofd(&fixed, &OfdWriteOptions::default())?;
 | R3 PDF 阅读硬化 | 字体与 CMap、图案/渐变、透明、加密、坏文件容错 | 真实 PDF 语料可读，降级有报告 |
 | R4 文档能力 | 注释/表单、附件、大纲编辑、GPU 后端 | 阅读器功能闭环 |
 
-当前完成 R1 的 OFD 读取、CPU 位图与 Reader 页面缓存。下一步接入选择/搜索门面 API，并继续收敛字体回退与模板层语义。
+当前完成 R1 的 OFD 读取、CPU 位图、Reader 页面缓存与跨页选择/搜索。下一步进入 Flow IR 与布局，并继续收敛字体回退与模板层语义。
 
 当前已知限制：
 
-- OFD 未内嵌字体时依赖调用方注入 `FontProvider`；示例使用系统字体。
+- OFD 未内嵌字体时，渲染依赖调用方注入 `FontProvider`；未注入时文本层仍保留文本并使用估算 advance，但不绘制文字。
 - 模板页目前拍平进页面内容，`Page.templates` 语义尚未拆分。
 - 页面缓存只计页面结构；字体和图片属于文档级共享资源，单独计价。
-- 文本层已提供命中/选择/搜索函数，但门面尚未封装跨页选择与搜索接口。
+- 文本行按 TextObject 粗略分组，跨对象行合并待完善。
 
 ## 阅读器缓存
 
@@ -182,11 +182,39 @@ let stats = document.cache_stats();
 
 缓存按页面结构字节数计费，LRU 淘汰；`max_bytes = 0` 可禁用。
 
+## 跨页选择与搜索
+
+```rust
+use ofdbox_folio::{Document, OpenOptions, SearchQuery, Selection, TextPosition};
+
+let mut document = Document::open_path("input.ofd", OpenOptions::default())?;
+
+let hits = document.search_all(&SearchQuery {
+    text: "发票".to_owned(),
+    case_sensitive: false,
+    whole_word: false,
+})?;
+for hit in &hits {
+    let page = hit.range.start.page;
+    // hit.rects 是页面空间矩形
+}
+
+let selection = Selection {
+    anchor: TextPosition::new(0, 0, 2),
+    focus: TextPosition::new(1, 0, 5),
+};
+let text = document.selection_text(&selection)?;
+let rects = document.selection_rects(&selection)?;
+```
+
+搜索按页按需加载并进入缓存；选择文本跨页时用换行符连接，页面之间不重复解析。
+
 
 ## 快速验证
 
 ```bash
 cargo run -p ofdbox-folio --example ofd_to_png -- input.ofd output.png 0 96
+cargo run -p ofdbox-folio --example ofd_search -- input.ofd 查询词
 ```
 
 ## 测试与验收

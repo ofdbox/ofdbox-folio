@@ -1056,12 +1056,23 @@ impl Builder<'_> {
         if all_chars.is_empty() {
             return Vec::new();
         }
-        let Some(resolved) = self.font(font_id) else {
-            self.diagnostic(DiagnosticCode::Font, object.id(), "字体资源缺失");
-            return Vec::new();
+        let (font, used_fallback) = match self.font(font_id) {
+            Some(resolved) => (resolved.asset, resolved.fallback),
+            None => {
+                self.diagnostic(
+                    DiagnosticCode::Font,
+                    object.id(),
+                    "字体资源缺失，文本层使用估算布局",
+                );
+                let id = self.store.add_font(Arc::from(&b""[..]), 0);
+                match self.store.font(id).cloned() {
+                    Some(font) => (font, true),
+                    None => return Vec::new(),
+                }
+            }
         };
-        let font = resolved.asset;
         let face = ttf_parser::Face::parse(font.data(), font.face_index()).ok();
+        let has_face = face.is_some();
         let h_scale = object
             .attribute("HScale")
             .and_then(|value| value.parse::<f64>().ok())
@@ -1110,7 +1121,7 @@ impl Builder<'_> {
         };
 
         let mut slots = glyph_slots(object, all_chars.len());
-        if resolved.fallback {
+        if used_fallback {
             // 回退字体无法复用原字体的 glyph index，按 Unicode 重新取字形。
             slots.fill(None);
         }
@@ -1141,11 +1152,15 @@ impl Builder<'_> {
                         .as_ref()
                         .and_then(|face| face.glyph_index(*character))
                         .map(|id| vec![u32::from(id.0)])
-                        .unwrap_or_default(),
+                        .unwrap_or_else(|| vec![0]),
                 };
                 let cluster_glyph_start = glyphs.len() as u32;
                 for glyph_id in slot_glyphs.iter().copied() {
-                    let advance = glyph_advance(face.as_ref(), glyph_id, size);
+                    let advance = if has_face {
+                        glyph_advance(face.as_ref(), glyph_id, size)
+                    } else {
+                        estimate_advance(*character, size)
+                    };
                     if transform_glyphs {
                         let transform = Matrix::scale(h_scale.max(0.0), 1.0)
                             .then(shear)
@@ -1844,6 +1859,23 @@ fn glyph_advance(face: Option<&ttf_parser::Face<'_>>, glyph: u32, size: f64) -> 
         .map(f64::from)
         .unwrap_or(f64::from(units));
     advance / f64::from(units) * size
+}
+
+fn estimate_advance(character: char, size: f64) -> f64 {
+    if character.is_whitespace() {
+        size * 0.25
+    } else if is_cjk(character) {
+        size
+    } else {
+        size * 0.5
+    }
+}
+
+fn is_cjk(character: char) -> bool {
+    matches!(
+        u32::from(character),
+        0x2E80..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF
+    )
 }
 
 fn decode_text(text: &str) -> Vec<char> {

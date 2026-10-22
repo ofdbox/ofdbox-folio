@@ -14,8 +14,10 @@ mod reader;
 
 /// 统一门面错误。
 pub use error::Error;
+/// 跨页选择与搜索常用类型。
+pub use ofdbox_folio_ir::{SearchHit, SearchQuery, Selection, TextPosition, TextRange};
 /// 阅读器与缓存类型。
-pub use reader::{CacheOptions, CacheStats, Document, OpenOptions, ReaderOptions};
+pub use reader::{CacheOptions, CacheStats, Document, OpenOptions, PageSelection, ReaderOptions};
 
 /// Flow IR、Fixed IR 与阅读器契约。
 pub use ofdbox_folio_ir as ir;

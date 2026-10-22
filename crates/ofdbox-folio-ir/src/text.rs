@@ -125,6 +125,28 @@ impl TextLayer {
         }
         text
     }
+
+    /// 页面文本起点。
+    pub fn start_position(&self) -> TextPosition {
+        TextPosition::new(self.page, 0, 0)
+    }
+
+    /// 页面文本终点（最后一个文本项的末尾）。
+    pub fn end_position(&self) -> TextPosition {
+        match self.items.len().checked_sub(1) {
+            Some(index) => TextPosition::new(
+                self.page,
+                index as u32,
+                self.items[index].run.char_count() as u32,
+            ),
+            None => self.start_position(),
+        }
+    }
+
+    /// 文本层是否为空。
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
 }
 
 /// 文本位置。
