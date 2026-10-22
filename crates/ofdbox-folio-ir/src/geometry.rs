@@ -126,6 +126,17 @@ impl Rect {
             && self.width.is_finite()
             && self.height.is_finite()
     }
+
+    /// 转换为矩形路径，方向为左上、右上、右下、左下。
+    pub fn to_path(self) -> crate::path::Path {
+        let mut path = crate::path::Path::new();
+        path.move_to(Point::new(self.x, self.y));
+        path.line_to(Point::new(self.right(), self.y));
+        path.line_to(Point::new(self.right(), self.bottom()));
+        path.line_to(Point::new(self.x, self.bottom()));
+        path.close();
+        path
+    }
 }
 
 /// 二维仿射矩阵。
@@ -189,6 +200,11 @@ impl Matrix {
             e: other.a * self.e + other.c * self.f + other.e,
             f: other.b * self.e + other.d * self.f + other.f,
         }
+    }
+
+    /// 变换一个点。
+    pub fn apply(self, point: Point) -> Point {
+        self.transform_point(point)
     }
 
     /// 变换一个点。

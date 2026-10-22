@@ -13,7 +13,14 @@ categories = ["graphics"]
 
 [dependencies]
 ofdbox-folio-ir.workspace = true
+bmp.workspace = true
+jpeg-decoder.workspace = true
+justbig2.workspace = true
+png.workspace = true
+skrifa.workspace = true
 thiserror.workspace = true
+tiff.workspace = true
+vello_cpu.workspace = true
 
 [lints]
 workspace = true

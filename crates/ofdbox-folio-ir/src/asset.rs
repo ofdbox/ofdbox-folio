@@ -123,6 +123,16 @@ impl FontAsset {
     pub fn id(&self) -> AssetId {
         self.id
     }
+
+    /// 字体文件字节。
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// 字体集合内的 face 索引。
+    pub fn face_index(&self) -> u32 {
+        self.face_index
+    }
 }
 
 /// 图片编码格式。

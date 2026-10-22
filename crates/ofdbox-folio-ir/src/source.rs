@@ -105,7 +105,10 @@ pub enum DocumentError {
 }
 
 /// 按需提供固定版式页面的文档源。
-pub trait DocumentSource: Send {
+///
+/// 当前不要求 `Send`：`ofdbox-core` 的包读取器尚未声明 `Send`，
+/// 阅读器在单线程内使用；后续可通过约束收紧。
+pub trait DocumentSource {
     /// 文档级信息。
     fn info(&self) -> &DocumentInfo;
 

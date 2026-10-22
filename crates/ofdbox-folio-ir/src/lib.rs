@@ -9,6 +9,7 @@
 pub mod asset;
 pub mod fixed;
 pub mod flow;
+pub mod font;
 pub mod geometry;
 pub mod meta;
 pub mod paint;
@@ -31,6 +32,7 @@ pub use flow::{
     LineSpacing, Link, LinkTarget, Margins, NamedStyle, PageSetup, ParaStyle, Paragraph, Row,
     Section, StyleSheet, Table, TableBorders, TextRun, TextStyle, TocBlock, TocStyle,
 };
+pub use font::{FontError, FontProvider, FontRequest};
 pub use geometry::{Matrix, Point, Rect, Rotation, Size};
 pub use meta::{
     AttachmentInfo, DateTime, Diagnostic, DiagnosticCode, Location, Metadata, Report, Severity,

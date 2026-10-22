@@ -1,5 +1,6 @@
 /target
 **/*.rs.bk
 .env
+.tmp_*/
 .DS_Store
 Thumbs.db

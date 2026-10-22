@@ -17,6 +17,21 @@ pub enum PathSegment {
     QuadTo(Point, Point),
     /// 三次贝塞尔曲线。
     CubicTo(Point, Point, Point),
+    /// 椭圆弧。
+    ArcTo {
+        /// 横轴半径。
+        rx: f64,
+        /// 纵轴半径。
+        ry: f64,
+        /// 椭圆旋转角，单位弧度。
+        rotation: f64,
+        /// 是否使用大弧。
+        large_arc: bool,
+        /// 是否顺时针。
+        sweep: bool,
+        /// 终点。
+        to: Point,
+    },
     /// 闭合当前子路径。
     Close,
 }
@@ -55,12 +70,60 @@ impl Path {
         &mut self.segments
     }
 
+    /// 添加移动指令。
+    pub fn move_to(&mut self, point: Point) {
+        self.segments.push(PathSegment::MoveTo(point));
+    }
+
+    /// 添加直线指令。
+    pub fn line_to(&mut self, point: Point) {
+        self.segments.push(PathSegment::LineTo(point));
+    }
+
+    /// 添加二次曲线指令。
+    pub fn quadratic_to(&mut self, control: Point, to: Point) {
+        self.segments.push(PathSegment::QuadTo(control, to));
+    }
+
+    /// 添加三次曲线指令。
+    pub fn cubic_to(&mut self, control1: Point, control2: Point, to: Point) {
+        self.segments
+            .push(PathSegment::CubicTo(control1, control2, to));
+    }
+
+    /// 添加椭圆弧指令。
+    #[allow(clippy::too_many_arguments)]
+    pub fn arc_to(
+        &mut self,
+        rx: f64,
+        ry: f64,
+        rotation: f64,
+        large_arc: bool,
+        sweep: bool,
+        to: Point,
+    ) {
+        self.segments.push(PathSegment::ArcTo {
+            rx,
+            ry,
+            rotation,
+            large_arc,
+            sweep,
+            to,
+        });
+    }
+
+    /// 闭合当前子路径。
+    pub fn close(&mut self) {
+        self.segments.push(PathSegment::Close);
+    }
+
     /// 控制点包围盒；空路径返回 `None`。
     pub fn bounds(&self) -> Option<Rect> {
         let mut points = self.segments.iter().flat_map(|segment| match segment {
             PathSegment::MoveTo(point) | PathSegment::LineTo(point) => vec![*point],
             PathSegment::QuadTo(control, end) => vec![*control, *end],
             PathSegment::CubicTo(control_a, control_b, end) => vec![*control_a, *control_b, *end],
+            PathSegment::ArcTo { to, .. } => vec![*to],
             PathSegment::Close => Vec::new(),
         });
         let first = points.next()?;
@@ -113,6 +176,28 @@ impl PathBuilder {
         self.path
             .segments
             .push(PathSegment::CubicTo(control_a, control_b, end));
+        self
+    }
+
+    /// 添加椭圆弧指令。
+    #[allow(clippy::too_many_arguments)]
+    pub fn arc_to(
+        &mut self,
+        rx: f64,
+        ry: f64,
+        rotation: f64,
+        large_arc: bool,
+        sweep: bool,
+        to: Point,
+    ) -> &mut Self {
+        self.path.segments.push(PathSegment::ArcTo {
+            rx,
+            ry,
+            rotation,
+            large_arc,
+            sweep,
+            to,
+        });
         self
     }
 

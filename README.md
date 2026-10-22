@@ -2,7 +2,7 @@
 
 OFDBox Folio 是一个以“页”为中心的多格式文档引擎：读取 OFD、PDF、DOCX，统一到 Flow IR / Fixed IR，完成排版、渲染与写出。
 
-**当前状态：设计契约已冻结，workspace 已建立，IR 数据模型与阅读器契约已实现；布局、渲染和格式适配器尚未开始。** 本文描述目标架构，不代表已交付能力。
+**当前状态：IR 契约已冻结，OFD → 图片主链路已打通。** 217 份 OFD 语料中 211 份可渲染（6 份源文件损坏）；11 个代表样本与旧 render 对比，9 份像素完全一致，2 份平均误差约 1%。布局、DOCX/PDF 适配、页面缓存与选择/搜索 API 尚未接入。
 
 ## 目标
 
@@ -152,7 +152,20 @@ let ofd = ofdbox_folio::to_ofd(&fixed, &OfdWriteOptions::default())?;
 | R3 PDF 阅读硬化 | 字体与 CMap、图案/渐变、透明、加密、坏文件容错 | 真实 PDF 语料可读，降级有报告 |
 | R4 文档能力 | 注释/表单、附件、大纲编辑、GPU 后端 | 阅读器功能闭环 |
 
-当前处于 R1 的 IR 类型与阅读器契约阶段，布局、渲染与格式适配继续推进。
+当前完成 R1 的 OFD 读取与 CPU 位图主链路。下一步接入 Reader 页面缓存、选择/搜索 API，并继续收敛字体回退与模板层语义。
+
+当前已知限制：
+
+- OFD 未内嵌字体时依赖调用方注入 `FontProvider`；示例使用系统字体。
+- 模板页目前拍平进页面内容，`Page.templates` 语义尚未拆分。
+- `load_page()` 每次都重新解析页面，Reader 字节预算缓存尚未接入。
+- 文本行按 TextObject 粗略分组，跨对象行合并待完善。
+
+## 快速验证
+
+```bash
+cargo run -p ofdbox-folio --example ofd_to_png -- input.ofd output.png 0 96
+```
 
 ## 测试与验收
 

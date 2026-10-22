@@ -28,5 +28,8 @@ docx = ["dep:ofdbox-folio-docx"]
 layout = ["dep:ofdbox-folio-layout"]
 cpu = ["dep:ofdbox-folio-render"]
 
+[dev-dependencies]
+png.workspace = true
+
 [lints]
 workspace = true

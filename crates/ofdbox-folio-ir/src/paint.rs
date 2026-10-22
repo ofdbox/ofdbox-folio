@@ -36,9 +36,19 @@ impl Rgba {
         Self::new(r, g, b, 255)
     }
 
+    /// 从 8 位分量创建颜色。
+    pub const fn from_rgba8(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self::new(r, g, b, a)
+    }
+
     /// 返回 `[r, g, b, a]`。
     pub const fn to_array(self) -> [u8; 4] {
         [self.r, self.g, self.b, self.a]
+    }
+
+    /// 返回 8 位非预乘分量。
+    pub const fn to_rgba8(self) -> [u8; 4] {
+        self.to_array()
     }
 }
 
@@ -93,6 +103,8 @@ pub struct StrokeStyle {
     pub join: LineJoin,
     /// 虚线模式，单位毫米；空数组表示实线。
     pub dash: Vec<f64>,
+    /// 虚线起始偏移，单位毫米。
+    pub dash_offset: f64,
     /// 尖角限制。
     pub miter_limit: f64,
 }
@@ -104,6 +116,7 @@ impl Default for StrokeStyle {
             cap: LineCap::Butt,
             join: LineJoin::Miter,
             dash: Vec::new(),
+            dash_offset: 0.0,
             miter_limit: 4.0,
         }
     }
@@ -152,17 +165,25 @@ pub struct LinearGradient {
     pub extend: GradientExtend,
 }
 
-/// 径向渐变。
+/// 径向渐变，支持两点圆锥形式和椭圆压缩。
 #[derive(Clone, Debug, PartialEq)]
 pub struct RadialGradient {
-    /// 圆心。
-    pub center: Point,
-    /// 半径，单位毫米。
-    pub radius: f64,
+    /// 起始圆心。
+    pub start_center: Point,
+    /// 起始半径，单位毫米。
+    pub start_radius: f64,
+    /// 结束圆心。
+    pub end_center: Point,
+    /// 结束半径，单位毫米。
+    pub end_radius: f64,
     /// 色标。
     pub stops: Vec<GradientStop>,
     /// 超出范围时的填充方式。
     pub extend: GradientExtend,
+    /// 椭圆离心率，0 表示圆。
+    pub eccentricity: f64,
+    /// 椭圆长轴与 X 轴正向的夹角，单位度。
+    pub angle: f64,
 }
 
 /// 填充或描边使用的画笔。

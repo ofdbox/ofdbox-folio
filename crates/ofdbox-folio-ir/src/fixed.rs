@@ -248,6 +248,8 @@ pub struct ImageElement {
     pub rect: Rect,
     /// 图片局部空间到父空间的变换。
     pub transform: Matrix,
+    /// 图片透明度，范围 0.0 到 1.0。
+    pub alpha: f32,
 }
 
 /// 共享模板层。

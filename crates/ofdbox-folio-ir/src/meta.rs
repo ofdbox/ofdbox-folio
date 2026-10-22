@@ -89,8 +89,18 @@ pub enum Severity {
 pub enum DiagnosticCode {
     /// 不支持的特性。
     Unsupported,
+    /// 不支持的图元类型。
+    UnsupportedObject,
     /// 字体缺失或无法解析。
     MissingFont,
+    /// 字体相关诊断。
+    Font,
+    /// 图片缺失或无法解码。
+    Image,
+    /// 颜色或画笔暂未实现。
+    Paint,
+    /// 几何数据无效。
+    Geometry,
     /// 内容被近似处理。
     Approximation,
     /// 字符与字形映射不完整。
@@ -104,7 +114,7 @@ pub enum DiagnosticCode {
 }
 
 /// 诊断位置。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Location {
     /// 页面索引。
     pub page: Option<usize>,
@@ -112,6 +122,8 @@ pub struct Location {
     pub block: Option<u32>,
     /// 文本项或对象索引。
     pub item: Option<u32>,
+    /// 源格式中的对象标识。
+    pub object: Option<String>,
 }
 
 /// 一条诊断。
