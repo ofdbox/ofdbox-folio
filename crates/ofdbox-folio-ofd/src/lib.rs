@@ -6,6 +6,7 @@
 #![allow(clippy::too_many_lines)]
 
 mod frontend;
+mod outline;
 mod writer;
 
 use std::cell::RefCell;
@@ -108,7 +109,7 @@ impl OfdDocument {
             format: SourceFormat::Ofd,
             metadata: Metadata::default(),
             page_count: pages.len(),
-            outline: Vec::new(),
+            outline: outline::build_outline(&document, &pages),
             attachments: Vec::new(),
         };
         Ok(Self {
@@ -347,5 +348,87 @@ mod tests {
         let page = document.load_page(0).expect("page");
         assert_eq!(page.content.size.width, 100.0);
         assert!(count_elements(&page.content.root.children) >= 2);
+    }
+
+    /// 带两级大纲的两页 OFD。
+    fn ofd_with_outline() -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        let page = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ofd:Page xmlns:ofd="http://www.ofdspec.org/2016">
+  <ofd:Area><ofd:PhysicalBox>0 0 100 100</ofd:PhysicalBox></ofd:Area>
+  <ofd:Content><ofd:Layer ID="2"/></ofd:Content>
+</ofd:Page>"#;
+        let entries = [
+            (
+                "OFD.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<ofd:OFD xmlns:ofd="http://www.ofdspec.org/2016" Version="1.1" DocType="OFD">
+  <ofd:DocBody>
+    <ofd:DocInfo><ofd:DocID>outline</ofd:DocID><ofd:Creator>test</ofd:Creator></ofd:DocInfo>
+    <ofd:DocRoot>Doc_0/Document.xml</ofd:DocRoot>
+  </ofd:DocBody>
+</ofd:OFD>"#,
+            ),
+            (
+                "Doc_0/Document.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<ofd:Document xmlns:ofd="http://www.ofdspec.org/2016">
+  <ofd:CommonData>
+    <ofd:MaxUnitID>9</ofd:MaxUnitID>
+    <ofd:PageArea><ofd:PhysicalBox>0 0 100 100</ofd:PhysicalBox></ofd:PageArea>
+  </ofd:CommonData>
+  <ofd:Pages>
+    <ofd:Page ID="101" BaseLoc="Pages/Page_0/Content.xml"/>
+    <ofd:Page ID="629" BaseLoc="Pages/Page_1/Content.xml"/>
+  </ofd:Pages>
+  <ofd:Outlines>
+    <ofd:OutlineElem Title="扉页">
+      <ofd:Actions><ofd:Action><ofd:Goto><ofd:Dest Type="Fit" PageID="101"/></ofd:Goto></ofd:Action></ofd:Actions>
+    </ofd:OutlineElem>
+    <ofd:OutlineElem Title="正文">
+      <ofd:Actions><ofd:Action><ofd:Goto><ofd:Dest Type="XYZ" PageID="629" Left="12.5" Top="34"/></ofd:Goto></ofd:Action></ofd:Actions>
+      <ofd:OutlineElem Title="第一节">
+        <ofd:Actions><ofd:Action><ofd:Goto><ofd:Dest Type="Fit" PageID="629"/></ofd:Goto></ofd:Action></ofd:Actions>
+      </ofd:OutlineElem>
+    </ofd:OutlineElem>
+  </ofd:Outlines>
+</ofd:Document>"#,
+            ),
+            ("Doc_0/Pages/Page_0/Content.xml", page),
+            ("Doc_0/Pages/Page_1/Content.xml", page),
+        ];
+        for (name, content) in entries {
+            zip.start_file(name, options).expect("zip entry");
+            zip.write_all(content.as_bytes()).expect("zip write");
+        }
+        zip.finish().expect("zip finish").into_inner()
+    }
+
+    #[test]
+    fn reads_outline_with_nesting() {
+        let document =
+            OfdDocument::open_bytes(ofd_with_outline(), OfdReadOptions::default()).expect("open");
+        let outline = &document.info().outline;
+        assert_eq!(outline.len(), 2, "顶层节点: {outline:?}");
+        assert_eq!(outline[0].title, "扉页");
+        assert_eq!(outline[0].destination.page, 0);
+        assert!(outline[0].children.is_empty());
+
+        let body = &outline[1];
+        assert_eq!(body.title, "正文");
+        assert_eq!(body.destination.page, 1);
+        assert!((body.destination.point.x - 12.5).abs() < 1e-6);
+        assert!((body.destination.point.y - 34.0).abs() < 1e-6);
+        assert_eq!(body.children.len(), 1);
+        assert_eq!(body.children[0].title, "第一节");
+        assert_eq!(body.children[0].destination.page, 1);
+    }
+
+    #[test]
+    fn outline_is_empty_without_outlines() {
+        let document =
+            OfdDocument::open_bytes(minimal_ofd(), OfdReadOptions::default()).expect("open");
+        assert!(document.info().outline.is_empty());
     }
 }
