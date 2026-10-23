@@ -11,7 +11,7 @@ use std::sync::Arc;
 use ofdbox_folio_ir::{
     AssetId, Element, FixedDocument, FontAsset, Group, ImageAsset, ImageElement, ImageFormat,
     LineCap, LineJoin, Matrix, Page, Paint, Path, PathElement, PathSegment, Point, Rgba, Scene,
-    StrokeStyle, TextElement,
+    StrokeStyle, TextElement, apply_image_mask,
 };
 
 use crate::error::PdfError;
@@ -641,7 +641,8 @@ impl Writer {
         } else {
             image.format
         };
-        if format == ImageFormat::Jpeg {
+        // 带蒙版的 JPEG 不能走 DCTDecode 直通，否则蒙版会丢；改为解码后写 SMask。
+        if format == ImageFormat::Jpeg && image.mask.is_none() {
             return self.embed_jpeg(image, name);
         }
         let decoded = decode_rgba(image, self.options.max_image_pixels)?;
@@ -741,6 +742,7 @@ fn decode_rgba(image: &ImageAsset, max_pixels: u64) -> Result<DecodedImage, PdfE
     };
     let mut decoded = match format {
         ImageFormat::Png => decode_png(&image.encoded, max_pixels)?,
+        ImageFormat::Jpeg => decode_jpeg(&image.encoded, max_pixels)?,
         ImageFormat::Jbig2 => decode_jbig2(&image.encoded)?,
         ImageFormat::Bmp => decode_bmp(&image.encoded)?,
         other => {
@@ -749,21 +751,15 @@ fn decode_rgba(image: &ImageAsset, max_pixels: u64) -> Result<DecodedImage, PdfE
     };
     if let Some(mask) = &image.mask {
         let mask = decode_rgba(mask, max_pixels)?;
-        if mask.width == decoded.width && mask.height == decoded.height {
-            for (pixel, mask_pixel) in decoded
-                .rgba
-                .as_chunks_mut::<4>()
-                .0
-                .iter_mut()
-                .zip(mask.rgba.as_chunks::<4>().0)
-            {
-                let factor = (u32::from(mask_pixel[0])
-                    + u32::from(mask_pixel[1])
-                    + u32::from(mask_pixel[2]))
-                    / 3;
-                pixel[3] = ((u32::from(pixel[3]) * factor) / 255) as u8;
-            }
-        }
+        apply_image_mask(
+            &mut decoded.rgba,
+            decoded.width,
+            decoded.height,
+            &mask.rgba,
+            mask.width,
+            mask.height,
+        )
+        .map_err(|error| PdfError::Image(format!("图像蒙版不可用: {error}")))?;
     }
     Ok(decoded)
 }
@@ -842,6 +838,63 @@ fn decode_png(data: &[u8], max_pixels: u64) -> Result<DecodedImage, PdfError> {
     Ok(DecodedImage {
         width: info.width,
         height: info.height,
+        rgba,
+    })
+}
+
+fn decode_jpeg(data: &[u8], max_pixels: u64) -> Result<DecodedImage, PdfError> {
+    let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(data));
+    decoder
+        .read_info()
+        .map_err(|error| PdfError::Image(error.to_string()))?;
+    let header = decoder
+        .info()
+        .ok_or_else(|| PdfError::Image("缺少 JPEG 图像信息".to_owned()))?;
+    let pixel_count = u64::from(header.width) * u64::from(header.height);
+    if pixel_count > max_pixels {
+        return Err(PdfError::Image("图片像素数超出限制".to_owned()));
+    }
+    let pixels = decoder
+        .decode()
+        .map_err(|error| PdfError::Image(error.to_string()))?;
+    let info = decoder
+        .info()
+        .ok_or_else(|| PdfError::Image("缺少 JPEG 图像信息".to_owned()))?;
+    let rgba = match info.pixel_format {
+        jpeg_decoder::PixelFormat::L8 => pixels
+            .iter()
+            .flat_map(|value| [*value, *value, *value, 255])
+            .collect(),
+        jpeg_decoder::PixelFormat::RGB24 => pixels
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
+            .collect(),
+        jpeg_decoder::PixelFormat::CMYK32 => pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|pixel| {
+                let c = u16::from(pixel[0]);
+                let m = u16::from(pixel[1]);
+                let y = u16::from(pixel[2]);
+                let k = u16::from(pixel[3]);
+                [
+                    (255 - ((c + k).min(255))) as u8,
+                    (255 - ((m + k).min(255))) as u8,
+                    (255 - ((y + k).min(255))) as u8,
+                    255,
+                ]
+            })
+            .collect(),
+        jpeg_decoder::PixelFormat::L16 => {
+            return Err(PdfError::Image("不支持 16 位灰度 JPEG".to_owned()));
+        }
+    };
+    Ok(DecodedImage {
+        width: u32::from(info.width),
+        height: u32::from(info.height),
         rgba,
     })
 }

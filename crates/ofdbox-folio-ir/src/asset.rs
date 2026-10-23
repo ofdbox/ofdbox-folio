@@ -338,9 +338,90 @@ fn same_image(a: &ImageAsset, b: &ImageAsset) -> bool {
         }
 }
 
+/// 把灰度蒙版乘入 RGBA8 像素的 alpha 通道。
+///
+/// 蒙版与图片描述同一块物理区域，但生产方常按不同分辨率存放（例如 25×25 的
+/// 图片配 75×75 的 1 bit 蒙版）。尺寸不同时把蒙版按面积平均重采样到图片像素
+/// 网格，因此调用方不需要自己处理缩放。
+///
+/// 返回的错误说明蒙版为什么不可用；调用方应按无蒙版降级或报错，而不是使用半张蒙版。
+pub fn apply_image_mask(
+    rgba: &mut [u8],
+    width: u32,
+    height: u32,
+    mask: &[u8],
+    mask_width: u32,
+    mask_height: u32,
+) -> Result<(), &'static str> {
+    if mask_width == 0 || mask_height == 0 {
+        return Err("蒙版尺寸为 0");
+    }
+    if mask.len() < mask_width as usize * mask_height as usize * 4 {
+        return Err("蒙版像素数据不完整");
+    }
+    if rgba.len() < width as usize * height as usize * 4 {
+        return Err("图像像素数据不完整");
+    }
+    if mask_width == width && mask_height == height {
+        for (pixel, mask_pixel) in rgba
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(mask.as_chunks::<4>().0)
+        {
+            pixel[3] = apply_factor(pixel[3], mask_factor(mask_pixel));
+        }
+        return Ok(());
+    }
+    let mask_width = mask_width as usize;
+    for y in 0..height {
+        let (row_start, row_end) = sample_range(y, height, mask_height);
+        for x in 0..width {
+            let (column_start, column_end) = sample_range(x, width, mask_width as u32);
+            let mut sum = 0_u64;
+            let mut count = 0_u64;
+            for row in row_start..row_end {
+                for column in column_start..column_end {
+                    let index = (row as usize * mask_width + column as usize) * 4;
+                    sum += u64::from(mask[index])
+                        + u64::from(mask[index + 1])
+                        + u64::from(mask[index + 2]);
+                    count += 1;
+                }
+            }
+            let factor = if count == 0 {
+                255
+            } else {
+                (sum / (count * 3)) as u32
+            };
+            let index = (y as usize * width as usize + x as usize) * 4 + 3;
+            rgba[index] = apply_factor(rgba[index], factor);
+        }
+    }
+    Ok(())
+}
+
+/// 蒙版像素的灰度。
+fn mask_factor(mask_pixel: &[u8]) -> u32 {
+    (u32::from(mask_pixel[0]) + u32::from(mask_pixel[1]) + u32::from(mask_pixel[2])) / 3
+}
+
+/// 把 0–255 的灰度系数乘到 alpha 上。
+fn apply_factor(alpha: u8, factor: u32) -> u8 {
+    ((u32::from(alpha) * factor) / 255) as u8
+}
+
+/// 目标像素 `index` 在源像素网格上覆盖的半开区间。
+fn sample_range(index: u32, dst_len: u32, src_len: u32) -> (u32, u32) {
+    let start = (u64::from(index) * u64::from(src_len) / u64::from(dst_len)) as u32;
+    let start = start.min(src_len - 1);
+    let end = ((u64::from(index) + 1) * u64::from(src_len) / u64::from(dst_len)) as u32;
+    (start, end.max(start + 1).min(src_len))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AssetId, FontAsset, ImageAsset, ImageFormat, ResourceStore};
+    use super::{AssetId, FontAsset, ImageAsset, ImageFormat, ResourceStore, apply_image_mask};
     use std::sync::Arc;
 
     #[test]
@@ -383,5 +464,40 @@ mod tests {
     fn unassigned_id_is_zero() {
         assert_eq!(AssetId::default(), AssetId::UNASSIGNED);
         assert_eq!(AssetId::UNASSIGNED.get(), 0);
+    }
+
+    #[test]
+    fn mask_reduces_alpha_by_gray_level() {
+        let mut pixels = vec![10, 20, 30, 200];
+        apply_image_mask(&mut pixels, 1, 1, &[128, 128, 128, 255], 1, 1).expect("mask");
+        assert_eq!(pixels[3], 100);
+    }
+
+    #[test]
+    fn mask_is_downsampled_to_image_grid() {
+        let mut pixels = [10, 20, 30, 255].repeat(4);
+        // 4×4 蒙版：上半黑、下半白，与 2×2 图片描述同一块区域。
+        let mut mask = Vec::new();
+        for y in 0..4 {
+            let value = if y < 2 { 0 } else { 255 };
+            for _ in 0..4 {
+                mask.extend_from_slice(&[value, value, value, 255]);
+            }
+        }
+        apply_image_mask(&mut pixels, 2, 2, &mask, 4, 4).expect("mask");
+        let alphas: Vec<u8> = pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|pixel| pixel[3])
+            .collect();
+        assert_eq!(alphas, [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn unusable_mask_is_rejected() {
+        let mut pixels = [10, 20, 30, 255].repeat(4);
+        assert!(apply_image_mask(&mut pixels, 2, 2, &[], 0, 0).is_err());
+        assert!(apply_image_mask(&mut pixels, 2, 2, &[0, 0, 0, 255], 2, 2).is_err());
     }
 }

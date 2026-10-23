@@ -23,74 +23,19 @@ pub struct DecodedImage {
 impl DecodedImage {
     /// 将灰度蒙版乘入 alpha 通道。
     ///
-    /// 蒙版与图片描述同一块物理区域，但生产方常按不同分辨率存放（例如 25×25 的
-    /// 图片配 75×75 的 1 bit 蒙版）。尺寸不等时把蒙版按面积平均重采样到图片像素
-    /// 网格，只有蒙版本身不可用时才返回错误。
+    /// 蒙版与图片描述同一块物理区域，但生产方常按不同分辨率存放；尺寸不等时
+    /// 由 [`ofdbox_folio_ir::apply_image_mask`] 按面积平均重采样到图片像素网格。
     pub fn apply_mask(&mut self, mask: &DecodedImage) -> Result<(), RenderError> {
-        if mask.width == 0 || mask.height == 0 {
-            return Err(RenderError::Image("图像蒙版尺寸无效".to_owned()));
-        }
-        let expected = mask.width as usize * mask.height as usize * 4;
-        if mask.rgba.len() < expected {
-            return Err(RenderError::Image("图像蒙版像素数据不完整".to_owned()));
-        }
-        if mask.width == self.width && mask.height == self.height {
-            for (pixel, mask_pixel) in self
-                .rgba
-                .as_chunks_mut::<4>()
-                .0
-                .iter_mut()
-                .zip(mask.rgba.as_chunks::<4>().0)
-            {
-                pixel[3] = apply_factor(pixel[3], mask_factor(mask_pixel));
-            }
-            return Ok(());
-        }
-        let mask_width = mask.width as usize;
-        for y in 0..self.height {
-            let (row_start, row_end) = sample_range(y, self.height, mask.height);
-            for x in 0..self.width {
-                let (column_start, column_end) = sample_range(x, self.width, mask.width);
-                let mut sum = 0_u64;
-                let mut count = 0_u64;
-                for row in row_start..row_end {
-                    for column in column_start..column_end {
-                        let index = (row as usize * mask_width + column as usize) * 4;
-                        sum += u64::from(mask.rgba[index])
-                            + u64::from(mask.rgba[index + 1])
-                            + u64::from(mask.rgba[index + 2]);
-                        count += 1;
-                    }
-                }
-                let factor = if count == 0 {
-                    255
-                } else {
-                    (sum / (count * 3)) as u32
-                };
-                let index = (y as usize * self.width as usize + x as usize) * 4 + 3;
-                self.rgba[index] = apply_factor(self.rgba[index], factor);
-            }
-        }
-        Ok(())
+        ofdbox_folio_ir::apply_image_mask(
+            &mut self.rgba,
+            self.width,
+            self.height,
+            &mask.rgba,
+            mask.width,
+            mask.height,
+        )
+        .map_err(|error| RenderError::Image(format!("图像蒙版不可用: {error}")))
     }
-}
-
-/// 蒙版像素的灰度。
-fn mask_factor(mask_pixel: &[u8]) -> u32 {
-    (u32::from(mask_pixel[0]) + u32::from(mask_pixel[1]) + u32::from(mask_pixel[2])) / 3
-}
-
-/// 把 0–255 的灰度系数乘到 alpha 上。
-fn apply_factor(alpha: u8, factor: u32) -> u8 {
-    ((u32::from(alpha) * factor) / 255) as u8
-}
-
-/// 目标像素 `index` 在源像素网格上覆盖的半开区间。
-fn sample_range(index: u32, dst_len: u32, src_len: u32) -> (u32, u32) {
-    let start = (u64::from(index) * u64::from(src_len) / u64::from(dst_len)) as u32;
-    let start = start.min(src_len - 1);
-    let end = ((u64::from(index) + 1) * u64::from(src_len) / u64::from(dst_len)) as u32;
-    (start, end.max(start + 1).min(src_len))
 }
 
 /// 按文件头识别图片格式。

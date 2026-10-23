@@ -1113,6 +1113,7 @@ dependencies = [
  "bmp",
  "flate2",
  "hayro-ccitt",
+ "jpeg-decoder",
  "justbig2",
  "kurbo",
  "lopdf",

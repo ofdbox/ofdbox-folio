@@ -6,8 +6,8 @@ use std::sync::Arc;
 use ofdbox_folio_ir::{
     Cluster, DocumentSource, Element, FillRule, FixedDocument, FontAsset, Glyph, GlyphRun,
     GradientExtend, GradientStop, Group, ImageAsset, ImageElement, ImageFormat, LinearGradient,
-    Matrix, Metadata, Page, PageInfo, Paint, Path, PathElement, Point, Rect, Rgba, Rotation, Scene,
-    Size, TextElement,
+    Matrix, Metadata, Page, PageInfo, Paint, Path, PathElement, Point, Rect, ResourceStore, Rgba,
+    Rotation, Scene, Size, TextElement,
 };
 use ofdbox_folio_pdf::{PdfBackend, PdfDocument, PdfOptions, PdfReadOptions, probe, write_fixed};
 
@@ -79,6 +79,146 @@ fn writes_empty_page() {
     assert!(text.starts_with("%PDF-1.7"));
     assert!(text.contains("/MediaBox [0 0 283.4646 283.4646]"));
     assert!(pdf.ends_with(b"%%EOF\n"));
+}
+
+#[test]
+fn writes_mask_as_soft_mask() {
+    // 2×2 图像配 4×4 全黑蒙版：尺寸不同也要重采样后写成 SMask。
+    let image = masked_image(
+        ImageAsset::new(
+            ImageFormat::Png,
+            Arc::from(solid_png(2, 2, [200, 30, 30, 255])),
+            2,
+            2,
+        ),
+        ImageAsset::new(
+            ImageFormat::Png,
+            Arc::from(solid_png(4, 4, [0, 0, 0, 255])),
+            4,
+            4,
+        ),
+    );
+    let mut scene = scene();
+    scene
+        .root
+        .children
+        .push(Element::Image(image_element(image)));
+    let pdf = write_fixed(&fixed(scene), &PdfOptions::default()).expect("pdf");
+    let text = pdf_text(&pdf);
+    assert!(text.contains("/SMask"), "缺少 SMask");
+    assert!(text.contains("/DeviceGray"));
+    let mut document = PdfDocument::open_bytes(pdf, PdfReadOptions::default()).expect("open");
+    let page = document.load_page(0).expect("page");
+    let image = first_image(&page).expect("image");
+    // 蒙版全黑，读回后 alpha 全为 0。
+    assert!(png_alphas(&image.encoded).iter().all(|alpha| *alpha == 0));
+}
+
+#[test]
+fn masked_jpeg_is_not_passed_through() {
+    let jpeg = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/stamp.jpg"
+    ))
+    .expect("jpeg fixture");
+
+    let image = masked_image(
+        ImageAsset::new(ImageFormat::Jpeg, Arc::from(jpeg.clone()), 8, 8),
+        ImageAsset::new(
+            ImageFormat::Png,
+            Arc::from(solid_png(8, 8, [0, 0, 0, 255])),
+            8,
+            8,
+        ),
+    );
+    let mut content = scene();
+    content
+        .root
+        .children
+        .push(Element::Image(image_element(image)));
+    let text = pdf_text(&write_fixed(&fixed(content), &PdfOptions::default()).expect("pdf"));
+    assert!(text.contains("/SMask"), "带蒙版的 JPEG 必须写 SMask");
+    assert!(!text.contains("/DCTDecode"), "带蒙版的 JPEG 不能直通");
+
+    let image = plain_image(ImageAsset::new(ImageFormat::Jpeg, Arc::from(jpeg), 8, 8));
+    let mut content = scene();
+    content
+        .root
+        .children
+        .push(Element::Image(image_element(image)));
+    let text = pdf_text(&write_fixed(&fixed(content), &PdfOptions::default()).expect("pdf"));
+    assert!(text.contains("/DCTDecode"), "无蒙版 JPEG 仍应直通");
+    assert!(!text.contains("/SMask"));
+}
+
+fn solid_png(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer
+            .write_image_data(&rgba.repeat((width * height) as usize))
+            .expect("png data");
+    }
+    bytes
+}
+
+fn masked_image(image: ImageAsset, mask: ImageAsset) -> Arc<ImageAsset> {
+    let mut store = ResourceStore::new();
+    let mask_id = store.add_image(mask);
+    let mask = store.image(mask_id).cloned().expect("mask");
+    let image_id = store.add_image(image.with_mask(mask));
+    store.image(image_id).cloned().expect("image")
+}
+
+fn plain_image(image: ImageAsset) -> Arc<ImageAsset> {
+    let mut store = ResourceStore::new();
+    let id = store.add_image(image);
+    store.image(id).cloned().expect("image")
+}
+
+fn image_element(image: Arc<ImageAsset>) -> ImageElement {
+    ImageElement {
+        image,
+        rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+        transform: Matrix::IDENTITY,
+        alpha: 1.0,
+    }
+}
+
+fn first_image(page: &Page) -> Option<Arc<ImageAsset>> {
+    fn walk(elements: &[Element]) -> Option<Arc<ImageAsset>> {
+        for element in elements {
+            match element {
+                Element::Image(image) => return Some(Arc::clone(&image.image)),
+                Element::Group(group) => {
+                    if let Some(image) = walk(&group.children) {
+                        return Some(image);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    walk(&page.content.root.children)
+}
+
+fn png_alphas(bytes: &[u8]) -> Vec<u8> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = decoder.read_info().expect("png info");
+    let mut buffer = vec![0; reader.output_buffer_size().expect("png size")];
+    let info = reader.next_frame(&mut buffer).expect("png frame");
+    assert_eq!(info.color_type, png::ColorType::Rgba, "读回的图片应为 RGBA");
+    buffer[..info.buffer_size()]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|pixel| pixel[3])
+        .collect()
 }
 
 #[test]

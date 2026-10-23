@@ -20,6 +20,7 @@ pub mod units;
 
 pub use asset::{
     AnchorId, AssetId, AttachmentId, FontAsset, ImageAsset, ImageFormat, ResourceStore, TemplateId,
+    apply_image_mask,
 };
 pub use fixed::{
     Clip, Destination, Element, EngineInfo, FixedDocument, FontFingerprint, Group, ImageElement,
