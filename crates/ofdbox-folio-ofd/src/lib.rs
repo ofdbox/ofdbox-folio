@@ -5,6 +5,7 @@
 
 #![allow(clippy::too_many_lines)]
 
+mod attachments;
 mod frontend;
 mod outline;
 mod writer;
@@ -81,6 +82,7 @@ pub struct OfdDocument {
     pages: Vec<PageView>,
     info: DocumentInfo,
     store: ResourceStore,
+    attachments: attachments::OfdAttachments,
     font_cache: HashMap<String, Option<frontend::ResolvedFont>>,
     font_provider: Option<Box<dyn FontProvider>>,
     page_infos: RefCell<Vec<Option<PageInfo>>>,
@@ -105,12 +107,13 @@ impl OfdDocument {
             .pages()
             .map(|pages| pages.pages().collect::<Vec<_>>())
             .unwrap_or_default();
+        let attachments = attachments::read(&mut package, &document);
         let info = DocumentInfo {
             format: SourceFormat::Ofd,
             metadata: Metadata::default(),
             page_count: pages.len(),
             outline: outline::build_outline(&document, &pages),
-            attachments: Vec::new(),
+            attachments: attachments.info.clone(),
         };
         Ok(Self {
             package: RefCell::new(package),
@@ -118,6 +121,7 @@ impl OfdDocument {
             info,
             page_infos: RefCell::new(vec![None; pages.len()]),
             pages,
+            attachments,
             store: ResourceStore::new(),
             font_cache: HashMap::new(),
             font_provider,
@@ -214,8 +218,16 @@ impl DocumentSource for OfdDocument {
         Ok(page)
     }
 
-    fn load_attachment(&mut self, _id: AttachmentId) -> Result<Arc<[u8]>, PageError> {
-        Err(PageError::Unsupported("附件读取尚未实现".to_owned()))
+    fn load_attachment(&mut self, id: AttachmentId) -> Result<Arc<[u8]>, PageError> {
+        let file = self
+            .attachments
+            .files
+            .iter()
+            .find(|(attachment, _)| *attachment == id)
+            .map(|(_, file)| file.clone())
+            .ok_or_else(|| PageError::Decode(format!("附件不存在: {}", id.get())))?;
+        let mut package = self.package.borrow_mut();
+        attachments::load(&mut package, &self.attachments.dir, &file).map_err(PageError::from)
     }
 
     fn font_names(&mut self) -> Result<Vec<String>, PageError> {
@@ -430,5 +442,82 @@ mod tests {
         let document =
             OfdDocument::open_bytes(minimal_ofd(), OfdReadOptions::default()).expect("open");
         assert!(document.info().outline.is_empty());
+    }
+
+    /// 带一个附件的 OFD。
+    fn ofd_with_attachment() -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        let entries: [(&str, &[u8]); 5] = [
+            (
+                "OFD.xml",
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<ofd:OFD xmlns:ofd="http://www.ofdspec.org/2016" Version="1.1" DocType="OFD">
+  <ofd:DocBody>
+    <ofd:DocInfo><ofd:DocID>attach</ofd:DocID><ofd:Creator>test</ofd:Creator></ofd:DocInfo>
+    <ofd:DocRoot>Doc_0/Document.xml</ofd:DocRoot>
+  </ofd:DocBody>
+</ofd:OFD>"#,
+            ),
+            (
+                "Doc_0/Document.xml",
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<ofd:Document xmlns:ofd="http://www.ofdspec.org/2016">
+  <ofd:CommonData>
+    <ofd:MaxUnitID>3</ofd:MaxUnitID>
+    <ofd:PageArea><ofd:PhysicalBox>0 0 100 100</ofd:PhysicalBox></ofd:PageArea>
+  </ofd:CommonData>
+  <ofd:Pages><ofd:Page ID="1" BaseLoc="Pages/Page_0/Content.xml"/></ofd:Pages>
+  <ofd:Attachments>Attachments/Attachments.xml</ofd:Attachments>
+</ofd:Document>"#,
+            ),
+            (
+                "Doc_0/Pages/Page_0/Content.xml",
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<ofd:Page xmlns:ofd="http://www.ofdspec.org/2016">
+  <ofd:Area><ofd:PhysicalBox>0 0 100 100</ofd:PhysicalBox></ofd:Area>
+  <ofd:Content><ofd:Layer ID="2"/></ofd:Content>
+</ofd:Page>"#,
+            ),
+            (
+                "Doc_0/Attachments/Attachments.xml",
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<ofd:Attachments xmlns:ofd="http://www.ofdspec.org/2016">
+  <ofd:Attachment ID="1" Name="note.txt" Format="txt" Size="5">
+    <ofd:FileLoc>note.txt</ofd:FileLoc>
+  </ofd:Attachment>
+</ofd:Attachments>"#,
+            ),
+            ("Doc_0/Attachments/note.txt", b"hello"),
+        ];
+        for (name, content) in entries {
+            zip.start_file(name, options).expect("zip entry");
+            zip.write_all(content).expect("zip write");
+        }
+        zip.finish().expect("zip finish").into_inner()
+    }
+
+    #[test]
+    fn reads_attachment_list_and_bytes() {
+        let mut document =
+            OfdDocument::open_bytes(ofd_with_attachment(), OfdReadOptions::default())
+                .expect("open");
+        let attachments = &document.info().attachments;
+        assert_eq!(attachments.len(), 1, "附件: {attachments:?}");
+        assert_eq!(attachments[0].name, "note.txt");
+        assert_eq!(attachments[0].format.as_deref(), Some("txt"));
+        assert_eq!(attachments[0].size, 5);
+
+        let bytes = document
+            .load_attachment(attachments[0].id)
+            .expect("load attachment");
+        assert_eq!(&bytes[..], b"hello");
+    }
+
+    #[test]
+    fn attachments_are_empty_without_declaration() {
+        let document =
+            OfdDocument::open_bytes(minimal_ofd(), OfdReadOptions::default()).expect("open");
+        assert!(document.info().attachments.is_empty());
     }
 }

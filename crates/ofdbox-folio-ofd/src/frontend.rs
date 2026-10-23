@@ -1,4 +1,4 @@
-//! OFD 页面前端：把 OFD 内容转换为 OFDBox Folio 的 Fixed IR。
+﻿//! OFD 页面前端：把 OFD 内容转换为 OFDBox Folio 的 Fixed IR。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -2672,7 +2672,7 @@ fn resolve_existing(package: &OfdPackage, base: &str, loc: &str) -> Option<Strin
     None
 }
 
-fn read_resource(
+pub(crate) fn read_resource(
     package: &mut OfdPackage,
     dir: &str,
     base: Option<&str>,

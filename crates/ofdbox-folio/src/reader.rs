@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use ofdbox_folio_ir::{
     AttachmentId, AttachmentInfo, DocumentError, DocumentInfo, DocumentSource, FontProvider,
-    Metadata, OutlineItem, Page, PageInfo, SearchHit, SearchQuery, Selection, SourceFormat,
+    Metadata, OutlineItem, Page, PageInfo, Point, SearchHit, SearchQuery, Selection, SourceFormat,
     TextPosition, TextRange,
 };
 
@@ -367,6 +367,12 @@ impl Document {
             output.push_str(&text);
         }
         Ok(output)
+    }
+
+    /// 命中测试：页面坐标（毫米，左上角原点）落在哪个字符上。
+    pub fn hit_test(&mut self, page: usize, point: Point) -> Result<Option<TextPosition>, Error> {
+        let page = self.page(page)?;
+        Ok(ofdbox_folio_ir::hit_test(&page.text, point))
     }
 
     /// 返回跨页选择覆盖的页面矩形。
