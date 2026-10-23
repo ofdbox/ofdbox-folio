@@ -9,12 +9,15 @@ use std::io::{Cursor, Write};
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
-    Element, FillRule, FixedDocument, FontAsset, Glyph, GradientExtend, Group, ImageAsset,
-    ImageElement, ImageFormat, LineCap, LineJoin, Matrix, Page, Paint, Path, PathElement,
-    PathSegment, Rect, Rgba, StrokeStyle, TextElement,
+    Destination, Element, FillRule, FixedDocument, FontAsset, Glyph, GradientExtend, Group,
+    ImageAsset, ImageElement, ImageFormat, LineCap, LineJoin, Matrix, OutlineItem, Page, Paint,
+    Path, PathElement, PathSegment, Point, Rect, Rgba, StrokeStyle, TextElement,
 };
 
 use crate::OfdError;
+
+/// 大纲树最大嵌套深度，避免异常输入把写出拖入深递归。
+const MAX_OUTLINE_DEPTH: usize = 16;
 
 /// OFD 写出选项。
 #[derive(Clone, Debug)]
@@ -86,6 +89,7 @@ pub fn write_fixed(
         })
         .collect::<Vec<_>>()
         .join("");
+    let outline = outline_xml(&document.outline, &pages);
     let first = pages.first().expect("pages checked");
     let mut resources = String::new();
     if !state.font_entries.is_empty() {
@@ -95,7 +99,7 @@ pub fn write_fixed(
         resources.push_str("<ofd:DocumentRes>DocumentRes.xml</ofd:DocumentRes>");
     }
     let document_xml = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ofd:Document xmlns:ofd=\"http://www.ofdspec.org/2016\"><ofd:CommonData><ofd:MaxUnitID>{max_unit_id}</ofd:MaxUnitID><ofd:PageArea><ofd:PhysicalBox>0 0 {} {}</ofd:PhysicalBox></ofd:PageArea>{resources}</ofd:CommonData><ofd:Pages>{page_refs}</ofd:Pages></ofd:Document>",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ofd:Document xmlns:ofd=\"http://www.ofdspec.org/2016\"><ofd:CommonData><ofd:MaxUnitID>{max_unit_id}</ofd:MaxUnitID><ofd:PageArea><ofd:PhysicalBox>0 0 {} {}</ofd:PhysicalBox></ofd:PageArea>{resources}</ofd:CommonData><ofd:Pages>{page_refs}</ofd:Pages>{outline}</ofd:Document>",
         number(first.width),
         number(first.height)
     );
@@ -483,6 +487,52 @@ impl PageWriter<'_> {
             bytes: Arc::clone(&image.encoded),
         });
         id
+    }
+}
+
+/// 生成 `<ofd:Outlines>` 片段；没有大纲时返回空串。
+fn outline_xml(items: &[OutlineItem], pages: &[PageXml]) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    let mut xml = String::from("<ofd:Outlines>");
+    push_outline(&mut xml, items, pages, 0);
+    xml.push_str("</ofd:Outlines>");
+    xml
+}
+
+fn push_outline(xml: &mut String, items: &[OutlineItem], pages: &[PageXml], depth: usize) {
+    if depth >= MAX_OUTLINE_DEPTH {
+        return;
+    }
+    let first_page = pages.first().map(|page| page.id).unwrap_or(1);
+    for item in items {
+        xml.push_str("<ofd:OutlineElem Title=\"");
+        xml.push_str(&xml_escape(&item.title));
+        xml.push_str("\">");
+        let page_id = pages
+            .get(item.destination.page)
+            .map(|page| page.id)
+            .unwrap_or(first_page);
+        xml.push_str("<ofd:Actions><ofd:Action><ofd:Goto>");
+        xml.push_str(&dest_xml(page_id, item.destination));
+        xml.push_str("</ofd:Goto></ofd:Action></ofd:Actions>");
+        push_outline(xml, &item.children, pages, depth + 1);
+        xml.push_str("</ofd:OutlineElem>");
+    }
+}
+
+/// 目标区域：整页用 `Fit`，带坐标用 `XYZ`。
+fn dest_xml(page_id: u32, destination: Destination) -> String {
+    let Point { x, y } = destination.point;
+    if x.abs() < 1e-6 && y.abs() < 1e-6 {
+        format!("<ofd:Dest Type=\"Fit\" PageID=\"{page_id}\"/>")
+    } else {
+        format!(
+            "<ofd:Dest Type=\"XYZ\" PageID=\"{page_id}\" Left=\"{}\" Top=\"{}\"/>",
+            number(x),
+            number(y)
+        )
     }
 }
 
@@ -877,9 +927,9 @@ mod tests {
     use super::{OfdWriteOptions, write_fixed};
     use crate::{OfdDocument, OfdReadOptions};
     use ofdbox_folio_ir::{
-        Cluster, DocumentSource, Element, FillRule, FixedDocument, FontAsset, Glyph, GlyphRun,
-        Group, Matrix, Page, PageInfo, Paint, Path, PathElement, Point, Rect, Rgba, Rotation,
-        Scene, Size, TextElement,
+        Cluster, Destination, DocumentSource, Element, FillRule, FixedDocument, FontAsset, Glyph,
+        GlyphRun, Group, Matrix, OutlineItem, Page, PageInfo, Paint, Path, PathElement, Point,
+        Rect, Rgba, Rotation, Scene, Size, TextElement,
     };
     use std::io::{Cursor, Read};
     use std::sync::Arc;
@@ -929,6 +979,50 @@ mod tests {
         assert_eq!(reader.page_count(), 1);
         let page = reader.load_page(0).expect("load page");
         assert_eq!(page.content.size, Size::new(100.0, 100.0));
+        assert!(reader.info().outline.is_empty());
+    }
+
+    #[test]
+    fn round_trips_outline() {
+        let mut document = FixedDocument::default();
+        document.pages.push(sample_page());
+        document.pages.push(sample_page());
+        document.outline.push(OutlineItem {
+            title: "扉页".to_owned(),
+            destination: Destination {
+                page: 0,
+                point: Point::new(0.0, 0.0),
+            },
+            children: Vec::new(),
+        });
+        document.outline.push(OutlineItem {
+            title: "正文 & 附录".to_owned(),
+            destination: Destination {
+                page: 1,
+                point: Point::new(12.5, 34.0),
+            },
+            children: vec![OutlineItem {
+                title: "第一节".to_owned(),
+                destination: Destination {
+                    page: 1,
+                    point: Point::new(0.0, 0.0),
+                },
+                children: Vec::new(),
+            }],
+        });
+
+        let bytes = write_fixed(&document, &OfdWriteOptions::default()).expect("write");
+        let reader = OfdDocument::open_bytes(bytes, OfdReadOptions::default()).expect("open");
+        let outline = &reader.info().outline;
+        assert_eq!(outline.len(), 2);
+        assert_eq!(outline[0].title, "扉页");
+        assert_eq!(outline[0].destination.page, 0);
+        assert_eq!(outline[1].title, "正文 & 附录");
+        assert_eq!(outline[1].destination.page, 1);
+        assert!((outline[1].destination.point.x - 12.5).abs() < 1e-6);
+        assert!((outline[1].destination.point.y - 34.0).abs() < 1e-6);
+        assert_eq!(outline[1].children.len(), 1);
+        assert_eq!(outline[1].children[0].title, "第一节");
     }
 
     #[test]

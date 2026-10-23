@@ -18,7 +18,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut source = OfdDocument::open_path(&input, OfdReadOptions::default())?;
     let page_count = source.page_count();
-    let mut fixed = FixedDocument::default();
+    let info = source.info().clone();
+    let mut fixed = FixedDocument {
+        metadata: info.metadata,
+        outline: info.outline,
+        ..FixedDocument::default()
+    };
     for index in 0..page_count {
         fixed.pages.push(source.load_page(index)?);
     }
