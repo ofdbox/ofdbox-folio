@@ -22,24 +22,75 @@ pub struct DecodedImage {
 
 impl DecodedImage {
     /// 将灰度蒙版乘入 alpha 通道。
+    ///
+    /// 蒙版与图片描述同一块物理区域，但生产方常按不同分辨率存放（例如 25×25 的
+    /// 图片配 75×75 的 1 bit 蒙版）。尺寸不等时把蒙版按面积平均重采样到图片像素
+    /// 网格，只有蒙版本身不可用时才返回错误。
     pub fn apply_mask(&mut self, mask: &DecodedImage) -> Result<(), RenderError> {
-        if mask.width != self.width || mask.height != self.height {
-            return Err(RenderError::Image("图像蒙版尺寸不一致".to_owned()));
+        if mask.width == 0 || mask.height == 0 {
+            return Err(RenderError::Image("图像蒙版尺寸无效".to_owned()));
         }
-        for (pixel, mask_pixel) in self
-            .rgba
-            .as_chunks_mut::<4>()
-            .0
-            .iter_mut()
-            .zip(mask.rgba.as_chunks::<4>().0)
-        {
-            let factor =
-                (u32::from(mask_pixel[0]) + u32::from(mask_pixel[1]) + u32::from(mask_pixel[2]))
-                    / 3;
-            pixel[3] = ((u32::from(pixel[3]) * factor) / 255) as u8;
+        let expected = mask.width as usize * mask.height as usize * 4;
+        if mask.rgba.len() < expected {
+            return Err(RenderError::Image("图像蒙版像素数据不完整".to_owned()));
+        }
+        if mask.width == self.width && mask.height == self.height {
+            for (pixel, mask_pixel) in self
+                .rgba
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(mask.rgba.as_chunks::<4>().0)
+            {
+                pixel[3] = apply_factor(pixel[3], mask_factor(mask_pixel));
+            }
+            return Ok(());
+        }
+        let mask_width = mask.width as usize;
+        for y in 0..self.height {
+            let (row_start, row_end) = sample_range(y, self.height, mask.height);
+            for x in 0..self.width {
+                let (column_start, column_end) = sample_range(x, self.width, mask.width);
+                let mut sum = 0_u64;
+                let mut count = 0_u64;
+                for row in row_start..row_end {
+                    for column in column_start..column_end {
+                        let index = (row as usize * mask_width + column as usize) * 4;
+                        sum += u64::from(mask.rgba[index])
+                            + u64::from(mask.rgba[index + 1])
+                            + u64::from(mask.rgba[index + 2]);
+                        count += 1;
+                    }
+                }
+                let factor = if count == 0 {
+                    255
+                } else {
+                    (sum / (count * 3)) as u32
+                };
+                let index = (y as usize * self.width as usize + x as usize) * 4 + 3;
+                self.rgba[index] = apply_factor(self.rgba[index], factor);
+            }
         }
         Ok(())
     }
+}
+
+/// 蒙版像素的灰度。
+fn mask_factor(mask_pixel: &[u8]) -> u32 {
+    (u32::from(mask_pixel[0]) + u32::from(mask_pixel[1]) + u32::from(mask_pixel[2])) / 3
+}
+
+/// 把 0–255 的灰度系数乘到 alpha 上。
+fn apply_factor(alpha: u8, factor: u32) -> u8 {
+    ((u32::from(alpha) * factor) / 255) as u8
+}
+
+/// 目标像素 `index` 在源像素网格上覆盖的半开区间。
+fn sample_range(index: u32, dst_len: u32, src_len: u32) -> (u32, u32) {
+    let start = (u64::from(index) * u64::from(src_len) / u64::from(dst_len)) as u32;
+    let start = start.min(src_len - 1);
+    let end = ((u64::from(index) + 1) * u64::from(src_len) / u64::from(dst_len)) as u32;
+    (start, end.max(start + 1).min(src_len))
 }
 
 /// 按文件头识别图片格式。
@@ -324,6 +375,96 @@ mod tests {
         };
         image.apply_mask(&mask).expect("mask");
         assert_eq!(image.rgba[3], 100);
+    }
+
+    #[test]
+    fn downsamples_mask_to_image_grid() {
+        let mut image = DecodedImage {
+            width: 2,
+            height: 2,
+            rgba: [10, 20, 30, 255].repeat(4),
+        };
+        // 4×4 蒙版：上半黑、下半白，与 2×2 图片描述同一块区域。
+        let mut mask = DecodedImage {
+            width: 4,
+            height: 4,
+            rgba: Vec::with_capacity(4 * 4 * 4),
+        };
+        for y in 0..4 {
+            let value = if y < 2 { 0 } else { 255 };
+            for _ in 0..4 {
+                mask.rgba.extend_from_slice(&[value, value, value, 255]);
+            }
+        }
+        image.apply_mask(&mask).expect("mask");
+        let alphas: Vec<u8> = image
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|pixel| pixel[3])
+            .collect();
+        assert_eq!(alphas, [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn upsamples_mask_to_image_grid() {
+        let mut image = DecodedImage {
+            width: 4,
+            height: 4,
+            rgba: [10, 20, 30, 255].repeat(16),
+        };
+        let mask = DecodedImage {
+            width: 2,
+            height: 2,
+            rgba: vec![
+                0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 255,
+            ],
+        };
+        image.apply_mask(&mask).expect("mask");
+        let alphas: Vec<u8> = image
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|pixel| pixel[3])
+            .collect();
+        assert_eq!(
+            alphas,
+            [
+                0, 0, 255, 255, 0, 0, 255, 255, 255, 255, 0, 0, 255, 255, 0, 0
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_mask_is_rejected() {
+        let mut image = DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![10, 20, 30, 255],
+        };
+        let mask = DecodedImage {
+            width: 0,
+            height: 0,
+            rgba: Vec::new(),
+        };
+        assert!(image.apply_mask(&mask).is_err());
+    }
+
+    #[test]
+    fn truncated_mask_is_rejected() {
+        let mut image = DecodedImage {
+            width: 2,
+            height: 2,
+            rgba: [10, 20, 30, 255].repeat(4),
+        };
+        let mask = DecodedImage {
+            width: 2,
+            height: 2,
+            rgba: vec![0, 0, 0, 255],
+        };
+        assert!(image.apply_mask(&mask).is_err());
     }
 
     #[test]

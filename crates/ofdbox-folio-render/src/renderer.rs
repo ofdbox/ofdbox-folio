@@ -7,9 +7,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
-    Element, FillRule, FontAsset, GradientExtend, GradientStop, Group, ImageElement, LineCap,
-    LineJoin, Matrix, Page, Paint, Path, PathElement, PathSegment, RadialGradient, Rgba, Scene,
-    Size, StrokeStyle, TextElement,
+    Diagnostic, DiagnosticCode, Element, FillRule, FontAsset, GradientExtend, GradientStop, Group,
+    ImageElement, LineCap, LineJoin, Matrix, Page, Paint, Path, PathElement, PathSegment,
+    RadialGradient, Report, Rgba, Scene, Size, StrokeStyle, TextElement,
 };
 use vello_cpu::kurbo::{
     Affine, Arc as KurboArc, BezPath, Point, Rect as KurboRect, Stroke, SvgArc, Vec2,
@@ -93,6 +93,7 @@ pub struct CpuRenderer {
     resources: Resources,
     fonts: HashMap<u64, FontData>,
     pixmaps: HashMap<u64, Arc<Pixmap>>,
+    report: Report,
 }
 
 impl CpuRenderer {
@@ -103,6 +104,7 @@ impl CpuRenderer {
             resources: Resources::new(),
             fonts: HashMap::new(),
             pixmaps: HashMap::new(),
+            report: Report::new(),
         }
     }
 
@@ -116,6 +118,23 @@ impl CpuRenderer {
         self.fonts.clear();
         self.pixmaps.clear();
         self.resources = Resources::new();
+    }
+
+    /// 渲染期间产生的诊断；单张图片失败只记诊断，不中断整页。
+    pub fn report(&self) -> &Report {
+        &self.report
+    }
+
+    /// 取走渲染期间产生的诊断。
+    pub fn take_report(&mut self) -> Report {
+        std::mem::take(&mut self.report)
+    }
+
+    /// 记录一条图片诊断。
+    fn warn(&mut self, message: impl Into<String>) {
+        self.report
+            .diagnostics
+            .push(Diagnostic::warning(DiagnosticCode::Image, message));
     }
 
     /// 把一页渲染到目标。
@@ -286,7 +305,13 @@ impl CpuRenderer {
         element: &ImageElement,
         parent: Matrix,
     ) -> Result<(), RenderError> {
-        let pixmap = self.pixmap(element)?;
+        let pixmap = match self.pixmap(element) {
+            Ok(pixmap) => pixmap,
+            Err(error) => {
+                self.warn(format!("图片无法绘制，已跳过该图: {error}"));
+                return Ok(());
+            }
+        };
         let width = element
             .rect
             .width
@@ -338,8 +363,16 @@ impl CpuRenderer {
             self.options.max_image_pixels,
         )?;
         if let Some(mask) = &element.image.mask {
-            let mask = decode_image(mask.format, &mask.encoded, self.options.max_image_pixels)?;
-            decoded.apply_mask(&mask)?;
+            match decode_image(mask.format, &mask.encoded, self.options.max_image_pixels) {
+                Ok(mask) => {
+                    if let Err(error) = decoded.apply_mask(&mask) {
+                        self.warn(format!("图像蒙版无法应用，已按无蒙版绘制: {error}"));
+                    }
+                }
+                Err(error) => {
+                    self.warn(format!("图像蒙版无法解码，已按无蒙版绘制: {error}"));
+                }
+            }
         }
         let pixmap = Arc::new(create_pixmap(&decoded)?);
         self.pixmaps
@@ -533,9 +566,98 @@ mod tests {
     use super::{CpuRenderer, RasterTarget};
     use crate::options::RenderOptions;
     use ofdbox_folio_ir::{
-        Element, FillRule, Group, Matrix, Paint, Path, PathElement, Point, Rgba, Scene, Size,
+        DiagnosticCode, Element, FillRule, Group, ImageAsset, ImageElement, ImageFormat, Matrix,
+        Paint, Path, PathElement, Point, Rect, Rgba, Scene, Size,
     };
     use std::sync::Arc;
+
+    /// 生成一张纯色 PNG。
+    fn png_bytes(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, width, height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("png header");
+            writer
+                .write_image_data(&rgba.repeat((width * height) as usize))
+                .expect("png data");
+        }
+        bytes
+    }
+
+    fn scene_with_image(image: ImageAsset) -> Scene {
+        let width = f64::from(image.pixel_width.max(1));
+        let height = f64::from(image.pixel_height.max(1));
+        Scene {
+            size: Size::new(10.0, 10.0),
+            root: Group {
+                children: vec![Element::Image(ImageElement {
+                    image: Arc::new(image),
+                    rect: Rect::default(),
+                    transform: Matrix::scale(1.0 / width, 1.0 / height),
+                    alpha: 1.0,
+                })],
+                ..Group::default()
+            },
+            diagnostics: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn renders_mask_of_different_size() {
+        // 25×25 的图片配 75×75 的蒙版：重采样后照常绘制，不产生诊断。
+        let image = ImageAsset::new(
+            ImageFormat::Png,
+            Arc::from(png_bytes(4, 4, [200, 30, 30, 255])),
+            4,
+            4,
+        );
+        let mask = ImageAsset::new(
+            ImageFormat::Png,
+            Arc::from(png_bytes(12, 12, [0, 0, 0, 255])),
+            12,
+            12,
+        );
+        let scene = scene_with_image(image.with_mask(Arc::new(mask)));
+        let mut target = RasterTarget::from_size(scene.size, 96.0).expect("target");
+        let mut renderer = CpuRenderer::new(RenderOptions::default());
+        renderer.render_scene(&scene, &mut target).expect("render");
+        assert!(renderer.report().is_empty());
+        // 蒙版全黑，图片被完全遮住，只剩白色页面背景。
+        assert_eq!(&target.data()[..4], [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn degrades_when_mask_is_undecodable() {
+        let image = ImageAsset::new(
+            ImageFormat::Png,
+            Arc::from(png_bytes(4, 4, [200, 30, 30, 255])),
+            4,
+            4,
+        );
+        let mask = ImageAsset::new(ImageFormat::Png, Arc::from(&b"not-a-png"[..]), 4, 4);
+        let scene = scene_with_image(image.with_mask(Arc::new(mask)));
+        let mut target = RasterTarget::from_size(scene.size, 96.0).expect("target");
+        let mut renderer = CpuRenderer::new(RenderOptions::default());
+        renderer.render_scene(&scene, &mut target).expect("render");
+        assert_eq!(renderer.report().diagnostics.len(), 1);
+        assert_eq!(renderer.report().diagnostics[0].code, DiagnosticCode::Image);
+        // 蒙版缺失只是降级，图片本身仍然绘制。
+        assert_eq!(&target.data()[..4], [200, 30, 30, 255]);
+    }
+
+    #[test]
+    fn skips_undecodable_image_without_failing_page() {
+        let image = ImageAsset::new(ImageFormat::Png, Arc::from(&b"broken"[..]), 4, 4);
+        let scene = scene_with_image(image);
+        let mut target = RasterTarget::from_size(scene.size, 96.0).expect("target");
+        let mut renderer = CpuRenderer::new(RenderOptions::default());
+        renderer.render_scene(&scene, &mut target).expect("render");
+        assert_eq!(renderer.report().diagnostics.len(), 1);
+        // 整页仍是白底，没有因为单图失败而报错。
+        assert_eq!(&target.data()[..4], [255, 255, 255, 255]);
+    }
 
     #[test]
     fn renders_solid_path_pixels() {
