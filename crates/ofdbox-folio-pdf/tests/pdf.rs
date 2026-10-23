@@ -369,6 +369,48 @@ fn writes_metadata_and_outlines() {
 }
 
 #[test]
+fn keeps_nested_outline_with_coordinates() {
+    let mut document = fixed(scene());
+    document.pages.push(page(scene()));
+    document.pages.push(page(scene()));
+    document.outline.push(ofdbox_folio_ir::OutlineItem {
+        title: "第一章".to_owned(),
+        destination: ofdbox_folio_ir::Destination {
+            page: 0,
+            point: Point::new(0.0, 0.0),
+        },
+        children: vec![ofdbox_folio_ir::OutlineItem {
+            title: "1.1 节".to_owned(),
+            destination: ofdbox_folio_ir::Destination {
+                page: 2,
+                point: Point::new(12.5, 34.0),
+            },
+            children: Vec::new(),
+        }],
+    });
+    let pdf = write_fixed(&document, &PdfOptions::default()).expect("pdf");
+    let reader = PdfDocument::open_bytes(pdf, PdfReadOptions::default()).expect("read");
+    let outline = &reader.info().outline;
+    assert_eq!(outline.len(), 1, "大纲: {outline:?}");
+    assert_eq!(outline[0].title, "第一章");
+    assert_eq!(outline[0].children.len(), 1);
+    let child = &outline[0].children[0];
+    assert_eq!(child.title, "1.1 节");
+    assert_eq!(child.destination.page, 2);
+    // PDF 坐标以点为单位，往返后按 0.01 毫米精度比较。
+    assert!(
+        (child.destination.point.x - 12.5).abs() < 0.01,
+        "x = {}",
+        child.destination.point.x
+    );
+    assert!(
+        (child.destination.point.y - 34.0).abs() < 0.01,
+        "y = {}",
+        child.destination.point.y
+    );
+}
+
+#[test]
 fn backend_writes_single_page() {
     let pdf = PdfBackend::new().render(&scene()).expect("pdf");
     assert!(pdf.starts_with(b"%PDF-1.7"));

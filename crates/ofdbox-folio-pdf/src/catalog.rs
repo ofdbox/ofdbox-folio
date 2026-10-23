@@ -1,4 +1,4 @@
-//! PDF 目录级结构：大纲与附件。
+﻿//! PDF 目录级结构：大纲与附件。
 
 use std::collections::{HashMap, HashSet};
 
@@ -10,6 +10,9 @@ use crate::decode_pdf_string;
 use crate::frontend;
 
 const MAX_DEPTH: usize = 32;
+
+/// 1 点等于多少毫米。
+const PT_TO_MM: f64 = 25.4 / 72.0;
 
 /// 解析大纲树；目标页解析失败时跳过该条目。
 pub(crate) fn outline(document: &Document, pages: &[ObjectId]) -> Vec<OutlineItem> {
@@ -131,22 +134,32 @@ fn destination(
         .ok()
         .map(|info| info.crop_box.height)
         .unwrap_or(0.0);
+    // 目标区域坐标是 PDF 用户空间单位（点），IR 用毫米。
+    let to_mm = |value: f64| value * PT_TO_MM;
     let point = match values.get(1).and_then(|object| object.as_name().ok()) {
         Some(b"XYZ") => {
-            let x = values.get(2).and_then(number).unwrap_or(0.0);
-            let top = values.get(3).and_then(number).unwrap_or(page_height);
+            let x = values.get(2).and_then(number).map(to_mm).unwrap_or(0.0);
+            let top = values
+                .get(3)
+                .and_then(number)
+                .map(to_mm)
+                .unwrap_or(page_height);
             Point::new(x, (page_height - top).max(0.0))
         }
         Some(b"FitH") | Some(b"FitBH") => {
-            let top = values.get(2).and_then(number).unwrap_or(page_height);
+            let top = values
+                .get(2)
+                .and_then(number)
+                .map(to_mm)
+                .unwrap_or(page_height);
             Point::new(0.0, (page_height - top).max(0.0))
         }
         Some(b"FitV") | Some(b"FitBV") => {
-            let left = values.get(2).and_then(number).unwrap_or(0.0);
+            let left = values.get(2).and_then(number).map(to_mm).unwrap_or(0.0);
             Point::new(left, 0.0)
         }
         Some(b"FitR") => {
-            let left = values.get(2).and_then(number).unwrap_or(0.0);
+            let left = values.get(2).and_then(number).map(to_mm).unwrap_or(0.0);
             Point::new(left, 0.0)
         }
         _ => Point::new(0.0, 0.0),

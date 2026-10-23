@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use ofdbox_folio_ir::{
     AssetId, Element, FixedDocument, FontAsset, Group, ImageAsset, ImageElement, ImageFormat,
-    LineCap, LineJoin, Matrix, Page, Paint, Path, PathElement, PathSegment, Point, Rgba, Scene,
-    StrokeStyle, TextElement, apply_image_mask,
+    LineCap, LineJoin, Matrix, OutlineItem, Page, Paint, Path, PathElement, PathSegment, Point,
+    Rgba, Scene, StrokeStyle, TextElement, apply_image_mask,
 };
 
 use crate::error::PdfError;
@@ -84,12 +84,16 @@ pub struct PdfMetadata {
 }
 
 /// PDF 书签。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PdfOutline {
     /// 标题。
     pub title: String,
     /// 目标页索引，从 0 开始。
     pub page: usize,
+    /// 目标坐标，单位毫米，原点在页面左上角。
+    pub point: Point,
+    /// 子书签。
+    pub children: Vec<PdfOutline>,
 }
 
 /// 把 FixedDocument 写成 PDF。
@@ -107,21 +111,24 @@ pub fn write_fixed(document: &FixedDocument, options: &PdfOptions) -> Result<Vec
         creator: document.metadata.creator.clone(),
         producer: Some("OFDBox Folio".to_owned()),
     });
-    flatten_outline(&document.outline, &mut writer.outlines);
+    writer.outlines = outline_tree(&document.outline);
     for page in &document.pages {
         writer.add_page(page)?;
     }
     writer.finish()
 }
 
-fn flatten_outline(items: &[ofdbox_folio_ir::OutlineItem], output: &mut Vec<PdfOutline>) {
-    for item in items {
-        output.push(PdfOutline {
+/// 把 IR 大纲转换成 PDF 书签树。
+fn outline_tree(items: &[OutlineItem]) -> Vec<PdfOutline> {
+    items
+        .iter()
+        .map(|item| PdfOutline {
             title: item.title.clone(),
             page: item.destination.page,
-        });
-        flatten_outline(&item.children, output);
-    }
+            point: item.destination.point,
+            children: outline_tree(&item.children),
+        })
+        .collect()
 }
 
 struct PdfPage {
@@ -129,6 +136,26 @@ struct PdfPage {
     height: f64,
     content: u32,
     resources: String,
+}
+
+/// 1 毫米等于多少 PDF 点。
+const MM_TO_PT: f64 = 72.0 / 25.4;
+
+/// 大纲节点的对象编号与子节点编号。
+struct OutlineIds {
+    id: u32,
+    children: Vec<OutlineIds>,
+}
+
+/// 校验大纲页码都在文档范围内。
+fn validate_outline(nodes: &[PdfOutline], page_count: usize) -> Result<(), PdfError> {
+    for node in nodes {
+        if node.page >= page_count {
+            return Err(PdfError::InvalidPage(node.page));
+        }
+        validate_outline(&node.children, page_count)?;
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -193,6 +220,8 @@ impl Writer {
         self.outlines.push(PdfOutline {
             title: title.into(),
             page,
+            point: Point::new(0.0, 0.0),
+            children: Vec::new(),
         });
     }
 
@@ -319,11 +348,7 @@ impl Writer {
     pub fn finish(mut self) -> Result<Vec<u8>, PdfError> {
         self.subset_fonts()?;
         self.write_to_unicode()?;
-        for outline in &self.outlines {
-            if outline.page >= self.pages.len() {
-                return Err(PdfError::InvalidPage(outline.page));
-            }
-        }
+        validate_outline(&self.outlines, self.pages.len())?;
         let pages_id = self.writer.placeholder();
         let mut kids = String::new();
         let mut page_ids = Vec::with_capacity(self.pages.len());
@@ -354,38 +379,20 @@ impl Writer {
         let outlines_id = if self.outlines.is_empty() {
             None
         } else {
+            let tree = std::mem::take(&mut self.outlines);
             let root = self.writer.placeholder();
-            let item_ids = self
-                .outlines
+            let ids = self.allocate_outline_ids(&tree);
+            let heights = self
+                .pages
                 .iter()
-                .map(|_| self.writer.placeholder())
+                .map(|page| page.height)
                 .collect::<Vec<_>>();
-            for (index, outline) in self.outlines.iter().enumerate() {
-                let mut body = format!(
-                    "<< /Title {} /Parent {root} 0 R",
-                    pdf_text_string(&outline.title)
-                );
-                if index > 0 {
-                    body.push_str(&format!(" /Prev {} 0 R", item_ids[index - 1]));
-                }
-                if let Some(next) = item_ids.get(index + 1) {
-                    body.push_str(&format!(" /Next {next} 0 R"));
-                }
-                body.push_str(&format!(
-                    " /Dest [{} 0 R /XYZ null null null] >>",
-                    page_ids[outline.page]
-                ));
-                self.writer.set(item_ids[index], body.into_bytes());
-            }
+            let (first, last, count) =
+                self.write_outline_nodes(&tree, &ids, root, &page_ids, &heights);
             self.writer.set(
                 root,
-                format!(
-                    "<< /Type /Outlines /First {} 0 R /Last {} 0 R /Count {} >>",
-                    item_ids[0],
-                    item_ids[item_ids.len() - 1],
-                    item_ids.len()
-                )
-                .into_bytes(),
+                format!("<< /Type /Outlines /First {first} 0 R /Last {last} 0 R /Count {count} >>")
+                    .into_bytes(),
             );
             Some(root)
         };
@@ -398,6 +405,66 @@ impl Writer {
         catalog.push_str(" >>");
         let catalog_id = self.writer.add(catalog.into_bytes());
         Ok(self.writer.finish(catalog_id, info_id))
+    }
+
+    /// 预分配大纲树中每个节点的对象编号。
+    fn allocate_outline_ids(&mut self, nodes: &[PdfOutline]) -> Vec<OutlineIds> {
+        nodes
+            .iter()
+            .map(|node| OutlineIds {
+                id: self.writer.placeholder(),
+                children: self.allocate_outline_ids(&node.children),
+            })
+            .collect()
+    }
+
+    /// 递归写出大纲节点，返回（首项、末项、可见子项总数）。
+    fn write_outline_nodes(
+        &mut self,
+        nodes: &[PdfOutline],
+        ids: &[OutlineIds],
+        parent: u32,
+        page_ids: &[u32],
+        heights: &[f64],
+    ) -> (u32, u32, usize) {
+        let mut descendants = 0;
+        for (index, node) in nodes.iter().enumerate() {
+            let id = ids[index].id;
+            let mut body = format!(
+                "<< /Title {} /Parent {parent} 0 R",
+                pdf_text_string(&node.title)
+            );
+            if index > 0 {
+                body.push_str(&format!(" /Prev {} 0 R", ids[index - 1].id));
+            }
+            if let Some(next) = ids.get(index + 1) {
+                body.push_str(&format!(" /Next {} 0 R", next.id));
+            }
+            if !node.children.is_empty() {
+                let (first, last, count) = self.write_outline_nodes(
+                    &node.children,
+                    &ids[index].children,
+                    id,
+                    page_ids,
+                    heights,
+                );
+                body.push_str(&format!(
+                    " /First {first} 0 R /Last {last} 0 R /Count {count}"
+                ));
+                descendants += count + 1;
+            }
+            let page_id = page_ids.get(node.page).copied().unwrap_or(1);
+            let height = heights.get(node.page).copied().unwrap_or(0.0);
+            // IR 原点在左上角，PDF 的 Y 轴朝上。
+            let top = (height - node.point.y * MM_TO_PT).clamp(0.0, height.max(0.0));
+            body.push_str(&format!(
+                " /Dest [{page_id} 0 R /XYZ {} {} null] >>",
+                number(node.point.x * MM_TO_PT),
+                number(top)
+            ));
+            self.writer.set(id, body.into_bytes());
+        }
+        (ids[0].id, ids[ids.len() - 1].id, descendants)
     }
 
     fn subset_fonts(&mut self) -> Result<(), PdfError> {
