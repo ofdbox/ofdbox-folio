@@ -3,7 +3,7 @@
 //! 渲染器只消费 Fixed IR，不感知源文档格式。页面几何通过设备缩放映射到
 //! 像素坐标；字体和图片按资源 ID 缓存。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
@@ -92,8 +92,62 @@ pub struct CpuRenderer {
     options: RenderOptions,
     resources: Resources,
     fonts: HashMap<u64, FontData>,
-    pixmaps: HashMap<u64, Arc<Pixmap>>,
+    pixmaps: PixmapCache,
     report: Report,
+}
+
+/// 已解码图片缓存：按字节预算淘汰，预算为 0 时完全不缓存。
+struct PixmapCache {
+    entries: HashMap<u64, Arc<Pixmap>>,
+    order: VecDeque<u64>,
+    bytes: u64,
+    budget: u64,
+}
+
+impl PixmapCache {
+    fn new(budget: u64) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+            budget,
+        }
+    }
+
+    fn get(&self, id: u64) -> Option<Arc<Pixmap>> {
+        self.entries.get(&id).cloned()
+    }
+
+    fn insert(&mut self, id: u64, pixmap: Arc<Pixmap>) {
+        if self.entries.contains_key(&id) {
+            return;
+        }
+        let size = pixmap_bytes(&pixmap);
+        if self.budget == 0 || size > self.budget {
+            return;
+        }
+        while self.bytes + size > self.budget {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(removed) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(pixmap_bytes(&removed));
+            }
+        }
+        self.order.push_back(id);
+        self.entries.insert(id, pixmap);
+        self.bytes += size;
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.bytes = 0;
+    }
+}
+
+fn pixmap_bytes(pixmap: &Pixmap) -> u64 {
+    u64::from(pixmap.width()) * u64::from(pixmap.height()) * 4
 }
 
 impl CpuRenderer {
@@ -103,7 +157,7 @@ impl CpuRenderer {
             options,
             resources: Resources::new(),
             fonts: HashMap::new(),
-            pixmaps: HashMap::new(),
+            pixmaps: PixmapCache::new(options.max_image_cache_bytes),
             report: Report::new(),
         }
     }
@@ -354,8 +408,8 @@ impl CpuRenderer {
     }
 
     fn pixmap(&mut self, element: &ImageElement) -> Result<Arc<Pixmap>, RenderError> {
-        if let Some(pixmap) = self.pixmaps.get(&element.image.id().get()) {
-            return Ok(Arc::clone(pixmap));
+        if let Some(pixmap) = self.pixmaps.get(element.image.id().get()) {
+            return Ok(pixmap);
         }
         let mut decoded = decode_image(
             element.image.format,
@@ -563,13 +617,14 @@ fn to_bez_path(path: &Path) -> BezPath {
 
 #[cfg(test)]
 mod tests {
-    use super::{CpuRenderer, RasterTarget};
+    use super::{CpuRenderer, PixmapCache, RasterTarget};
     use crate::options::RenderOptions;
     use ofdbox_folio_ir::{
         DiagnosticCode, Element, FillRule, Group, ImageAsset, ImageElement, ImageFormat, Matrix,
         Paint, Path, PathElement, Point, Rect, Rgba, Scene, Size,
     };
     use std::sync::Arc;
+    use vello_cpu::Pixmap;
 
     /// 生成一张纯色 PNG。
     fn png_bytes(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
@@ -657,6 +712,27 @@ mod tests {
         assert_eq!(renderer.report().diagnostics.len(), 1);
         // 整页仍是白底，没有因为单图失败而报错。
         assert_eq!(&target.data()[..4], [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn evicts_pixmaps_over_budget() {
+        // 两张 2×2 的 RGBA 图片正好占满预算，第三张会淘汰最早插入的一张。
+        let mut cache = PixmapCache::new(2 * 2 * 4 * 2);
+        cache.insert(1, Arc::new(Pixmap::new(2, 2)));
+        cache.insert(2, Arc::new(Pixmap::new(2, 2)));
+        assert!(cache.get(1).is_some());
+        cache.insert(3, Arc::new(Pixmap::new(2, 2)));
+        assert!(cache.get(1).is_none(), "最早的缓存应被淘汰");
+        assert!(cache.get(2).is_some());
+        assert!(cache.get(3).is_some());
+        assert!(cache.bytes <= cache.budget);
+    }
+
+    #[test]
+    fn skips_cache_when_budget_is_zero() {
+        let mut cache = PixmapCache::new(0);
+        cache.insert(1, Arc::new(Pixmap::new(2, 2)));
+        assert!(cache.get(1).is_none());
     }
 
     #[test]
