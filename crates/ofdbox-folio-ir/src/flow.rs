@@ -104,6 +104,10 @@ pub struct PageSetup {
     pub header_distance: Twips,
     /// 页脚到页面底边的距离。
     pub footer_distance: Twips,
+    /// 分栏数；1 表示单栏。
+    pub columns: u16,
+    /// 栏间距。
+    pub column_gap: Twips,
 }
 
 impl PageSetup {
@@ -115,6 +119,8 @@ impl PageSetup {
             margins: Margins::uniform(Twips(1440)),
             header_distance: Twips(720),
             footer_distance: Twips(720),
+            columns: 1,
+            column_gap: Twips::from_mm(8.0),
         }
     }
 }

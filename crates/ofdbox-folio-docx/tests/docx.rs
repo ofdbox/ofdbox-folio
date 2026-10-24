@@ -77,6 +77,7 @@ fn sample() -> Vec<u8> {
     <w:sectPr>
       <w:headerReference w:type="default" r:id="rId4"/>
       <w:footerReference w:type="default" r:id="rId5"/>
+      <w:cols w:num="2" w:space="425"/>
       <w:pgSz w:w="11906" w:h="16838"/>
       <w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440" w:header="720" w:footer="720"/>
     </w:sectPr>
@@ -172,6 +173,8 @@ fn reads_sections_and_page_setup() {
     assert_eq!(setup.height.0, 16838);
     assert_eq!(setup.margins.left.0, 1440);
     assert_eq!(setup.header_distance.0, 720);
+    assert_eq!(setup.columns, 2);
+    assert_eq!(setup.column_gap.0, 425);
 }
 
 #[test]

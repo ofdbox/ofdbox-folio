@@ -267,6 +267,12 @@ struct Engine<'a> {
     page_started: bool,
     /// 当前分节的页序，用于「首页不同」。
     section_page: usize,
+    /// 分栏数。
+    column_count: u16,
+    /// 栏间距（毫米）。
+    column_gap: f64,
+    /// 当前栏下标。
+    column_index: usize,
     /// 页眉距顶边。
     header_distance: f64,
     /// 页脚距底边。
@@ -312,6 +318,9 @@ impl<'a> Engine<'a> {
             page_body: false,
             page_started: false,
             section_page: 0,
+            column_count: 1,
+            column_gap: 0.0,
+            column_index: 0,
             header_distance: 0.0,
             footer_distance: 0.0,
             headers: HeaderFooterSet::default(),
@@ -586,6 +595,9 @@ impl<'a> Engine<'a> {
             self.page_height = 297.0;
             self.warn("页面尺寸无效，按 A4 处理");
         }
+        self.column_count = setup.columns.max(1);
+        self.column_gap = setup.column_gap.to_mm().max(0.0);
+        self.column_index = 0;
         self.header_distance = setup.header_distance.to_mm().max(0.0);
         self.footer_distance = setup.footer_distance.to_mm().max(0.0);
         self.headers = headers.clone();
@@ -594,17 +606,54 @@ impl<'a> Engine<'a> {
         self.in_frame = false;
         self.page_body = false;
         self.page_started = false;
-        self.frame = self.page_frame();
-        self.cursor = self.margins.top;
+        self.frame = self.column_frame(0);
+        self.cursor = self.frame.top;
     }
 
     /// 版心框。
+    /// 整页版心框（页眉页脚用，横跨所有栏）。
     fn page_frame(&self) -> Frame {
         Frame {
             left: self.margins.left,
             width: (self.page_width - self.margins.left - self.margins.right).max(1.0),
+            top: self.margins.top,
             bottom: self.page_height - self.margins.bottom,
         }
+    }
+
+    /// 第 index 栏的框。
+    fn column_frame(&self, index: usize) -> Frame {
+        let page = self.page_frame();
+        let count = f64::from(self.column_count.max(1));
+        let gap = self.column_gap;
+        let width = ((page.width - gap * (count - 1.0)) / count).max(1.0);
+        Frame {
+            left: page.left + (width + gap) * index as f64,
+            width,
+            top: page.top,
+            bottom: page.bottom,
+        }
+    }
+
+    /// 切到下一栏；没有下一栏时返回 alse。
+    fn next_column(&mut self) -> bool {
+        let count = usize::from(self.column_count.max(1));
+        if self.column_index + 1 >= count {
+            return false;
+        }
+        self.column_index += 1;
+        self.frame = self.column_frame(self.column_index);
+        self.cursor = self.frame.top;
+        true
+    }
+
+    /// 正文流换下一段容器：先换栏，最后一栏再换页。
+    fn new_flow(&mut self) {
+        if self.next_column() {
+            return;
+        }
+        self.new_page();
+        self.start_page_body();
     }
 
     fn content_width(&self) -> f64 {
@@ -622,8 +671,9 @@ impl<'a> Engine<'a> {
     fn new_page(&mut self) {
         self.finish_page();
         self.page = PageBuffer::new();
-        self.frame = self.page_frame();
-        self.cursor = self.margins.top;
+        self.column_index = 0;
+        self.frame = self.column_frame(0);
+        self.cursor = self.frame.top;
         self.page_body = false;
         self.page_started = false;
         self.section_page += 1;
@@ -751,6 +801,7 @@ impl<'a> Engine<'a> {
         self.frame = Frame {
             left: self.margins.left,
             width,
+            top: self.header_distance,
             bottom: self.margins.top,
         };
         self.cursor = self.header_distance;
@@ -784,6 +835,7 @@ impl<'a> Engine<'a> {
         self.frame = Frame {
             left: self.margins.left,
             width,
+            top,
             bottom,
         };
         self.cursor = top;
@@ -875,6 +927,7 @@ impl<'a> Engine<'a> {
         self.frame = Frame {
             left: 0.0,
             width,
+            top: 0.0,
             bottom: f64::MAX,
         };
         self.cursor = 0.0;
@@ -933,8 +986,7 @@ impl<'a> Engine<'a> {
             if !fragment.placed_any {
                 // 一行都没有落下：整行挪到下一页，重排表头后再试。
                 self.restore(snapshot);
-                self.new_page();
-                self.start_page_body();
+                self.new_flow();
                 self.repeat_header_rows(table, &widths, header_rows, page_bottom);
                 let retry =
                     self.layout_row(table, &widths, index, self.cursor, page_bottom, None, true);
@@ -951,8 +1003,7 @@ impl<'a> Engine<'a> {
             }
             // 行内拆分：本页保留已排的部分，剩余内容续到下一页。
             self.cursor = fragment.bottom;
-            self.new_page();
-            self.start_page_body();
+            self.new_flow();
             self.repeat_header_rows(table, &widths, header_rows, page_bottom);
             if complete {
                 // 只是内边距/固定行高溢出，行本身已经排完。
@@ -1054,6 +1105,7 @@ impl<'a> Engine<'a> {
                 Frame {
                     left: inner_left,
                     width: inner_width,
+                    top: top + padding_top,
                     bottom: limit,
                 },
                 top + padding_top,
@@ -1263,8 +1315,7 @@ impl<'a> Engine<'a> {
                 .line_height(&style, &pieces, line)
                 .max(image_height + 0.2 * size);
             if self.cursor + height > self.bottom() + 1e-6 && !self.in_frame && self.page_body {
-                self.new_page();
-                self.start_page_body();
+                self.new_flow();
             }
             let baseline = self.cursor + (0.8 * size).max(image_height);
             let first = index == 0;
@@ -1872,8 +1923,7 @@ impl<'a> Engine<'a> {
             self.diagnostic(DiagnosticCode::Approximation, "图片超宽，已等比缩放到版心");
         }
         if height > self.bottom() - self.cursor && !self.in_frame && self.page_body {
-            self.new_page();
-            self.start_page_body();
+            self.new_flow();
         }
         let available = self.bottom() - self.cursor;
         if height > available {
@@ -2110,6 +2160,8 @@ struct Frame {
     left: f64,
     /// 可用宽度，毫米。
     width: f64,
+    /// 顶边界，毫米。
+    top: f64,
     /// 底边界，毫米。
     bottom: f64,
 }

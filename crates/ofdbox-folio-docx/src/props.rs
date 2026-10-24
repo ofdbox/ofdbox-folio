@@ -319,6 +319,8 @@ pub(crate) struct RawSectionProps {
     pub footers: Vec<(String, String)>,
     /// 分栏数。
     pub columns: Option<u32>,
+    /// 栏间距。
+    pub column_gap: Option<Twips>,
 }
 
 impl RawSectionProps {
@@ -333,6 +335,7 @@ impl RawSectionProps {
         }
         fill!(
             width, height, top, bottom, left, right, header, footer, title_page, columns,
+            column_gap,
         );
         if !over.headers.is_empty() {
             self.headers = over.headers.clone();
@@ -368,6 +371,12 @@ impl RawSectionProps {
         }
         if let Some(value) = self.footer {
             setup.footer_distance = value;
+        }
+        if let Some(value) = self.columns {
+            setup.columns = u16::try_from(value).unwrap_or(1).max(1);
+        }
+        if let Some(value) = self.column_gap {
+            setup.column_gap = value;
         }
         setup
     }
@@ -516,7 +525,7 @@ pub(crate) fn parse_section_props(
         match reader.read_event().map_err(crate::xml::xml_error)? {
             quick_xml::events::Event::Start(element) => match local_name(&element).as_str() {
                 "pgSz" | "pgMar" => apply_page_attrs(&element, &mut props),
-                "cols" => props.columns = attr_u32(&element, "num"),
+                "cols" => apply_columns(&element, &mut props),
                 _ => skip_element(reader, &element)?,
             },
             quick_xml::events::Event::Empty(element) => match local_name(&element).as_str() {
@@ -532,7 +541,7 @@ pub(crate) fn parse_section_props(
                         props.footers.push((kind, id));
                     }
                 }
-                "cols" => props.columns = attr_u32(&element, "num"),
+                "cols" => apply_columns(&element, &mut props),
                 _ => {}
             },
             quick_xml::events::Event::End(_) => break,
@@ -544,6 +553,16 @@ pub(crate) fn parse_section_props(
         }
     }
     Ok(props)
+}
+
+/// 应用 `w:cols`：分栏数与栏间距。
+fn apply_columns(element: &quick_xml::events::BytesStart<'_>, props: &mut RawSectionProps) {
+    if let Some(count) = attr_u32(element, "num") {
+        props.columns = Some(count);
+    }
+    if let Some(space) = attr_i32(element, "space") {
+        props.column_gap = Some(Twips::new(i64::from(space)));
+    }
 }
 
 /// 应用 `pgSz` 与 `pgMar` 上的尺寸属性（两者共享同一个属性命名空间）。
