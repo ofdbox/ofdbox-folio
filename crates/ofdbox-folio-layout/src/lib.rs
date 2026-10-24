@@ -15,11 +15,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
-    Align, Block, Diagnostic, DiagnosticCode, Element, FieldKind, FixedDocument, FlowDocument,
-    FontAsset, FontProvider, Group, ImageAsset, ImageBlock, ImageElement, Inline, LineSpacing,
-    LinkArea, LinkTarget, Matrix, OutlineItem, Page, PageInfo, PageSetup, Paint, ParaStyle,
-    Paragraph, Point, Rect, Rotation, Scene, Size, TextElement, TextItem, TextLayer, TextLine,
-    TextStyle, Twips,
+    Align, Block, Border, ColumnWidth, Diagnostic, DiagnosticCode, Element, FieldKind, FillRule,
+    FixedDocument, FlowDocument, FontAsset, FontProvider, Group, HeaderFooter, HeaderFooterSet,
+    ImageAsset, ImageBlock, ImageElement, Inline, LineCap, LineJoin, LineSpacing, LinkArea,
+    LinkTarget, Matrix, OutlineItem, Page, PageInfo, PageSetup, Paint, ParaStyle, Paragraph, Path,
+    PathElement, Point, Rect, Rotation, Row, Scene, Size, StrokePaint, StrokeStyle, Table,
+    TextElement, TextItem, TextLayer, TextLine, TextStyle, Twips,
 };
 
 use font::{FontKey, FontStore};
@@ -81,17 +82,28 @@ pub fn layout_with(
 
 /// 文档是否引用总页数字段。
 fn uses_total_pages(document: &FlowDocument) -> bool {
-    document
-        .sections
-        .iter()
-        .any(|section| section.blocks.iter().any(block_uses_total_pages))
+    document.sections.iter().any(|section| {
+        let areas = [&section.headers, &section.footers]
+            .into_iter()
+            .flat_map(|set| [&set.default, &set.first, &set.even])
+            .flatten();
+        section.blocks.iter().any(block_uses_total_pages)
+            || areas
+                .into_iter()
+                .any(|area| area.blocks.iter().any(block_uses_total_pages))
+    })
 }
 
 fn block_uses_total_pages(block: &Block) -> bool {
-    let Block::Paragraph(paragraph) = block else {
-        return false;
-    };
-    paragraph.runs.iter().any(inline_uses_total_pages)
+    match block {
+        Block::Paragraph(paragraph) => paragraph.runs.iter().any(inline_uses_total_pages),
+        Block::Table(table) => table.rows.iter().any(|row| {
+            row.cells
+                .iter()
+                .any(|cell| cell.blocks.iter().any(block_uses_total_pages))
+        }),
+        _ => false,
+    }
 }
 
 fn inline_uses_total_pages(inline: &Inline) -> bool {
@@ -128,9 +140,11 @@ impl PageBuffer {
             links: Vec::new(),
         }
     }
+}
 
-    fn is_empty(&self) -> bool {
-        self.scene.children.is_empty() && self.items.is_empty()
+impl Default for PageBuffer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -196,6 +210,26 @@ struct Engine<'a> {
     margins: MarginsMm,
     page: PageBuffer,
     cursor: f64,
+    /// 当前排版框；正文是版心，表格单元格与页眉页脚会临时换框。
+    frame: Frame,
+    /// 是否在框内排版：框内不自动分页。
+    in_frame: bool,
+    /// 当前页是否有正文内容（只有页眉的页不产出）。
+    page_body: bool,
+    /// 当前页是否已经开始排正文。
+    page_started: bool,
+    /// 当前分节的页序，用于「首页不同」。
+    section_page: usize,
+    /// 页眉距顶边。
+    header_distance: f64,
+    /// 页脚距底边。
+    footer_distance: f64,
+    /// 当前分节的页眉。
+    headers: HeaderFooterSet,
+    /// 当前分节的页脚。
+    footers: HeaderFooterSet,
+    /// 两遍布局时已知的总页数。
+    total_pages: Option<usize>,
     headings: Vec<(u8, String, usize, f64)>,
     /// 字体缺字形的字符计数，最后汇总成一条诊断。
     missing_chars: usize,
@@ -224,6 +258,16 @@ impl<'a> Engine<'a> {
             },
             page: PageBuffer::new(),
             cursor: 0.0,
+            frame: Frame::default(),
+            in_frame: false,
+            page_body: false,
+            page_started: false,
+            section_page: 0,
+            header_distance: 0.0,
+            footer_distance: 0.0,
+            headers: HeaderFooterSet::default(),
+            footers: HeaderFooterSet::default(),
+            total_pages: None,
             headings: Vec::new(),
             missing_chars: 0,
         }
@@ -231,21 +275,25 @@ impl<'a> Engine<'a> {
 
     fn run(mut self, provider: &mut dyn FontProvider, total_pages: Option<usize>) -> FixedDocument {
         self.prepare_fonts(provider);
+        self.total_pages = total_pages;
         for section in &self.document.sections {
-            self.begin_section(&section.setup);
+            self.begin_section(&section.setup, &section.headers, &section.footers);
             for block in &section.blocks {
-                self.place_block(block, total_pages);
+                self.place_block(block);
             }
             self.finish_page();
         }
         if self.fixed.pages.is_empty() {
-            let setup = self
-                .document
-                .sections
-                .first()
-                .map(|section| section.setup)
-                .unwrap_or_default();
-            self.begin_section(&setup);
+            self.begin_section(
+                &self
+                    .document
+                    .sections
+                    .first()
+                    .map(|section| section.setup)
+                    .unwrap_or_default(),
+                &HeaderFooterSet::default(),
+                &HeaderFooterSet::default(),
+            );
             self.finish_page();
         }
         if self.missing_chars > 0 {
@@ -262,15 +310,17 @@ impl<'a> Engine<'a> {
     // ---- 字体 ----
 
     /// 收集字符集并逐个字体解析一次度量。
+    ///
+    /// 表格单元格与页眉页脚里的文字同样要预解析，否则排版时会逐字报缺字体。
     fn prepare_fonts(&mut self, provider: &mut dyn FontProvider) {
         let mut wanted: HashMap<FontKey, HashSet<char>> = HashMap::new();
         let mut fallbacks: HashMap<String, Vec<String>> = HashMap::new();
         for section in &self.document.sections {
-            for block in &section.blocks {
-                let Block::Paragraph(paragraph) = block else {
-                    continue;
-                };
-                self.collect_chars(&paragraph.runs, &mut wanted, &mut fallbacks);
+            collect_block_chars(&section.blocks, self, &mut wanted, &mut fallbacks);
+            for set in [&section.headers, &section.footers] {
+                for area in [&set.default, &set.first, &set.even].into_iter().flatten() {
+                    collect_block_chars(&area.blocks, self, &mut wanted, &mut fallbacks);
+                }
             }
         }
         for (key, chars) in &wanted {
@@ -428,7 +478,12 @@ impl<'a> Engine<'a> {
 
     // ---- 页面 ----
 
-    fn begin_section(&mut self, setup: &PageSetup) {
+    fn begin_section(
+        &mut self,
+        setup: &PageSetup,
+        headers: &HeaderFooterSet,
+        footers: &HeaderFooterSet,
+    ) {
         self.finish_page();
         self.page_width = setup.width.to_mm();
         self.page_height = setup.height.to_mm();
@@ -443,15 +498,33 @@ impl<'a> Engine<'a> {
             self.page_height = 297.0;
             self.warn("页面尺寸无效，按 A4 处理");
         }
+        self.header_distance = setup.header_distance.to_mm().max(0.0);
+        self.footer_distance = setup.footer_distance.to_mm().max(0.0);
+        self.headers = headers.clone();
+        self.footers = footers.clone();
+        self.section_page = 0;
+        self.in_frame = false;
+        self.page_body = false;
+        self.page_started = false;
+        self.frame = self.page_frame();
         self.cursor = self.margins.top;
     }
 
+    /// 版心框。
+    fn page_frame(&self) -> Frame {
+        Frame {
+            left: self.margins.left,
+            width: (self.page_width - self.margins.left - self.margins.right).max(1.0),
+            bottom: self.page_height - self.margins.bottom,
+        }
+    }
+
     fn content_width(&self) -> f64 {
-        (self.page_width - self.margins.left - self.margins.right).max(1.0)
+        self.frame.width.max(1.0)
     }
 
     fn bottom(&self) -> f64 {
-        self.page_height - self.margins.bottom
+        self.frame.bottom
     }
 
     fn page_number(&self) -> usize {
@@ -460,14 +533,20 @@ impl<'a> Engine<'a> {
 
     fn new_page(&mut self) {
         self.finish_page();
+        self.page = PageBuffer::new();
+        self.frame = self.page_frame();
         self.cursor = self.margins.top;
+        self.page_body = false;
+        self.page_started = false;
+        self.section_page += 1;
     }
 
-    /// 结束当前页；空页不产出。
+    /// 结束当前页；没有正文的页不产出。
     fn finish_page(&mut self) {
-        if self.page.is_empty() {
+        if !self.page_body {
             return;
         }
+        self.layout_footer();
         let size = Size::new(self.page_width, self.page_height);
         let scene = Scene {
             size,
@@ -493,6 +572,25 @@ impl<'a> Engine<'a> {
         self.fixed.pages.push(page);
     }
 
+    /// 快照当前页，用于回滚一次失败的放置。
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            children: self.page.scene.children.len(),
+            items: self.page.items.len(),
+            lines: self.page.lines.len(),
+            links: self.page.links.len(),
+            cursor: self.cursor,
+        }
+    }
+
+    fn restore(&mut self, snapshot: Snapshot) {
+        self.page.scene.children.truncate(snapshot.children);
+        self.page.items.truncate(snapshot.items);
+        self.page.lines.truncate(snapshot.lines);
+        self.page.links.truncate(snapshot.links);
+        self.cursor = snapshot.cursor;
+    }
+
     fn warn(&mut self, message: impl Into<String>) {
         self.fixed
             .report
@@ -505,15 +603,329 @@ impl<'a> Engine<'a> {
 
     // ---- 块 ----
 
-    fn place_block(&mut self, block: &Block, total_pages: Option<usize>) {
+    fn place_block(&mut self, block: &Block) {
+        // 一页的第一块正文之前才排页眉，避免空页也带页眉。
+        if !self.page_body && !self.in_frame && !matches!(block, Block::PageBreak) {
+            self.start_page_body();
+        }
         match block {
-            Block::Paragraph(paragraph) => self.place_paragraph(paragraph, total_pages),
+            Block::Paragraph(paragraph) => self.place_paragraph(paragraph, self.total_pages),
             Block::Image(image) => self.place_image_block(image),
             Block::PageBreak => self.new_page(),
-            Block::Table(_) => self.warn("表格排版尚未实现（A2）"),
+            Block::Table(table) => self.place_table(table),
             Block::Toc(_) => self.warn("自动目录尚未实现（A2）"),
             _ => self.warn("未知块类型，已跳过"),
         }
+    }
+
+    /// 本页开始排正文：标记并排页眉。
+    fn start_page_body(&mut self) {
+        self.page_body = true;
+        self.begin_body();
+    }
+
+    /// 正文开始时排页眉。
+    fn begin_body(&mut self) {
+        if self.page_started {
+            return;
+        }
+        self.page_started = true;
+        self.layout_header();
+    }
+
+    /// 当前页该用哪一套页眉页脚：首页不同 → 默认；偶数页 → 偶数页。
+    fn pick_footer(
+        set: &HeaderFooterSet,
+        first_page: bool,
+        page_index: usize,
+    ) -> Option<&HeaderFooter> {
+        if first_page && set.first.is_some() {
+            return set.first.as_ref();
+        }
+        if page_index % 2 == 1 && set.even.is_some() {
+            return set.even.as_ref();
+        }
+        set.default.as_ref()
+    }
+
+    fn layout_header(&mut self) {
+        let first_page = self.section_page == 0;
+        let Some(header) = Self::pick_footer(&self.headers, first_page, self.section_page) else {
+            return;
+        };
+        let blocks = header.blocks.clone();
+        if blocks.is_empty() {
+            return;
+        }
+        let width = self.page_frame().width;
+        let saved = (self.frame, self.cursor, self.in_frame);
+        self.in_frame = true;
+        self.frame = Frame {
+            left: self.margins.left,
+            width,
+            bottom: self.margins.top,
+        };
+        self.cursor = self.header_distance;
+        for block in &blocks {
+            self.place_block(block);
+        }
+        if self.cursor > self.margins.top + 0.5 {
+            self.warn("页眉超出上边距，可能与正文重叠");
+        }
+        self.frame = saved.0;
+        self.cursor = saved.1;
+        self.in_frame = saved.2;
+    }
+
+    fn layout_footer(&mut self) {
+        let first_page = self.section_page == 0;
+        let Some(footer) = Self::pick_footer(&self.footers, first_page, self.section_page) else {
+            return;
+        };
+        let blocks = footer.blocks.clone();
+        if blocks.is_empty() {
+            return;
+        }
+        let width = self.page_frame().width;
+        // 先量高度，再贴着「底边 - 页脚距离」的上方落版。
+        let height = self.measure_blocks(&blocks, width);
+        let bottom = (self.page_height - self.footer_distance).max(self.margins.bottom);
+        let top = (bottom - height).max(0.0);
+        let saved = (self.frame, self.cursor, self.in_frame);
+        self.in_frame = true;
+        self.frame = Frame {
+            left: self.margins.left,
+            width,
+            bottom,
+        };
+        self.cursor = top;
+        for block in &blocks {
+            self.place_block(block);
+        }
+        self.frame = saved.0;
+        self.cursor = saved.1;
+        self.in_frame = saved.2;
+    }
+
+    /// 在临时页里量一组块的高度（不产出任何元素）。
+    fn measure_blocks(&mut self, blocks: &[Block], width: f64) -> f64 {
+        let saved_page = std::mem::take(&mut self.page);
+        let saved = (self.frame, self.cursor, self.in_frame);
+        self.in_frame = true;
+        self.frame = Frame {
+            left: 0.0,
+            width,
+            bottom: f64::MAX,
+        };
+        self.cursor = 0.0;
+        for block in blocks {
+            self.place_block(block);
+        }
+        let height = self.cursor;
+        self.page = saved_page;
+        self.frame = saved.0;
+        self.cursor = saved.1;
+        self.in_frame = saved.2;
+        height
+    }
+
+    // ---- 表格 ----
+
+    fn place_table(&mut self, table: &Table) {
+        if table.rows.is_empty() || table.columns.is_empty() {
+            self.warn("表格没有行或列，已跳过");
+            return;
+        }
+        let widths = self.table_widths(table);
+        let header_rows = usize::try_from(table.header_rows)
+            .unwrap_or(0)
+            .min(table.rows.len());
+        let page_bottom = self.bottom();
+        let mut index = 0_usize;
+        while index < table.rows.len() {
+            let snapshot = self.snapshot();
+            let top = self.cursor;
+            let bottom = self.layout_row(table, &widths, index, top);
+            let overflow = bottom > page_bottom + 1e-6;
+            if overflow && index > 0 {
+                // 本页放不下：回滚，换页，重排表头，再试一次。
+                self.restore(snapshot);
+                self.new_page();
+                // 表格跨页后页面上仍然有正文，页眉要跟着换页重排。
+                self.start_page_body();
+                for header in 0..header_rows {
+                    let height = self.layout_row(table, &widths, header, self.cursor);
+                    self.cursor = height;
+                }
+                let retry = self.layout_row(table, &widths, index, self.cursor);
+                if retry > page_bottom + 1e-6 && header_rows == 0 {
+                    // 整页也放不下：允许溢出，避免死循环。
+                    self.diagnostic(DiagnosticCode::Geometry, "表格行高于可用高度，已允许溢出");
+                }
+                self.cursor = retry;
+                index += 1;
+                continue;
+            }
+            if overflow {
+                self.diagnostic(DiagnosticCode::Geometry, "表格行高于可用高度，已允许溢出");
+            }
+            self.cursor = bottom;
+            index += 1;
+        }
+    }
+
+    /// 表格列宽（毫米）。
+    fn table_widths(&self, table: &Table) -> Vec<f64> {
+        let total = self.content_width();
+        let mut widths = vec![0.0_f64; table.columns.len()];
+        let mut fixed = 0.0;
+        let mut weights = 0_u32;
+        for (index, column) in table.columns.iter().enumerate() {
+            match column.width {
+                ColumnWidth::Twips(twips) => {
+                    let width = twips.to_mm().max(0.0);
+                    widths[index] = width;
+                    fixed += width;
+                }
+                ColumnWidth::Weight(weight) => weights += u32::from(weight.max(1)),
+                _ => weights += 1,
+            }
+        }
+        if weights > 0 {
+            let remaining = (total - fixed).max(0.0);
+            for (index, column) in table.columns.iter().enumerate() {
+                let weight = match column.width {
+                    ColumnWidth::Weight(weight) => u32::from(weight.max(1)),
+                    ColumnWidth::Twips(_) => 0,
+                    _ => 1,
+                };
+                if weight > 0 {
+                    widths[index] = remaining * f64::from(weight) / f64::from(weights);
+                }
+            }
+        } else if fixed > total && fixed > 0.0 {
+            let scale = total / fixed;
+            for width in &mut widths {
+                *width *= scale;
+            }
+        }
+        widths
+    }
+
+    /// 排一行，返回行底部的 y；同时画这一行的边框。
+    fn layout_row(&mut self, table: &Table, widths: &[f64], index: usize, top: f64) -> f64 {
+        let row: &Row = &table.rows[index];
+        let padding_top = table.cell_padding.top.to_mm().max(0.0);
+        let padding_bottom = table.cell_padding.bottom.to_mm().max(0.0);
+        let padding_left = table.cell_padding.left.to_mm().max(0.0);
+        let padding_right = table.cell_padding.right.to_mm().max(0.0);
+        let saved_frame = self.frame;
+        let saved_cursor = self.cursor;
+        let saved_in_frame = self.in_frame;
+        self.in_frame = true;
+
+        let mut x = saved_frame.left;
+        let mut max_bottom = top;
+        for (column, cell) in row.cells.iter().enumerate() {
+            let width = widths.get(column).copied().unwrap_or(0.0);
+            if width <= 0.0 {
+                continue;
+            }
+            let inner_left = x + padding_left;
+            let inner_width = (width - padding_left - padding_right).max(1.0);
+            self.frame = Frame {
+                left: inner_left,
+                width: inner_width,
+                bottom: saved_frame.bottom.max(top + 1.0),
+            };
+            self.cursor = top + padding_top;
+            for block in &cell.blocks {
+                self.place_block(block);
+            }
+            max_bottom = max_bottom.max(self.cursor + padding_bottom);
+            x += width;
+        }
+
+        self.frame = saved_frame;
+        self.cursor = saved_cursor;
+        self.in_frame = saved_in_frame;
+
+        let mut height = (max_bottom - top).max(1.0);
+        if let Some(fixed) = row.height {
+            height = height.max(fixed.to_mm());
+        }
+        self.draw_row_borders(table, widths, index, top, top + height);
+        top + height
+    }
+
+    /// 画一行里每个单元格的边框。
+    fn draw_row_borders(
+        &mut self,
+        table: &Table,
+        widths: &[f64],
+        index: usize,
+        top: f64,
+        bottom: f64,
+    ) {
+        let rows = table.rows.len();
+        let columns = widths.len();
+        let left = self.frame.left;
+        let cell_count = table.rows[index].cells.len().min(columns);
+        let mut x = left;
+        for (column, width) in widths.iter().copied().take(cell_count).enumerate() {
+            let is_first_row = index == 0;
+            let is_last_row = index + 1 == rows;
+            let is_first_column = column == 0;
+            let is_last_column = column + 1 == cell_count;
+            let horizontal = if is_first_row || is_last_row {
+                table.borders.outer.or(table.borders.horizontal)
+            } else {
+                table.borders.horizontal.or(table.borders.outer)
+            };
+            let vertical = if is_first_column || is_last_column {
+                table.borders.outer.or(table.borders.vertical)
+            } else {
+                table.borders.vertical.or(table.borders.outer)
+            };
+            if let Some(border) = horizontal {
+                self.line(Point::new(x, top), Point::new(x + width, top), border);
+                self.line(Point::new(x, bottom), Point::new(x + width, bottom), border);
+            }
+            if let Some(border) = vertical {
+                self.line(Point::new(x, top), Point::new(x, bottom), border);
+                self.line(
+                    Point::new(x + width, top),
+                    Point::new(x + width, bottom),
+                    border,
+                );
+            }
+            x += width;
+        }
+    }
+
+    /// 画一条表格边框线。
+    fn line(&mut self, from: Point, to: Point, border: Border) {
+        if border.width.to_mm() <= 0.0 {
+            return;
+        }
+        let mut path = Path::new();
+        path.move_to(from);
+        path.line_to(to);
+        self.page.scene.children.push(Element::Path(PathElement {
+            path: Arc::new(path),
+            transform: Matrix::IDENTITY,
+            fill: None,
+            stroke: Some(StrokePaint {
+                paint: Paint::Color(border.color),
+                style: StrokeStyle {
+                    width: border.width.to_mm().max(0.05),
+                    cap: LineCap::Butt,
+                    join: LineJoin::Miter,
+                    ..StrokeStyle::default()
+                },
+            }),
+            rule: FillRule::NonZero,
+        }));
     }
 
     /// 段前间距：页首丢弃。
@@ -558,8 +970,9 @@ impl<'a> Engine<'a> {
             let height = self
                 .line_height(&style, &pieces, line)
                 .max(image_height + 0.2 * size);
-            if self.cursor + height > self.bottom() + 1e-6 && !self.page.is_empty() {
+            if self.cursor + height > self.bottom() + 1e-6 && !self.in_frame && self.page_body {
                 self.new_page();
+                self.start_page_body();
             }
             let baseline = self.cursor + (0.8 * size).max(image_height);
             let first = index == 0;
@@ -761,7 +1174,7 @@ impl<'a> Engine<'a> {
         } else {
             0.0
         };
-        let mut x = self.margins.left + indent_left + first_indent;
+        let mut x = self.frame.left + indent_left + first_indent;
         let width = self.content_width() - indent_left - style.right_indent.to_mm().max(0.0);
         let natural: f64 = pieces[line.start..line.end]
             .iter()
@@ -812,9 +1225,9 @@ impl<'a> Engine<'a> {
         let line_end_item = self.page.items.len() as u32;
 
         // 行框与基线。
-        let line_width = (x - self.margins.left - indent_left).max(0.0);
+        let line_width = (x - self.frame.left - indent_left).max(0.0);
         let bbox = Rect::new(
-            self.margins.left + indent_left,
+            self.frame.left + indent_left,
             baseline - self.max_size(pieces, line),
             line_width,
             self.max_size(pieces, line) * 1.2,
@@ -961,8 +1374,9 @@ impl<'a> Engine<'a> {
             height *= scale;
             self.diagnostic(DiagnosticCode::Approximation, "图片超宽，已等比缩放到版心");
         }
-        if height > self.bottom() - self.cursor && !self.page.is_empty() {
+        if height > self.bottom() - self.cursor && !self.in_frame && self.page_body {
             self.new_page();
+            self.start_page_body();
         }
         let available = self.bottom() - self.cursor;
         if height > available {
@@ -977,7 +1391,7 @@ impl<'a> Engine<'a> {
         let Some(stored) = self.register_image(image.image) else {
             return;
         };
-        let x = self.margins.left
+        let x = self.frame.left
             + match image.align {
                 Align::Center => (content - width) / 2.0,
                 Align::Right => content - width,
@@ -1110,6 +1524,30 @@ fn apply_text_direct(base: &mut TextStyle, over: &TextStyle) {
     }
 }
 
+/// 递归收集块（含表格单元格）里的字符。
+fn collect_block_chars(
+    blocks: &[Block],
+    engine: &Engine<'_>,
+    wanted: &mut HashMap<FontKey, HashSet<char>>,
+    fallbacks: &mut HashMap<String, Vec<String>>,
+) {
+    for block in blocks {
+        match block {
+            Block::Paragraph(paragraph) => {
+                engine.collect_chars(&paragraph.runs, wanted, fallbacks);
+            }
+            Block::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        collect_block_chars(&cell.blocks, engine, wanted, fallbacks);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// 一行里最高的行内图片高度。
 fn line_image_height(pieces: &[Piece], line: &LineSpan, images: &[MeasuredImage]) -> f64 {
     pieces[line.start..line.end]
@@ -1117,6 +1555,32 @@ fn line_image_height(pieces: &[Piece], line: &LineSpan, images: &[MeasuredImage]
         .filter_map(|piece| piece.object.and_then(|index| images.get(index)))
         .map(|image| image.height)
         .fold(0.0, f64::max)
+}
+
+/// 当前排版的横向框：表格单元格、页眉页脚都会换一个框。
+#[derive(Clone, Copy, Debug, Default)]
+struct Frame {
+    /// 左边界，毫米。
+    left: f64,
+    /// 可用宽度，毫米。
+    width: f64,
+    /// 底边界，毫米。
+    bottom: f64,
+}
+
+/// 一页内容的快照，用于「放到一半发现放不下」时回滚。
+#[derive(Clone, Copy, Debug)]
+struct Snapshot {
+    /// 场景子元素数量。
+    children: usize,
+    /// 文本项数量。
+    items: usize,
+    /// 行数量。
+    lines: usize,
+    /// 链接数量。
+    links: usize,
+    /// 竖直游标。
+    cursor: f64,
 }
 
 /// 段落纯文本。
