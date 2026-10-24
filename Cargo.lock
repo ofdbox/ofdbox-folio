@@ -1093,6 +1093,7 @@ version = "0.0.1"
 dependencies = [
  "ofdbox-folio-ir",
  "thiserror",
+ "ttf-parser",
 ]
 
 [[package]]
