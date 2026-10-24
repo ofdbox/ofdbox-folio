@@ -3,6 +3,8 @@
 //! 输入是已测量的单元序列，输出是行区间。这里刻意不依赖字体，便于单独测试
 //! CJK / 拉丁混排与行首行尾禁则。
 
+use ofdbox_folio_ir::NoteRef;
+
 /// 一个已测量的排版单元。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Piece {
@@ -14,6 +16,8 @@ pub(crate) struct Piece {
     pub style: usize,
     /// 行内对象下标（图片）。
     pub object: Option<usize>,
+    /// 单元所属的脚注/尾注引用（只标在标记的首字符上）。
+    pub note: Option<NoteRef>,
 }
 
 impl Piece {
@@ -24,6 +28,7 @@ impl Piece {
             width,
             style,
             object: None,
+            note: None,
         }
     }
 
@@ -34,6 +39,7 @@ impl Piece {
             width,
             style,
             object: Some(object),
+            note: None,
         }
     }
 

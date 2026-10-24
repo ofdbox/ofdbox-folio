@@ -23,6 +23,8 @@ pub struct FlowDocument {
     pub resources: crate::asset::ResourceStore,
     /// 附件。
     pub attachments: Vec<Attachment>,
+    /// 脚注与尾注。
+    pub notes: Vec<Note>,
     /// 导入或构建过程中产生的诊断。
     pub report: crate::meta::Report,
 }
@@ -36,6 +38,7 @@ impl FlowDocument {
             sections: vec![Section::default()],
             resources: crate::asset::ResourceStore::new(),
             attachments: Vec::new(),
+            notes: Vec::new(),
             report: crate::meta::Report::new(),
         }
     }
@@ -345,6 +348,8 @@ pub enum Inline {
     Field(Field),
     /// 超链接。
     Link(Link),
+    /// 脚注或尾注引用。
+    Note(NoteRef),
 }
 
 /// 一段带样式的文本。
@@ -505,6 +510,49 @@ pub enum FieldKind {
     Date,
     /// 引用书签。
     Ref(crate::asset::AnchorId),
+}
+
+/// 注释类型。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NoteKind {
+    /// 脚注：排在引用所在页的页底。
+    Footnote,
+    /// 尾注：排在文档末尾。
+    Endnote,
+}
+
+/// 注释引用。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NoteRef {
+    /// 注释类型。
+    pub kind: NoteKind,
+    /// 文档内唯一的注释 ID。
+    pub id: u32,
+}
+
+impl NoteRef {
+    /// 创建引用。
+    pub fn new(kind: NoteKind, id: u32) -> Self {
+        Self { kind, id }
+    }
+}
+
+/// 一条注释的内容。
+#[derive(Clone, Debug, PartialEq)]
+pub struct Note {
+    /// 注释 ID，与 [NoteRef::id] 对应。
+    pub id: u32,
+    /// 注释类型。
+    pub kind: NoteKind,
+    /// 注释正文。
+    pub blocks: Vec<Block>,
+}
+
+impl Note {
+    /// 创建注释。
+    pub fn new(kind: NoteKind, id: u32, blocks: Vec<Block>) -> Self {
+        Self { id, kind, blocks }
+    }
 }
 
 /// 超链接。

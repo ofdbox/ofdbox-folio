@@ -6,8 +6,8 @@ use std::sync::Arc;
 use ofdbox_folio_ir::{
     AnchorId, AssetId, Block, Cell, Column, ColumnWidth, Diagnostic, DiagnosticCode, Field,
     FieldKind, FlowDocument, HeaderFooter, ImageAsset, Inline, InlineImage, Link, LinkTarget,
-    Metadata, Paragraph, Row, Section, Table, TextRun, TextStyle, TocBlock, Twips,
-    detect_image_format, image_dimensions,
+    Metadata, Note, NoteKind, NoteRef, Paragraph, Row, Section, Table, TextRun, TextStyle,
+    TocBlock, Twips, detect_image_format, image_dimensions,
 };
 
 use crate::DocxError;
@@ -20,7 +20,8 @@ use crate::props::{
 };
 use crate::styles::{Styles, heading_level_from_name, parse_theme};
 use crate::xml::{
-    XmlReader, attr, attr_f64, attr_i32, is_element, local_name, resolve_reference, skip_element,
+    XmlReader, attr, attr_f64, attr_i32, attr_u32, is_element, local_name, resolve_reference,
+    skip_element,
 };
 
 /// 读取 DOCX，产出 Flow IR。
@@ -121,6 +122,8 @@ impl<'a> Builder<'a> {
         }
         self.finish_section();
         self.fill_headers_footers()?;
+        self.parse_notes(NoteKind::Footnote)?;
+        self.parse_notes(NoteKind::Endnote)?;
         Ok(self.doc)
     }
 
@@ -387,12 +390,15 @@ impl<'a> Builder<'a> {
                         self.apply_field_char(&element, sink);
                         skip_element(reader, &element)?;
                     }
-                    "footnoteReference" | "endnoteReference" | "commentReference" => {
-                        let code = local_name(&element);
+                    "footnoteReference" | "endnoteReference" => {
+                        self.push_note_reference(&element, sink);
+                        skip_element(reader, &element)?;
+                    }
+                    "commentReference" => {
                         self.warn_once(
-                            &code,
+                            "commentReference",
                             DiagnosticCode::Unsupported,
-                            format!("{code} 暂不支持，已忽略引用标记"),
+                            "批注引用暂不支持，已忽略",
                         );
                         skip_element(reader, &element)?;
                     }
@@ -425,12 +431,14 @@ impl<'a> Builder<'a> {
                             "符号字体（w:sym）暂不支持，已跳过",
                         );
                     }
-                    "footnoteReference" | "endnoteReference" | "commentReference" => {
-                        let code = local_name(&element);
+                    "footnoteReference" | "endnoteReference" => {
+                        self.push_note_reference(&element, sink);
+                    }
+                    "commentReference" => {
                         self.warn_once(
-                            &code,
+                            "commentReference",
                             DiagnosticCode::Unsupported,
-                            format!("{code} 暂不支持，已忽略引用标记"),
+                            "批注引用暂不支持，已忽略",
                         );
                     }
                     _ => {}
@@ -476,6 +484,62 @@ impl<'a> Builder<'a> {
             }
         }
         Ok(text)
+    }
+
+    /// 读取 word/footnotes.xml 或 word/endnotes.xml 里的注释正文。
+    fn parse_notes(&mut self, kind: NoteKind) -> Result<(), DocxError> {
+        let suffix = match kind {
+            NoteKind::Footnote => "/footnotes",
+            NoteKind::Endnote => "/endnotes",
+        };
+        let Some(target) = target_by_kind(&self.relations, suffix) else {
+            return Ok(());
+        };
+        let Some(text) = self.package.read_text(&target)? else {
+            return Ok(());
+        };
+        let mut reader = XmlReader::from_str(&text);
+        loop {
+            match reader.read_event().map_err(crate::xml::xml_error)? {
+                quick_xml::events::Event::Start(element) => {
+                    let name = local_name(&element);
+                    // 顶层 w:footnotes/w:endnotes 容器本身不携带内容，忽略即可。
+                    if name != "footnote" && name != "endnote" {
+                        continue;
+                    }
+                    let id = attr_u32(&element, "id");
+                    // separator / continuationNotice 之类的伪注释没有正文。
+                    let note_type = attr(&element, "type").unwrap_or_default();
+                    let blocks = self.parse_blocks(&mut reader, Some(&name), false)?;
+                    if let (Some(id), true) = (id, note_type.is_empty())
+                        && !blocks.is_empty()
+                    {
+                        self.doc.notes.push(Note::new(kind, id, blocks));
+                    }
+                }
+                quick_xml::events::Event::Eof => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// 把 w:footnoteReference / w:endnoteReference 记成注释引用。
+    fn push_note_reference(
+        &mut self,
+        element: &quick_xml::events::BytesStart<'_>,
+        sink: &mut InlineSink,
+    ) {
+        let kind = if is_element(element, "endnoteReference") {
+            NoteKind::Endnote
+        } else {
+            NoteKind::Footnote
+        };
+        let Some(id) = attr_u32(element, "id") else {
+            return;
+        };
+        // Word 用 -1/0 表示分隔符笔记，正文里不会引用。
+        sink.push_inline(Inline::Note(NoteRef::new(kind, id)));
     }
 
     /// 处理复杂域的 begin / separate / end。

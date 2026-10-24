@@ -51,6 +51,7 @@ fn sample() -> Vec<u8> {
       </w:pPr>
       <w:r><w:rPr><w:b/><w:sz w:val="24"/></w:rPr><w:t>加粗</w:t></w:r>
       <w:r><w:rPr><w:i/><w:color w:val="C81E1E"/></w:rPr><w:t>斜体红字</w:t></w:r>
+      <w:r><w:footnoteReference w:id="1"/></w:r>
     </w:p>
     <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>列表项</w:t></w:r></w:p>
     <w:tbl>
@@ -141,6 +142,13 @@ fn sample() -> Vec<u8> {
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:hdr xmlns:w="{W_NS}"><w:p><w:r><w:t>页眉</w:t></w:r></w:p></w:hdr>"#
     );
+    let footnotes = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:footnotes xmlns:w="{W_NS}">
+  <w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>
+  <w:footnote w:id="1"><w:p><w:r><w:t>脚注内容</w:t></w:r></w:p></w:footnote>
+</w:footnotes>"#
+    );
     let rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
@@ -148,6 +156,7 @@ fn sample() -> Vec<u8> {
   <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
   <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
   <Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>
+  <Relationship Id="rId10" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>
 </Relationships>"#;
     build(&[
         ("word/document.xml", document.as_bytes()),
@@ -155,6 +164,7 @@ fn sample() -> Vec<u8> {
         ("word/numbering.xml", numbering.as_bytes()),
         ("word/footer1.xml", footer.as_bytes()),
         ("word/header1.xml", header.as_bytes()),
+        ("word/footnotes.xml", footnotes.as_bytes()),
         ("word/_rels/document.xml.rels", rels.as_bytes()),
         ("word/media/image1.png", TINY_PNG),
     ])
@@ -207,7 +217,8 @@ fn maps_heading_paragraphs_and_run_formatting() {
     assert_eq!(body.style.first_line_indent.0, 420);
     assert_eq!(body.style.space_before.0, 120);
     assert_eq!(body.style.space_after.0, 240);
-    assert_eq!(body.runs.len(), 2);
+    // 正文两段文字 + 一个脚注引用。
+    assert_eq!(body.runs.len(), 3);
     match &body.runs[0] {
         Inline::Text(run) => {
             assert!(run.style.bold);
@@ -326,6 +337,27 @@ fn reads_page_break_and_footer_fields() {
 
     let header = flow.sections[0].headers.default.as_ref().expect("页眉");
     assert_eq!(header.blocks.len(), 1);
+}
+
+#[test]
+fn reads_footnote_bodies_and_references() {
+    let flow = read();
+    assert_eq!(flow.notes.len(), 1, "注释: {:?}", flow.notes);
+    let note = &flow.notes[0];
+    assert_eq!(note.kind, ofdbox_folio_ir::NoteKind::Footnote);
+    assert_eq!(note.id, 1);
+    assert_eq!(note.blocks.len(), 1);
+
+    let referenced = flow.sections[0]
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Paragraph(paragraph) => Some(paragraph),
+            _ => None,
+        })
+        .flat_map(|paragraph| paragraph.runs.iter())
+        .any(|inline| matches!(inline, Inline::Note(note) if note.id == 1));
+    assert!(referenced, "正文里应有脚注引用");
 }
 
 #[test]

@@ -18,10 +18,10 @@ use ofdbox_folio_ir::{
     Align, Block, Border, ColumnWidth, Diagnostic, DiagnosticCode, Element, FieldKind, FillRule,
     FixedDocument, FlowDocument, FontAsset, FontProvider, Group, HeaderFooter, HeaderFooterSet,
     ImageAsset, ImageBlock, ImageElement, Inline, LineCap, LineJoin, LineSpacing, LinkArea,
-    LinkTarget, Matrix, OutlineItem, Page, PageInfo, PageSetup, Paint, ParaStyle, Paragraph, Path,
-    PathElement, Point, Rect, Rgba, Rotation, Row, Scene, Size, StrokePaint, StrokeStyle, TabAlign,
-    TabLeader, TabStop, Table, TextElement, TextItem, TextLayer, TextLine, TextRun, TextStyle,
-    Twips,
+    LinkTarget, Matrix, NoteKind, NoteRef, OutlineItem, Page, PageInfo, PageSetup, Paint,
+    ParaStyle, Paragraph, Path, PathElement, Point, Rect, Rgba, Rotation, Row, Scene, Size,
+    StrokePaint, StrokeStyle, TabAlign, TabLeader, TabStop, Table, TextElement, TextItem,
+    TextLayer, TextLine, TextRun, TextStyle, Twips,
 };
 
 use font::{FontKey, FontStore};
@@ -32,6 +32,57 @@ pub const LAYOUT_VERSION: &str = "layout-0.1";
 
 /// 没有显式制表位时，制表符默认前进的步长（毫米）。
 const DEFAULT_TAB_STEP: f64 = 12.5;
+
+/// 注释区的左缩进（毫米）。
+const NOTE_INDENT: f64 = 8.0;
+
+/// 注释之间的间距（毫米）。
+const NOTE_GAP: f64 = 1.6;
+
+/// 一条待排的注释。
+struct PendingNote {
+    /// 引用本身。
+    note: NoteRef,
+    /// 已加上序号的正文块。
+    blocks: Vec<Block>,
+    /// 排版高度，毫米。
+    height: f64,
+}
+
+/// 给注释正文的第一段加序号；脚注用 1)，尾注用 (1)。
+fn with_note_number(kind: NoteKind, blocks: &[Block], number: usize) -> Vec<Block> {
+    let marker = match kind {
+        NoteKind::Footnote => format!("{number}) "),
+        NoteKind::Endnote => format!("({number}) "),
+    };
+    let mut blocks = blocks.to_vec();
+    match blocks.first_mut() {
+        Some(Block::Paragraph(paragraph)) => {
+            let style = paragraph
+                .runs
+                .iter()
+                .find_map(|inline| match inline {
+                    Inline::Text(run) => Some(run.style.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            paragraph
+                .runs
+                .insert(0, Inline::Text(TextRun::new(marker, style)));
+        }
+        _ => blocks.insert(
+            0,
+            Block::Paragraph(Paragraph::plain(
+                marker,
+                TextStyle {
+                    size: Twips::from_pt(9.0),
+                    ..TextStyle::default()
+                },
+            )),
+        ),
+    }
+    blocks
+}
 
 /// 布局错误。
 #[derive(Debug, thiserror::Error)]
@@ -285,6 +336,18 @@ struct Engine<'a> {
     total_pages: Option<usize>,
     /// 上一遍排版收集到的目录条目。
     toc_entries: Option<Vec<TocEntry>>,
+    /// 注释编号：(类型, ID) → 序号。
+    note_numbers: HashMap<(NoteKind, u32), usize>,
+    /// 脚注计数器。
+    next_footnote: usize,
+    /// 尾注计数器。
+    next_endnote: usize,
+    /// 本页待排的脚注。
+    page_notes: Vec<PendingNote>,
+    /// 页底注释区占用的高度，正文的下边界要相应上移。
+    bottom_inset: f64,
+    /// 待排在文档末尾的尾注。
+    endnotes: Vec<PendingNote>,
     headings: Vec<(u8, String, usize, f64)>,
     /// 字体缺字形的字符计数，最后汇总成一条诊断。
     missing_chars: usize,
@@ -327,6 +390,12 @@ impl<'a> Engine<'a> {
             footers: HeaderFooterSet::default(),
             total_pages: None,
             toc_entries: None,
+            note_numbers: HashMap::new(),
+            next_footnote: 0,
+            next_endnote: 0,
+            page_notes: Vec::new(),
+            bottom_inset: 0.0,
+            endnotes: Vec::new(),
             headings: Vec::new(),
             missing_chars: 0,
         }
@@ -360,6 +429,9 @@ impl<'a> Engine<'a> {
                 &HeaderFooterSet::default(),
             );
             self.finish_page();
+        }
+        if !self.endnotes.is_empty() {
+            self.flush_endnotes();
         }
         if self.missing_chars > 0 {
             self.diagnostic(
@@ -672,6 +744,7 @@ impl<'a> Engine<'a> {
         self.finish_page();
         self.page = PageBuffer::new();
         self.column_index = 0;
+        self.bottom_inset = 0.0;
         self.frame = self.column_frame(0);
         self.cursor = self.frame.top;
         self.page_body = false;
@@ -684,7 +757,9 @@ impl<'a> Engine<'a> {
         if !self.page_body {
             return;
         }
-        self.layout_footer();
+        let footer_top = self.layout_footer();
+        let body_bottom = self.page_height - self.margins.bottom;
+        self.emit_page_notes(footer_top.min(body_bottom));
         let size = Size::new(self.page_width, self.page_height);
         let scene = Scene {
             size,
@@ -816,14 +891,16 @@ impl<'a> Engine<'a> {
         self.in_frame = saved.2;
     }
 
-    fn layout_footer(&mut self) {
+    /// 排页脚，返回页脚占用的顶部 y（没有页脚时返回正文底边）。
+    fn layout_footer(&mut self) -> f64 {
+        let body_bottom = self.page_height - self.margins.bottom;
         let first_page = self.section_page == 0;
         let Some(footer) = Self::pick_footer(&self.footers, first_page, self.section_page) else {
-            return;
+            return body_bottom;
         };
         let blocks = footer.blocks.clone();
         if blocks.is_empty() {
-            return;
+            return body_bottom;
         }
         let width = self.page_frame().width;
         // 先量高度，再贴着「底边 - 页脚距离」的上方落版。
@@ -845,6 +922,196 @@ impl<'a> Engine<'a> {
         self.frame = saved.0;
         self.cursor = saved.1;
         self.in_frame = saved.2;
+        top
+    }
+
+    // ---- 脚注与尾注 ----
+
+    /// 取（必要时分配）注释序号，从 1 开始。
+    fn note_number(&mut self, note: NoteRef) -> usize {
+        if let Some(number) = self.note_numbers.get(&(note.kind, note.id)) {
+            return *number;
+        }
+        let number = match note.kind {
+            NoteKind::Footnote => {
+                self.next_footnote += 1;
+                self.next_footnote
+            }
+            NoteKind::Endnote => {
+                self.next_endnote += 1;
+                self.next_endnote
+            }
+        };
+        self.note_numbers.insert((note.kind, note.id), number);
+        number
+    }
+
+    /// 找到注释正文。
+    fn note_blocks(&self, note: NoteRef) -> Option<Vec<Block>> {
+        self.document
+            .notes
+            .iter()
+            .find(|item| item.id == note.id && item.kind == note.kind)
+            .map(|item| item.blocks.clone())
+    }
+
+    /// 收集一行里的注释引用，并为它们预留页底空间。
+    fn reserve_notes_in_line(&mut self, pieces: &[Piece], line: &LineSpan) {
+        for piece in &pieces[line.start..line.end] {
+            let Some(note) = piece.note else {
+                continue;
+            };
+            if self.page_notes.iter().any(|item| item.note == note)
+                || self.endnotes.iter().any(|item| item.note == note)
+            {
+                continue;
+            }
+            let Some(blocks) = self.note_blocks(note) else {
+                self.diagnostic(
+                    DiagnosticCode::Unsupported,
+                    format!("注释 {} 缺少正文，已跳过", note.id),
+                );
+                continue;
+            };
+            let number = self.note_number(note);
+            let blocks = with_note_number(note.kind, &blocks, number);
+            match note.kind {
+                NoteKind::Footnote => {
+                    let width = (self.page_frame().width - NOTE_INDENT).max(1.0);
+                    let height = self.measure_blocks(&blocks, width) + NOTE_GAP;
+                    self.page_notes.push(PendingNote {
+                        note,
+                        blocks,
+                        height,
+                    });
+                    self.bottom_inset += height;
+                    self.refresh_frame_bottom();
+                }
+                NoteKind::Endnote => self.endnotes.push(PendingNote {
+                    note,
+                    blocks,
+                    height: 0.0,
+                }),
+            }
+        }
+    }
+
+    /// 注释区变大后，重新计算当前框的下边界。
+    ///
+    /// 正文已经被注释挤到页底之外时不再回调 cursor：那一行已经排下了，
+    /// 后续行会因为 cursor + 行高 > bottom 自动换栏/换页。
+    fn refresh_frame_bottom(&mut self) {
+        if self.in_frame {
+            return;
+        }
+        self.frame.bottom = self.column_frame(self.column_index).bottom;
+    }
+
+    /// 在页面底部排本页的脚注。
+    fn emit_page_notes(&mut self, bottom: f64) {
+        let notes = std::mem::take(&mut self.page_notes);
+        if notes.is_empty() {
+            return;
+        }
+        let saved = (self.frame, self.cursor, self.in_frame);
+        let width = self.page_frame().width;
+        let total: f64 = notes
+            .iter()
+            .map(|note| note.height.max(NOTE_GAP * 2.0))
+            .sum();
+        let top = (bottom - total).max(0.0);
+        self.draw_note_separator(top - NOTE_GAP / 2.0, width);
+        self.layout_notes(&notes, top, width);
+        self.frame = saved.0;
+        self.cursor = saved.1;
+        self.in_frame = saved.2;
+    }
+
+    /// 排一段注释列表（尾注复用），top 是注释区顶部。
+    fn emit_notes(&mut self, mut notes: Vec<PendingNote>, bottom: f64, separator: bool) {
+        if notes.is_empty() {
+            return;
+        }
+        let width = self.page_frame().width;
+        let inner = (width - NOTE_INDENT).max(1.0);
+        for note in &mut notes {
+            if note.height <= 0.0 {
+                note.height = self.measure_blocks(&note.blocks, inner) + NOTE_GAP;
+            }
+        }
+        let total: f64 = notes.iter().map(|note| note.height).sum();
+        let top = (bottom - total).max(0.0);
+        if separator {
+            self.draw_note_separator(top - NOTE_GAP / 2.0, width);
+        }
+        self.layout_notes(&notes, top, width);
+    }
+
+    /// 注释区上方那条短横线。
+    fn draw_note_separator(&mut self, y: f64, width: f64) {
+        let mut path = Path::new();
+        path.move_to(Point::new(self.margins.left, y));
+        path.line_to(Point::new(self.margins.left + width / 3.0, y));
+        self.page.scene.children.push(Element::Path(PathElement {
+            path: Arc::new(path),
+            transform: Matrix::IDENTITY,
+            fill: None,
+            stroke: Some(StrokePaint {
+                paint: Paint::Color(Rgba::BLACK),
+                style: StrokeStyle {
+                    width: 0.2,
+                    cap: LineCap::Butt,
+                    join: LineJoin::Miter,
+                    dash: Vec::new(),
+                    dash_offset: 0.0,
+                    ..StrokeStyle::default()
+                },
+            }),
+            rule: FillRule::NonZero,
+        }));
+    }
+
+    /// 从 top 开始往下排注释正文。
+    fn layout_notes(&mut self, notes: &[PendingNote], top: f64, width: f64) {
+        let saved = (self.frame, self.cursor, self.in_frame);
+        self.in_frame = true;
+        self.frame = Frame {
+            left: self.margins.left + NOTE_INDENT,
+            width: (width - NOTE_INDENT).max(1.0),
+            top,
+            bottom: f64::MAX,
+        };
+        self.cursor = top;
+        for note in notes {
+            for block in &note.blocks {
+                self.place_block(block);
+            }
+            self.cursor += NOTE_GAP;
+        }
+        self.frame = saved.0;
+        self.cursor = saved.1;
+        self.in_frame = saved.2;
+    }
+
+    /// 在文档末尾排尾注。
+    fn flush_endnotes(&mut self) {
+        let notes = std::mem::take(&mut self.endnotes);
+        if notes.is_empty() {
+            return;
+        }
+        self.new_page();
+        self.start_page_body();
+        let mut heading = Paragraph::plain(
+            "尾注",
+            TextStyle {
+                size: Twips::from_pt(14.0),
+                ..TextStyle::default()
+            },
+        );
+        heading.heading_level = None;
+        self.place_paragraph(&heading, self.total_pages);
+        self.emit_notes(notes, self.bottom(), false);
+        self.finish_page();
     }
 
     // ---- 自动目录 ----
@@ -1500,6 +1767,19 @@ impl<'a> Engine<'a> {
                     };
                     self.push_text(&text, &style, index, pieces);
                 }
+                Inline::Note(note) => {
+                    // 引用标记：小号数字，排成普通文本，落版时再预留页底注释区。
+                    let mut style = self.resolve_char_style(&TextStyle::default(), None);
+                    style.size = Twips(style.size.0 * 7 / 10);
+                    let index = self.intern_style(&style);
+                    let number = self.note_number(*note);
+                    let text = number.to_string();
+                    let start = pieces.len();
+                    self.push_text(&text, &style, index, pieces);
+                    if let Some(first) = pieces.get_mut(start) {
+                        first.note = Some(*note);
+                    }
+                }
                 Inline::Image(image) => {
                     let style = self.resolve_char_style(&TextStyle::default(), None);
                     let index = self.intern_style(&style);
@@ -1653,6 +1933,10 @@ impl<'a> Engine<'a> {
             x += advance;
         }
         let line_end_item = self.page.items.len() as u32;
+        // 这一行里的脚注引用要在本页预留页底空间。
+        if !self.in_frame {
+            self.reserve_notes_in_line(pieces, line);
+        }
 
         // 行框与基线。
         let line_width = (x - self.frame.left - indent_left).max(0.0);
