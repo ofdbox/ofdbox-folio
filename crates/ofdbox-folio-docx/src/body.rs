@@ -414,7 +414,7 @@ impl<'a> Builder<'a> {
                             text.push('\n');
                         }
                     }
-                    "tab" => text.push_str("    "),
+                    "tab" => text.push('\t'),
                     "fldChar" => self.apply_field_char(&element, sink),
                     "noBreakHyphen" => text.push('-'),
                     "softHyphen" | "lastRenderedPageBreak" => {}

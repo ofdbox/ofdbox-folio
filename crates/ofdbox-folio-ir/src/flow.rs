@@ -240,8 +240,62 @@ pub struct ParaStyle {
     pub keep_with_next: bool,
     /// 段内各行保持同页。
     pub keep_lines_together: bool,
+    /// 制表位（相对版心左边界），按 `position` 升序使用。
+    pub tabs: Vec<TabStop>,
     /// 命名样式 ID。
     pub style_id: Option<String>,
+}
+
+/// 一个制表位。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TabStop {
+    /// 位置：相对版心左边界，单位 twip。
+    pub position: Twips,
+    /// 对齐方式。
+    pub align: TabAlign,
+    /// 前导符。
+    pub leader: TabLeader,
+}
+
+impl TabStop {
+    /// 创建一个制表位。
+    pub fn new(position: Twips, align: TabAlign, leader: TabLeader) -> Self {
+        Self {
+            position,
+            align,
+            leader,
+        }
+    }
+}
+
+/// 制表位对齐方式：决定制表符之后那截文字相对制表位怎么放。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TabAlign {
+    /// 左对齐：文字从制表位开始。
+    #[default]
+    Left,
+    /// 居中：文字以制表位为中心。
+    Center,
+    /// 右对齐：文字以制表位为右边界。
+    Right,
+    /// 小数点对齐：小数点落在制表位上；没有小数点时按右对齐。
+    Decimal,
+}
+
+/// 制表位前导符：填充制表符留下的空白。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TabLeader {
+    /// 不填充。
+    #[default]
+    None,
+    /// 点线（目录常用）。
+    Dot,
+    /// 虚线。
+    Dash,
+    /// 实线。
+    Line,
 }
 
 /// 水平对齐。

@@ -103,17 +103,14 @@ fn builds_toc_with_page_numbers_matching_the_body() {
     let fixed = layout(&flow, &mut fonts).expect("layout");
     assert!(fixed.pages.len() >= 3, "页数: {}", fixed.pages.len());
 
-    // 目录页：标题 + 每条「左标题 / 右页码」。
+    // 目录页：标题 + 每条「条目 ⇥ 页码」（制表符把页码推到右制表位）。
     let toc_lines = lines(&fixed.pages[0]);
     assert!(toc_lines.iter().any(|line| line == "目录"), "目录标题缺失");
     let entry = toc_lines
         .iter()
-        .position(|line| line == "第 1 章")
+        .find(|line| line.starts_with("第 1 章"))
         .expect("第一章条目");
-    let listed_page: usize = toc_lines
-        .get(entry + 1)
-        .and_then(|line| line.trim().parse().ok())
-        .expect("页码");
+    let listed_page = trailing_number(entry).expect("页码");
 
     // 正文里的第一章标题所在页（跳过目录页）。
     let actual = fixed
@@ -127,20 +124,32 @@ fn builds_toc_with_page_numbers_matching_the_body() {
     assert_eq!(listed_page, actual, "目录页码应与正文一致");
 }
 
+/// 取行尾的连续数字。
+fn trailing_number(line: &str) -> Option<usize> {
+    let digits: String = line
+        .chars()
+        .rev()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    digits.parse().ok()
+}
+
 #[test]
 fn toc_respects_max_level() {
     let Some(mut fonts) = fonts() else {
         return;
     };
     let fixed = layout(&document(2), &mut fonts).expect("layout");
-    let first_page = lines(&fixed.pages[0]);
-    let toc_lines = &first_page[..];
+    let toc_lines = lines(&fixed.pages[0]);
     assert!(
-        toc_lines.iter().any(|line| line == "第 1 节"),
+        toc_lines.iter().any(|line| line.starts_with("第 1 节")),
         "目录: {toc_lines:?}"
     );
     assert!(
-        !toc_lines.iter().any(|line| line == "小节 1"),
+        !toc_lines.iter().any(|line| line.starts_with("小节 1")),
         "三级标题不应进目录: {toc_lines:?}"
     );
 }

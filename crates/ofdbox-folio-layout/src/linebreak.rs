@@ -42,9 +42,14 @@ impl Piece {
         self.ch == '\n'
     }
 
-    /// 是否是空白。
+    /// 是否是空格（不含制表符）。
     pub fn is_space(&self) -> bool {
-        self.ch == ' ' || self.ch == '\t'
+        self.ch == ' '
+    }
+
+    /// 是否是制表符：宽度由落版时的制表位决定，测量阶段记 0。
+    pub fn is_tab(&self) -> bool {
+        self.ch == '\t'
     }
 }
 
@@ -78,8 +83,10 @@ pub(crate) fn break_lines(pieces: &[Piece], first_width: f64, width: f64) -> Vec
     let mut available = first_width.max(1.0);
 
     while start < pieces.len() {
-        // 跳过行首的强制断行与空白。
-        while start < pieces.len() && (pieces[start].is_break() || pieces[start].is_space()) {
+        // 跳过行首的强制断行与空白（行首制表符没有意义，一并丢弃）。
+        while start < pieces.len()
+            && (pieces[start].is_break() || pieces[start].is_space() || pieces[start].is_tab())
+        {
             start += 1;
         }
         if start >= pieces.len() {
@@ -128,7 +135,7 @@ pub(crate) fn break_lines(pieces: &[Piece], first_width: f64, width: f64) -> Vec
         }
 
         let mut trimmed = end;
-        while trimmed > start && pieces[trimmed - 1].is_space() {
+        while trimmed > start && (pieces[trimmed - 1].is_space() || pieces[trimmed - 1].is_tab()) {
             trimmed -= 1;
         }
         lines.push(LineSpan {
@@ -150,7 +157,7 @@ fn can_break_between(pieces: &[Piece], index: usize) -> bool {
     }
     let prev = pieces[index - 1];
     let next = pieces[index];
-    if prev.is_space() || prev.ch == '-' || prev.ch == '\u{2014}' {
+    if prev.is_space() || prev.is_tab() || prev.ch == '-' || prev.ch == '\u{2014}' {
         return true;
     }
     if prev.object.is_some() || next.object.is_some() {

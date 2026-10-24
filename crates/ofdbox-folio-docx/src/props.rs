@@ -7,7 +7,7 @@
 
 use ofdbox_folio_ir::{
     Align, Border, BorderStyle, FontFamily, LineSpacing, Margins, PageSetup, ParaStyle, Rgba,
-    TableBorders, TextStyle, Twips,
+    TabAlign, TabLeader, TabStop, TableBorders, TextStyle, Twips,
 };
 
 use crate::DocxError;
@@ -48,6 +48,8 @@ pub(crate) struct RawParaProps {
     pub keep_next: Option<bool>,
     /// 段内各行同页。
     pub keep_lines: Option<bool>,
+    /// 制表位。
+    pub tabs: Option<Vec<TabStop>>,
     /// 段前分页。
     pub page_break_before: Option<bool>,
     /// 编号：`(numId, ilvl)`。
@@ -81,6 +83,7 @@ impl RawParaProps {
             right,
             keep_next,
             keep_lines,
+            tabs,
             page_break_before,
             numbering,
             outline_level,
@@ -123,6 +126,9 @@ impl RawParaProps {
         }
         if let Some(value) = self.keep_lines {
             style.keep_lines_together = value;
+        }
+        if let Some(tabs) = &self.tabs {
+            style.tabs = tabs.clone();
         }
         style
     }
@@ -426,6 +432,7 @@ pub(crate) fn parse_para_props(
                 "rPr" => props.mark = Some(parse_run_props(reader, &element)?),
                 "sectPr" => props.section = Some(parse_section_props(reader, &element)?),
                 "numPr" => props.numbering = parse_numbering_props(reader, &element)?,
+                "tabs" => props.tabs = Some(parse_tabs(reader)?),
                 _ => skip_element(reader, &element)?,
             },
             quick_xml::events::Event::Empty(element) => match local_name(&element).as_str() {
@@ -434,6 +441,7 @@ pub(crate) fn parse_para_props(
                 "spacing" => apply_spacing(&element, &mut props),
                 "ind" => apply_indent(&element, &mut props),
                 "numPr" => props.numbering = parse_numbering_props(reader, &element)?,
+                "tabs" => props.tabs = Some(parse_tabs(reader)?),
                 "outlineLvl" => props.outline_level = attr_u32(&element, "val").map(|l| l as u8),
                 "keepNext" => props.keep_next = attr_on_off(&element),
                 "keepLines" => props.keep_lines = attr_on_off(&element),
@@ -595,6 +603,44 @@ pub(crate) fn parse_table_props(
         }
     }
     Ok(props)
+}
+
+/// 解析 `w:tabs` 里的制表位定义。
+fn parse_tabs(reader: &mut XmlReader<'_>) -> Result<Vec<TabStop>, DocxError> {
+    let mut stops = Vec::new();
+    loop {
+        match reader.read_event().map_err(crate::xml::xml_error)? {
+            quick_xml::events::Event::Start(element) => skip_element(reader, &element)?,
+            quick_xml::events::Event::Empty(element) => {
+                if !is_element(&element, "tab") {
+                    continue;
+                }
+                let Some(position) = attr_i32(&element, "pos") else {
+                    continue;
+                };
+                let align = match attr(&element, "val").as_deref() {
+                    Some("center") => TabAlign::Center,
+                    Some("right") => TabAlign::Right,
+                    Some("decimal") => TabAlign::Decimal,
+                    // clear/ar 不是文本对齐用的制表位。
+                    Some("clear") | Some("bar") => continue,
+                    _ => TabAlign::Left,
+                };
+                let leader = match attr(&element, "leader").as_deref() {
+                    Some("dot") | Some("middleDot") => TabLeader::Dot,
+                    Some("hyphen") => TabLeader::Dash,
+                    Some("underscore") | Some("heavy") => TabLeader::Line,
+                    _ => TabLeader::None,
+                };
+                stops.push(TabStop::new(Twips::new(i64::from(position)), align, leader));
+            }
+            quick_xml::events::Event::End(_) => break,
+            quick_xml::events::Event::Eof => break,
+            _ => {}
+        }
+    }
+    stops.sort_by_key(|stop| stop.position);
+    Ok(stops)
 }
 
 /// 解析 `w:numPr`，返回 `(numId, ilvl)`。

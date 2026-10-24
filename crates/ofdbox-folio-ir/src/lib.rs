@@ -31,7 +31,8 @@ pub use flow::{
     Align, Attachment, Block, Border, BorderStyle, Cell, Column, ColumnWidth, Field, FieldKind,
     FlowDocument, FontFamily, HeaderFooter, HeaderFooterSet, ImageBlock, Inline, InlineImage,
     LineSpacing, Link, LinkTarget, Margins, NamedStyle, PageSetup, ParaStyle, Paragraph, Row,
-    Section, StyleSheet, Table, TableBorders, TextRun, TextStyle, TocBlock, TocStyle,
+    Section, StyleSheet, TabAlign, TabLeader, TabStop, Table, TableBorders, TextRun, TextStyle,
+    TocBlock, TocStyle,
 };
 pub use font::{FontError, FontProvider, FontRequest, extract_truetype_face, subset_truetype};
 pub use geometry::{Matrix, Point, Rect, Rotation, Size};

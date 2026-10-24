@@ -15,12 +15,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
-    Align, Block, Border, Cell, Column, ColumnWidth, Diagnostic, DiagnosticCode, Element,
-    FieldKind, FillRule, FixedDocument, FlowDocument, FontAsset, FontProvider, Group, HeaderFooter,
-    HeaderFooterSet, ImageAsset, ImageBlock, ImageElement, Inline, LineCap, LineJoin, LineSpacing,
-    LinkArea, LinkTarget, Margins, Matrix, OutlineItem, Page, PageInfo, PageSetup, Paint,
-    ParaStyle, Paragraph, Path, PathElement, Point, Rect, Rotation, Row, Scene, Size, StrokePaint,
-    StrokeStyle, Table, TextElement, TextItem, TextLayer, TextLine, TextStyle, Twips,
+    Align, Block, Border, ColumnWidth, Diagnostic, DiagnosticCode, Element, FieldKind, FillRule,
+    FixedDocument, FlowDocument, FontAsset, FontProvider, Group, HeaderFooter, HeaderFooterSet,
+    ImageAsset, ImageBlock, ImageElement, Inline, LineCap, LineJoin, LineSpacing, LinkArea,
+    LinkTarget, Matrix, OutlineItem, Page, PageInfo, PageSetup, Paint, ParaStyle, Paragraph, Path,
+    PathElement, Point, Rect, Rgba, Rotation, Row, Scene, Size, StrokePaint, StrokeStyle, TabAlign,
+    TabLeader, TabStop, Table, TextElement, TextItem, TextLayer, TextLine, TextRun, TextStyle,
+    Twips,
 };
 
 use font::{FontKey, FontStore};
@@ -28,6 +29,9 @@ use linebreak::{LineSpan, Piece};
 
 /// 布局引擎版本，写进 `EngineInfo`。
 pub const LAYOUT_VERSION: &str = "layout-0.1";
+
+/// 没有显式制表位时，制表符默认前进的步长（毫米）。
+const DEFAULT_TAB_STEP: f64 = 12.5;
 
 /// 布局错误。
 #[derive(Debug, thiserror::Error)]
@@ -793,10 +797,11 @@ impl<'a> Engine<'a> {
 
     // ---- 自动目录 ----
 
-    /// 排自动目录：标题 + 每条「左标题 / 右页码」的两列表格。
+    /// 排自动目录：标题 + 每条「条目 ⇥ 页码」的段落，页码落在右制表位上。
     ///
     /// 页码来自上一遍排版的结果；目录自身占位会让页码整体后移，`layout_with`
-    /// 会反复代入直到稳定。标题文字沿用 `TocStyle` 的三种样式。
+    /// 会反复代入直到稳定。条目文字与页码之间用制表符分开，右制表位放在版心
+    /// 右边界，`TocStyle::dot_leader` 打开时画点线前导符。
     fn place_toc(&mut self, toc: &ofdbox_folio_ir::TocBlock) {
         if self.in_frame {
             self.warn("目录放在表格单元格里，已跳过");
@@ -823,8 +828,13 @@ impl<'a> Engine<'a> {
             self.place_paragraph(&heading, self.total_pages);
         }
 
-        let page_width = (toc.style.page_number_style.size.to_mm() * 3.0).max(12.0);
-        let mut rows = Vec::with_capacity(entries.len());
+        let content = self.content_width();
+        let page_number_style = toc.style.page_number_style.clone();
+        let leader = if toc.style.dot_leader {
+            TabLeader::Dot
+        } else {
+            TabLeader::None
+        };
         for (level, title, page) in entries {
             let indent = toc
                 .style
@@ -832,32 +842,29 @@ impl<'a> Engine<'a> {
                 .to_mm()
                 .max(0.0)
                 .mul_add(f64::from(level.saturating_sub(1)), 0.0);
-            let mut left = Paragraph::plain(title, toc.style.entry_style.clone());
-            left.style.left_indent = Twips::from_mm(indent);
-            left.style.align = Align::Left;
+            let mut paragraph = Paragraph::new(ParaStyle {
+                left_indent: Twips::from_mm(indent),
+                tabs: vec![TabStop::new(
+                    Twips::from_mm(content),
+                    TabAlign::Right,
+                    leader,
+                )],
+                ..ParaStyle::default()
+            });
+            paragraph.runs.push(Inline::Text(TextRun::new(
+                title,
+                toc.style.entry_style.clone(),
+            )));
+            paragraph
+                .runs
+                .push(Inline::Text(TextRun::new("\t", page_number_style.clone())));
             // 大纲目标是 0 基页序，目录里写 1 基页码。
-            let mut right =
-                Paragraph::plain((page + 1).to_string(), toc.style.page_number_style.clone());
-            right.style.align = Align::Right;
-            rows.push(Row::new(vec![
-                Cell::new(vec![Block::Paragraph(left)]),
-                Cell::new(vec![Block::Paragraph(right)]),
-            ]));
+            paragraph.runs.push(Inline::Text(TextRun::new(
+                (page + 1).to_string(),
+                page_number_style.clone(),
+            )));
+            self.place_paragraph(&paragraph, self.total_pages);
         }
-
-        let mut table = Table::new(vec![
-            Column {
-                width: ColumnWidth::Weight(1),
-            },
-            Column {
-                width: ColumnWidth::Twips(Twips::from_mm(page_width)),
-            },
-        ]);
-        table.rows = rows;
-        table.header_rows = 0;
-        table.borders = ofdbox_folio_ir::TableBorders::default();
-        table.cell_padding = Margins::default();
-        self.place_table(&table);
     }
 
     /// 在临时页里量一组块的高度（不产出任何元素）。
@@ -1263,6 +1270,11 @@ impl<'a> Engine<'a> {
                 pieces.push(Piece::text('\n', 0.0, index));
                 continue;
             }
+            if ch == '\t' {
+                // 制表符的宽度要等到知道当前 x 之后才能定，测量阶段记 0。
+                pieces.push(Piece::text('\t', 0.0, index));
+                continue;
+            }
             let (width, missing) = self
                 .fonts
                 .get(&key)
@@ -1365,6 +1377,11 @@ impl<'a> Engine<'a> {
         for (offset, index) in (line.start..line.end).enumerate() {
             positions.push(x);
             let piece = pieces[index];
+            if piece.is_tab() {
+                // 制表符把 x 推到下一个制表位，并按需画前导符。
+                x = self.place_tab(style, pieces, line, index, x, baseline);
+                continue;
+            }
             let advance = piece.width + extra[offset];
             if let Some(object) = piece.object {
                 if let Some(image) = images.get(object) {
@@ -1416,6 +1433,124 @@ impl<'a> Engine<'a> {
                 target: target.clone(),
             });
         }
+    }
+
+    /// 制表符落版：把 x 推到下一个制表位，并按需画前导符。
+    ///
+    /// 制表位之后的文字宽度在测量阶段是已知的（除制表符本身），所以右/居中/
+    /// 小数点对齐都能在这里一次算出来：先量「制表符到行尾」的宽度，再据此
+    /// 决定起点，最后用前导符填满剩下的空隙。
+    fn place_tab(
+        &mut self,
+        style: &ParaStyle,
+        pieces: &[Piece],
+        line: &LineSpan,
+        index: usize,
+        x: f64,
+        baseline: f64,
+    ) -> f64 {
+        // 只对齐到本行末尾，行尾空白不参与。
+        let mut remaining = 0.0;
+        let mut decimal_width = None;
+        for piece in &pieces[index + 1..line.end] {
+            let piece = *piece;
+            if piece.is_tab() {
+                break;
+            }
+            if decimal_width.is_none() && piece.ch == '.' {
+                // 小数点左侧的宽度：把小数点本身挪到制表位上。
+                decimal_width = Some(remaining);
+            }
+            remaining += piece.width;
+        }
+
+        let left = self.frame.left;
+        let default_step = DEFAULT_TAB_STEP;
+        let stop = style
+            .tabs
+            .iter()
+            .filter(|stop| stop.position.to_mm() > x - left + 0.01)
+            .min_by(|a, b| a.position.cmp(&b.position));
+        let (target, align, leader) = match stop {
+            Some(stop) => (
+                left + stop.position.to_mm().max(0.0),
+                stop.align,
+                stop.leader,
+            ),
+            None => {
+                // 没有显式制表位：按默认步进推到下一个格点。
+                let offset = x - left;
+                let next = ((offset / default_step).floor() + 1.0) * default_step;
+                (left + next, TabAlign::Left, TabLeader::None)
+            }
+        };
+
+        let start = match align {
+            TabAlign::Left => target,
+            TabAlign::Right => target - remaining,
+            TabAlign::Center => target - remaining / 2.0,
+            TabAlign::Decimal => match decimal_width {
+                Some(width) => target - width,
+                None => target - remaining,
+            },
+            _ => target,
+        }
+        .max(x);
+
+        if start > x + 0.4 {
+            let color = self
+                .styles
+                .get(pieces[index].style)
+                .map(|style| style.color)
+                .unwrap_or(Rgba::BLACK);
+            self.draw_leader(leader, x, start, baseline, color);
+        }
+        start
+    }
+
+    /// 画制表位前导符。
+    fn draw_leader(&mut self, leader: TabLeader, from: f64, to: f64, baseline: f64, color: Rgba) {
+        let style = match leader {
+            TabLeader::None => return,
+            TabLeader::Dot => StrokeStyle {
+                width: 0.35,
+                cap: LineCap::Round,
+                join: LineJoin::Round,
+                dash: vec![0.01, 1.1],
+                dash_offset: 0.0,
+                ..StrokeStyle::default()
+            },
+            TabLeader::Dash => StrokeStyle {
+                width: 0.25,
+                cap: LineCap::Butt,
+                join: LineJoin::Miter,
+                dash: vec![1.5, 1.0],
+                dash_offset: 0.0,
+                ..StrokeStyle::default()
+            },
+            TabLeader::Line => StrokeStyle {
+                width: 0.25,
+                cap: LineCap::Butt,
+                join: LineJoin::Miter,
+                dash: Vec::new(),
+                dash_offset: 0.0,
+                ..StrokeStyle::default()
+            },
+            _ => return,
+        };
+        let mut path = Path::new();
+        path.move_to(Point::new(from, baseline));
+        path.line_to(Point::new(to, baseline));
+        self.page.scene.children.push(Element::Path(PathElement {
+            path: Arc::new(path),
+            transform: Matrix::IDENTITY,
+            fill: None,
+            stroke: Some(StrokePaint {
+                paint: Paint::Color(color),
+                style,
+            }),
+            rule: FillRule::NonZero,
+        }));
     }
 
     fn place_text_piece(&mut self, piece: Piece, x: f64, baseline: f64) {
@@ -1643,6 +1778,9 @@ fn apply_paragraph_direct(base: &mut ParaStyle, over: &ParaStyle) {
     }
     if over.keep_lines_together != direct.keep_lines_together {
         base.keep_lines_together = over.keep_lines_together;
+    }
+    if over.tabs != direct.tabs {
+        base.tabs = over.tabs.clone();
     }
 }
 
