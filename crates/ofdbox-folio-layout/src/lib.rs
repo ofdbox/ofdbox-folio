@@ -552,11 +552,16 @@ impl<'a> Engine<'a> {
 
         let line_count = lines.len();
         for (index, line) in lines.iter().enumerate() {
-            let height = self.line_height(&style, &pieces, line);
+            let size = self.max_size(&pieces, line);
+            // 行内图片底部贴基线，行盒必须按图片高度加高，否则图片会盖住上一行。
+            let image_height = line_image_height(&pieces, line, &images);
+            let height = self
+                .line_height(&style, &pieces, line)
+                .max(image_height + 0.2 * size);
             if self.cursor + height > self.bottom() + 1e-6 && !self.page.is_empty() {
                 self.new_page();
             }
-            let baseline = self.cursor + 0.8 * self.max_size(&pieces, line);
+            let baseline = self.cursor + (0.8 * size).max(image_height);
             let first = index == 0;
             self.emit_line(
                 &style,
@@ -1103,6 +1108,15 @@ fn apply_text_direct(base: &mut TextStyle, over: &TextStyle) {
     if over.subscript != direct.subscript {
         base.subscript = over.subscript;
     }
+}
+
+/// 一行里最高的行内图片高度。
+fn line_image_height(pieces: &[Piece], line: &LineSpan, images: &[MeasuredImage]) -> f64 {
+    pieces[line.start..line.end]
+        .iter()
+        .filter_map(|piece| piece.object.and_then(|index| images.get(index)))
+        .map(|image| image.height)
+        .fold(0.0, f64::max)
 }
 
 /// 段落纯文本。

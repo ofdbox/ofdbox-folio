@@ -11,7 +11,8 @@ use std::sync::Arc;
 use ofdbox_folio_ir::{
     Destination, Element, FillRule, FixedDocument, FontAsset, Glyph, GradientExtend, Group,
     ImageAsset, ImageElement, ImageFormat, LineCap, LineJoin, Matrix, OutlineItem, Page, Paint,
-    Path, PathElement, PathSegment, Point, Rect, Rgba, StrokeStyle, TextElement, subset_truetype,
+    Path, PathElement, PathSegment, Point, Rect, Rgba, StrokeStyle, TextElement,
+    extract_truetype_face, subset_truetype,
 };
 
 use crate::OfdError;
@@ -171,7 +172,17 @@ pub fn write_fixed(
                     .get(&font.id)
                     .and_then(|used| subset_truetype(&font.bytes, font.face_index, used))
             };
-            let bytes = subset.as_deref().unwrap_or(font.bytes.as_ref());
+            // 集合字体即使不能子集，也要拆出单个 face 再内嵌：OFD 的 FontFile
+            // 只接受单份字体，整包塞 .ttc 会让阅读器读不出字形。
+            let face = if subset.is_none() {
+                extract_truetype_face(&font.bytes, font.face_index)
+            } else {
+                None
+            };
+            let bytes = subset
+                .as_deref()
+                .or(face.as_deref())
+                .unwrap_or(font.bytes.as_ref());
             write_entry(
                 &mut zip,
                 &format!("Doc_0/Res/{}", font.file),

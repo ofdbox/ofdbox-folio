@@ -2,7 +2,7 @@
 
 OFDBox Folio 是一个以“页”为中心的多格式文档引擎：读取 OFD、PDF、DOCX，统一到 Flow IR / Fixed IR，完成排版、渲染与写出。
 
-**当前状态：IR 契约已冻结，OFD → 图片、Fixed IR → OFD/PDF 写出、PDF → Fixed IR、Reader 页面缓存、跨页选择与搜索均已打通。** 217 份 OFD 语料中 211 份可读（6 份源文件损坏）。对可读语料做 OFD → Fixed IR → OFD 往返后渲染首页，189 份与源文件像素完全一致，211 份中 203 份差异像素低于 0.2%，平均 MAE 0.011。PDF 读写已接入：211 份由旧管线导出的 PDF 中 200 份可与 OFD 源对应，首页比对平均差异像素 1.5%，主要来自导出时文字轮廓化与像素取整；PDF 自身往返（读入 → 写出 → 再渲染）的代表样本差异低于 0.6%。wgpu 后端（实色路径、描边、线性渐变、裁剪、文字轮廓）已接入。布局与 DOCX 适配尚未接入。
+**当前状态：IR 契约已冻结，OFD → 图片、Fixed IR → OFD/PDF 写出、PDF → Fixed IR、Reader 页面缓存、跨页选择与搜索、DOCX → Flow 读入与单栏排版均已打通。** 217 份 OFD 语料中 211 份可读（6 份源文件损坏）。对可读语料做 OFD → Fixed IR → OFD 往返后渲染首页，189 份与源文件像素完全一致，211 份中 203 份差异像素低于 0.2%，平均 MAE 0.011。PDF 读写已接入：211 份由旧管线导出的 PDF 中 200 份可与 OFD 源对应，首页比对平均差异像素 1.5%，主要来自导出时文字轮廓化与像素取整；PDF 自身往返（读入 → 写出 → 再渲染）的代表样本差异低于 0.6%。wgpu 后端（实色路径、描边、线性渐变、裁剪、文字轮廓）已接入。DOCX 读入与单栏布局已接入；表格排版、页眉页脚落版与 DOCX 写出尚未接入。
 
 ## 目标
 
@@ -41,7 +41,7 @@ ofdbox-folio                门面：格式探测、Reader、创建 API、便捷
 | `ofdbox-folio-render` | `CpuRenderer`、渲染目标、瓦片、字形与图片缓存 | 只消费 Fixed IR，不感知源格式 |
 | `ofdbox-folio-ofd` | `OfdDocument`（`DocumentSource`）、`write_fixed()` | 对外不暴露 `ofdbox_core` 类型 |
 | `ofdbox-folio-pdf` | `PdfDocument`（`DocumentSource`）、`write_fixed()` | 对外不暴露 `lopdf` 类型 |
-| `ofdbox-folio-docx` | `read_docx()` → Flow、`write_docx()` ← Flow | 不接触 Fixed IR |
+| `ofdbox-folio-docx` | `read_flow()`/`read_flow_path()` → Flow、`probe()`；`write_docx()` 后补 | 不接触 Fixed IR |
 | `ofdbox-folio` | `open_bytes()`/`open_path()`、`Document`、创建 API、便捷转换 | 统一错误、缓存与格式分发 |
 
 ## 工作原理
@@ -91,6 +91,17 @@ OFD / PDF 读取 ──────┘
 - **字体**：`FontProvider` 按「字族 + 粗斜体」取字节，度量取自 `hmtx`；缺字记诊断并按 `.notdef` 宽度排版。
 - **大纲**：`heading_level` 在排版时登记，按层级生成 `OutlineItem` 树，目标页与 y 坐标取自标题首行。
 - **样式**：命名样式沿 `based_on` 链继承，直接格式覆盖非默认字段；表格与自动目录留给 A2，遇到时跳过并记诊断。
+
+### DOCX 读取
+
+`ofdbox_folio::docx::read_flow()` 把 DOCX 读成 Flow IR：
+
+- **样式**：按 OOXML 的层叠（`docDefaults` → 默认样式 → 段落/字符样式链 → 直接格式）逐字段解析后拍平，显式写回的默认值也能生效；`based_on` 与主题字体（`majorFont`/`minorFont`、`Hans` 脚本）都会解析。
+- **块**：段落、表格（列宽、表头行、边框与单元格内边距）、行内图片（按 `wp:extent` 取显示尺寸）、分页符（段前与段中）、大纲级别→标题、目录内容控件→`Block::Toc`。
+- **列表**：`numbering.xml` 的编号/项目符号作为段落首个 run 的标记，配合悬挂缩进；Symbol 字体的私用区码位映射成普通符号。
+- **页眉页脚**：`headerReference`/`footerReference` 读成 `HeaderFooterSet`，`fldSimple` 与复杂域的 `PAGE`/`NUMPAGES` 转成 `Field`。
+- **元数据**：`docProps/core.xml` 与 `app.xml`。
+- **降级**：浮动图片按行内处理、合并单元格按普通单元格、VML/脚注/符号字体等记 `FlowDocument.report` 诊断。
 
 ### 阅读器性能模型
 
@@ -202,7 +213,7 @@ let rgba = target.read_rgba(backend.context())?;
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | R1 阅读器内核 | IR、OFD 读取、CPU 渲染、文本层、页面缓存 | OFD→图片帧一致、选择/搜索可用、页级错误隔离、wasm 构建 |
-| R2 流式文档 | Flow IR、布局（A1 单栏已完成）、DOCX 读写、创建 API | Word → OFD/PDF/位图链路打通，布局确定 |
+| R2 流式文档 | Flow IR、布局（A1 单栏已完成）、DOCX 读入（A3 已完成）、表格排版与 DOCX 写出、创建 API | Word → OFD/PDF/位图链路打通，布局确定 |
 | R3 PDF 阅读硬化 | 字体与 CMap、图案/渐变、透明、加密、坏文件容错 | 真实 PDF 语料可读，降级有报告 |
 | R4 文档能力 | 注释/表单、附件、大纲编辑、GPU 后端 | 阅读器功能闭环 |
 

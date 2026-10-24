@@ -1,4 +1,4 @@
-﻿//! OFD 页面前端：把 OFD 内容转换为 OFDBox Folio 的 Fixed IR。
+//! OFD 页面前端：把 OFD 内容转换为 OFDBox Folio 的 Fixed IR。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -12,7 +12,8 @@ use ofdbox_folio_ir::{
     FontRequest, Glyph, GlyphRun, GradientExtend, GradientStop, Group, ImageAsset, ImageElement,
     ImageFormat, LineCap, LineJoin, LinearGradient, Matrix, Page, PageInfo, Paint, Path,
     PathElement, PathSegment, Point, RadialGradient, Rect, Rgba, Rotation, Scene, Size,
-    StrokePaint, StrokeStyle, TextElement, TextItem, TextLayer, TextLine,
+    StrokePaint, StrokeStyle, TextElement, TextItem, TextLayer, TextLine, detect_image_format,
+    image_dimensions,
 };
 
 use crate::OfdError;
@@ -2821,114 +2822,6 @@ fn image_format_from_path(path: &str) -> ImageFormat {
         .map(|(_, extension)| extension)
         .unwrap_or("");
     image_format_from_media(extension)
-}
-
-fn detect_image_format(data: &[u8]) -> Option<ImageFormat> {
-    if data.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
-        Some(ImageFormat::Png)
-    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        Some(ImageFormat::Jpeg)
-    } else if data.starts_with(b"BM") {
-        Some(ImageFormat::Bmp)
-    } else if data.starts_with(&[0x97, b'J', b'B', b'2']) || data.first() == Some(&0x97) {
-        Some(ImageFormat::Jbig2)
-    } else if data.starts_with(&[0x49, 0x49, 0x2A, 0x00])
-        || data.starts_with(&[0x4D, 0x4D, 0x00, 0x2A])
-    {
-        Some(ImageFormat::Tiff)
-    } else {
-        None
-    }
-}
-
-fn image_dimensions(data: &[u8]) -> Option<(u32, u32)> {
-    if data.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
-        if data.len() < 24 {
-            return None;
-        }
-        let width = u32::from_be_bytes(data.get(16..20)?.try_into().ok()?);
-        let height = u32::from_be_bytes(data.get(20..24)?.try_into().ok()?);
-        return Some((width, height));
-    }
-    if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        let mut index = 2usize;
-        while index + 9 <= data.len() {
-            if data[index] != 0xFF {
-                index += 1;
-                continue;
-            }
-            let marker = data[index + 1];
-            if marker == 0xD8 || marker == 0xD9 || (0xD0..=0xD7).contains(&marker) {
-                index += 2;
-                continue;
-            }
-            let length = usize::from(u16::from_be_bytes([data[index + 2], data[index + 3]]));
-            if length < 2 {
-                return None;
-            }
-            if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
-                let height = u32::from(u16::from_be_bytes([data[index + 5], data[index + 6]]));
-                let width = u32::from(u16::from_be_bytes([data[index + 7], data[index + 8]]));
-                return Some((width, height));
-            }
-            index += 2 + length;
-        }
-        return None;
-    }
-    if data.starts_with(b"BM") && data.len() >= 26 {
-        let width = i32::from_le_bytes(data.get(18..22)?.try_into().ok()?);
-        let height = i32::from_le_bytes(data.get(22..26)?.try_into().ok()?);
-        return Some((width.unsigned_abs(), height.unsigned_abs()));
-    }
-    if data.starts_with(&[0x49, 0x49, 0x2A, 0x00]) {
-        return tiff_dimensions(data, true);
-    }
-    if data.starts_with(&[0x4D, 0x4D, 0x00, 0x2A]) {
-        return tiff_dimensions(data, false);
-    }
-    None
-}
-
-fn tiff_dimensions(data: &[u8], little_endian: bool) -> Option<(u32, u32)> {
-    let read_u16 = |offset: usize| -> Option<u16> {
-        let bytes: [u8; 2] = data.get(offset..offset + 2)?.try_into().ok()?;
-        Some(if little_endian {
-            u16::from_le_bytes(bytes)
-        } else {
-            u16::from_be_bytes(bytes)
-        })
-    };
-    let read_u32 = |offset: usize| -> Option<u32> {
-        let bytes: [u8; 4] = data.get(offset..offset + 4)?.try_into().ok()?;
-        Some(if little_endian {
-            u32::from_le_bytes(bytes)
-        } else {
-            u32::from_be_bytes(bytes)
-        })
-    };
-    let ifd = read_u32(4)? as usize;
-    let count = read_u16(ifd)? as usize;
-    let mut width = None;
-    let mut height = None;
-    for index in 0..count {
-        let entry = ifd + 2 + index * 12;
-        let tag = read_u16(entry)?;
-        let field_type = read_u16(entry + 2)?;
-        let value = match field_type {
-            3 => u32::from(read_u16(entry + 8)?),
-            4 => read_u32(entry + 8)?,
-            _ => continue,
-        };
-        match tag {
-            256 => width = Some(value),
-            257 => height = Some(value),
-            _ => {}
-        }
-        if width.is_some() && height.is_some() {
-            return Some((width?, height?));
-        }
-    }
-    None
 }
 
 #[cfg(test)]

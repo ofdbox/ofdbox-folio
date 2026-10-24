@@ -4,88 +4,20 @@
 //! cargo run -p ofdbox-folio --example flow_to_ofd -- out.ofd [page.png]
 //! ```
 
-use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
-use std::path::PathBuf;
-use std::sync::Arc;
 
 use ofdbox_folio::ir::{
-    Align, Block, Field, FieldKind, FlowDocument, FontError, FontProvider, FontRequest, Inline,
-    LineSpacing, Metadata, ParaStyle, Paragraph, TextRun, TextStyle, Twips,
+    Align, Block, Field, FieldKind, FlowDocument, Inline, LineSpacing, Metadata, ParaStyle,
+    Paragraph, TextRun, TextStyle, Twips,
 };
 use ofdbox_folio::layout::{LayoutOptions, layout_with};
 use ofdbox_folio::render::{CpuRenderer, RasterTarget, RenderOptions};
 use ofdbox_folio::{Document, OpenOptions};
 
-/// 按字体名从系统字体目录取字体。
-struct SystemFonts {
-    cache: HashMap<String, Option<Arc<[u8]>>>,
-}
+mod common;
 
-impl SystemFonts {
-    fn new() -> Self {
-        Self {
-            cache: HashMap::new(),
-        }
-    }
-
-    fn roots() -> Vec<PathBuf> {
-        vec![
-            PathBuf::from("C:/Windows/Fonts"),
-            PathBuf::from("/usr/share/fonts"),
-            PathBuf::from("/System/Library/Fonts"),
-        ]
-    }
-
-    fn load_named(&mut self, family: &str) -> Option<Arc<[u8]>> {
-        if let Some(cached) = self.cache.get(family) {
-            return cached.clone();
-        }
-        let name = family.to_ascii_lowercase();
-        let mut candidates: Vec<&str> = Vec::new();
-        if name.contains("song") || name.contains("宋") || name.contains("serif") {
-            candidates.extend(["simsun.ttc", "times.ttf", "DejaVuSerif.ttf"]);
-        } else {
-            // 示例正文是中文，优先用带 CJK 字形的字体。
-            candidates.extend([
-                "simhei.ttf",
-                "simsun.ttc",
-                "msyh.ttc",
-                "arial.ttf",
-                "DejaVuSans.ttf",
-            ]);
-        }
-        let mut found = None;
-        for root in Self::roots() {
-            for candidate in &candidates {
-                let path = root.join(candidate);
-                if path.is_file() {
-                    found = fs::read(&path).ok().map(Arc::<[u8]>::from);
-                    if found.is_some() {
-                        break;
-                    }
-                }
-            }
-            if found.is_some() {
-                break;
-            }
-        }
-        self.cache.insert(family.to_owned(), found.clone());
-        found
-    }
-}
-
-impl FontProvider for SystemFonts {
-    fn load(&mut self, request: &FontRequest<'_>) -> Result<Option<Arc<[u8]>>, FontError> {
-        let family = request
-            .family_name
-            .or(request.font_name)
-            .unwrap_or("Arial")
-            .to_owned();
-        Ok(self.load_named(&family))
-    }
-}
+use common::SystemFonts;
 
 fn heading(text: &str, points: f64) -> Paragraph {
     let mut paragraph = Paragraph::plain(

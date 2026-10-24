@@ -47,16 +47,70 @@ impl FontError {
     }
 }
 
+/// 把 TrueType 集合（`.ttc`）里的某个 face 拆成独立字体。
+///
+/// Windows 的宋体、微软雅黑都是集合：OFD 的 `FontFile` 只能放单份字体，按
+/// `face_index` 提取后才能内嵌与子集化。普通 TTF 或 `face_index` 越界时返回
+/// `None`，调用方继续用原字节。
+pub fn extract_truetype_face(data: &[u8], face_index: u32) -> Option<Vec<u8>> {
+    if !data.starts_with(b"ttcf") || data.len() < 12 {
+        return None;
+    }
+    let count = usize::try_from(be_u32(data, 8)?).ok()?;
+    let index = usize::try_from(face_index).ok()?;
+    if index >= count {
+        return None;
+    }
+    let face_offset = usize::try_from(be_u32(data, 12 + index * 4)?).ok()?;
+    let num_tables = usize::from(be_u16(data, face_offset + 4)?);
+    if num_tables == 0 || face_offset + 12 + num_tables * 16 > data.len() {
+        return None;
+    }
+    let mut tables = Vec::with_capacity(num_tables);
+    for table in 0..num_tables {
+        let record = face_offset + 12 + table * 16;
+        let tag: [u8; 4] = data.get(record..record + 4)?.try_into().ok()?;
+        let offset = usize::try_from(be_u32(data, record + 8)?).ok()?;
+        let length = usize::try_from(be_u32(data, record + 12)?).ok()?;
+        let body = data.get(offset..offset.checked_add(length)?)?;
+        tables.push((tag, body));
+    }
+    tables.sort_by_key(|table| table.0);
+
+    let mut output = data.get(face_offset..face_offset + 12)?.to_vec();
+    let table_count = u16::try_from(tables.len()).ok()?;
+    output[4..6].copy_from_slice(&table_count.to_be_bytes());
+    let table_offset = 12 + tables.len() * 16;
+    let mut body = Vec::new();
+    for (tag, table) in &tables {
+        while body.len() % 4 != 0 {
+            body.push(0);
+        }
+        let offset = table_offset + body.len();
+        output.extend_from_slice(tag);
+        output.extend_from_slice(&checksum(table).to_be_bytes());
+        output.extend_from_slice(&u32::try_from(offset).ok()?.to_be_bytes());
+        output.extend_from_slice(&u32::try_from(table.len()).ok()?.to_be_bytes());
+        body.extend_from_slice(table);
+    }
+    output.extend_from_slice(&body);
+    Some(output)
+}
+
 /// 按用到的字形裁剪 TrueType 字体。
 ///
 /// 保留字形 ID 与 `cmap`/`hmtx` 等表，只把未引用的轮廓清空，因此引用原始 GID
 /// 的文本（PDF 的 Identity-H、OFD 的 `CGTransform`）仍然有效；复合字形引用的
 /// 子字形会一并保留。
 ///
-/// 不是 glyf 轮廓的 TrueType（真身 CFF/OTF、TTC 集合、`face_index != 0`）或结构
-/// 不完整时返回 `None`，调用方应回退到原始字节。
+/// 集合字体先按 `face_index` 拆出单个 face；不是 glyf 轮廓的 TrueType（真身
+/// CFF/OTF）或结构不完整时返回 `None`，调用方应回退到原始字节。
 pub fn subset_truetype(data: &[u8], face_index: u32, used: &HashSet<u16>) -> Option<Vec<u8>> {
-    if face_index != 0 || data.len() < 12 || data.starts_with(b"ttcf") {
+    if data.starts_with(b"ttcf") {
+        let face = extract_truetype_face(data, face_index)?;
+        return subset_truetype(&face, 0, used);
+    }
+    if face_index != 0 || data.len() < 12 {
         return None;
     }
     let num_tables = usize::from(be_u16(data, 4)?);
@@ -112,19 +166,24 @@ pub fn subset_truetype(data: &[u8], face_index: u32, used: &HashSet<u16>) -> Opt
     let mut queue = used.iter().copied().collect::<Vec<_>>();
     while let Some(glyph) = queue.pop() {
         let index = usize::from(glyph);
-        let start = offsets[index];
-        let end = offsets[index + 1];
+        let (Some(start), Some(end)) = (offsets.get(index), offsets.get(index + 1)) else {
+            continue;
+        };
+        let (start, end) = (*start, *end);
         if end <= start {
             continue;
         }
-        let body = &glyf[start..end];
-        if be_i16(body, 0)? >= 0 {
+        // 单个字形的结构异常不该让整份字体放弃子集化，跳过即可。
+        let Some(body) = glyf.get(start..end) else {
+            continue;
+        };
+        if be_i16(body, 0).is_none_or(|version| version >= 0) {
             continue;
         }
         let mut position = 10;
-        loop {
-            let flags = be_u16(body, position)?;
-            let component = be_u16(body, position + 2)?;
+        while let (Some(flags), Some(component)) =
+            (be_u16(body, position), be_u16(body, position + 2))
+        {
             position += 4;
             position += if flags & 0x0001 != 0 { 4 } else { 2 };
             if flags & 0x0008 != 0 {
@@ -147,8 +206,11 @@ pub fn subset_truetype(data: &[u8], face_index: u32, used: &HashSet<u16>) -> Opt
     let mut new_offsets = Vec::with_capacity(num_glyphs + 1);
     for index in 0..num_glyphs {
         new_offsets.push(u32::try_from(new_glyf.len()).ok()?);
-        if used.contains(&(index as u16)) {
-            new_glyf.extend_from_slice(&glyf[offsets[index]..offsets[index + 1]]);
+        if used.contains(&(index as u16))
+            && let (Some(start), Some(end)) = (offsets.get(index), offsets.get(index + 1))
+            && let Some(body) = glyf.get(*start..*end)
+        {
+            new_glyf.extend_from_slice(body);
             while new_glyf.len() % 4 != 0 {
                 new_glyf.push(0);
             }
@@ -172,9 +234,17 @@ pub fn subset_truetype(data: &[u8], face_index: u32, used: &HashSet<u16>) -> Opt
             b"glyf" => *body = new_glyf.clone(),
             b"loca" => *body = new_loca.clone(),
             b"head" => *body = new_head.clone(),
+            // 字形名对渲染无用，选集里改成 version 3 可以省下几百 KB 到几 MB。
+            b"post" if body.len() >= 32 => {
+                let mut post = body[..32].to_vec();
+                post[0..4].copy_from_slice(&0x0003_0000_u32.to_be_bytes());
+                *body = post;
+            }
             _ => {}
         }
     }
+    // 位图、彩色字形与数字签名等表对矢量渲染无用，直接丢掉。
+    output_tables.retain(|(tag, _)| !is_dropped_table(tag));
     output_tables.sort_by_key(|table| table.0);
 
     let mut output = data[..12].to_vec();
@@ -195,6 +265,30 @@ pub fn subset_truetype(data: &[u8], face_index: u32, used: &HashSet<u16>) -> Opt
     }
     output.extend_from_slice(&body);
     Some(output)
+}
+
+/// 子集化时丢弃的表：位图字形、彩色字形、数字签名与调优数据。
+///
+/// 保留 `cmap`/`hmtx`/`name` 等文本必需的表；丢掉 `EBDT`/`EBLC` 这类内嵌点阵
+/// （SimSun 有几 MB）后，子集体积才真正跟着用字量走。
+fn is_dropped_table(tag: &[u8; 4]) -> bool {
+    matches!(
+        tag,
+        b"EBDT"
+            | b"EBLC"
+            | b"EBSC"
+            | b"SVG "
+            | b"sbix"
+            | b"COLR"
+            | b"CPAL"
+            | b"CBDT"
+            | b"CBLC"
+            | b"DSIG"
+            | b"hdmx"
+            | b"LTSH"
+            | b"VDMX"
+            | b"PCLT"
+    )
 }
 
 fn be_u16(data: &[u8], offset: usize) -> Option<u16> {
@@ -227,7 +321,7 @@ fn checksum(data: &[u8]) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::subset_truetype;
+    use super::{extract_truetype_face, subset_truetype};
     use std::collections::HashSet;
 
     /// 造一份只含 head/maxp/loca/glyf 的最小 TrueType。
@@ -294,5 +388,37 @@ mod tests {
         let font = tiny_font(4);
         // 集合字体的第 2 个 face 无法安全裁剪。
         assert!(subset_truetype(&font, 1, &used).is_none());
+    }
+
+    #[test]
+    fn subsets_real_system_fonts() {
+        let path = if cfg!(windows) {
+            "C:/Windows/Fonts/simsun.ttc"
+        } else {
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        };
+        let Ok(data) = std::fs::read(path) else {
+            return;
+        };
+        let used = HashSet::from([10_u16, 20, 30]);
+        if data.starts_with(b"ttcf") {
+            let face = extract_truetype_face(&data, 0).expect("拆 face");
+            assert!(
+                face.len() < data.len(),
+                "face {} >= ttc {}",
+                face.len(),
+                data.len()
+            );
+            let subset = subset_truetype(&data, 0, &used).expect("集合字体子集化");
+            assert!(
+                subset.len() < face.len(),
+                "子集 {} >= face {}",
+                subset.len(),
+                face.len()
+            );
+        } else {
+            let subset = subset_truetype(&data, 0, &used).expect("子集化");
+            assert!(subset.len() < data.len());
+        }
     }
 }
