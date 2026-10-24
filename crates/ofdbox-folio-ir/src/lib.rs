@@ -33,7 +33,7 @@ pub use flow::{
     LineSpacing, Link, LinkTarget, Margins, NamedStyle, PageSetup, ParaStyle, Paragraph, Row,
     Section, StyleSheet, Table, TableBorders, TextRun, TextStyle, TocBlock, TocStyle,
 };
-pub use font::{FontError, FontProvider, FontRequest};
+pub use font::{FontError, FontProvider, FontRequest, subset_truetype};
 pub use geometry::{Matrix, Point, Rect, Rotation, Size};
 pub use meta::{
     AttachmentInfo, DateTime, Diagnostic, DiagnosticCode, Location, Metadata, Report, Severity,

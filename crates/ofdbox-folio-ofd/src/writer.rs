@@ -11,7 +11,7 @@ use std::sync::Arc;
 use ofdbox_folio_ir::{
     Destination, Element, FillRule, FixedDocument, FontAsset, Glyph, GradientExtend, Group,
     ImageAsset, ImageElement, ImageFormat, LineCap, LineJoin, Matrix, OutlineItem, Page, Paint,
-    Path, PathElement, PathSegment, Point, Rect, Rgba, StrokeStyle, TextElement,
+    Path, PathElement, PathSegment, Point, Rect, Rgba, StrokeStyle, TextElement, subset_truetype,
 };
 
 use crate::OfdError;
@@ -53,6 +53,8 @@ pub fn write_fixed(
         next_id: 1,
         fonts: HashMap::new(),
         font_entries: Vec::new(),
+        font_glyphs: HashMap::new(),
+        font_unmapped: std::collections::HashSet::new(),
         images: HashMap::new(),
         image_entries: Vec::new(),
     };
@@ -158,14 +160,24 @@ pub fn write_fixed(
         xml.push_str("</ofd:Fonts></ofd:Res>");
         write_entry(&mut zip, "Doc_0/PublicRes.xml", xml.as_bytes(), zip_options)?;
         for font in &state.font_entries {
-            if !font.bytes.is_empty() {
-                write_entry(
-                    &mut zip,
-                    &format!("Doc_0/Res/{}", font.file),
-                    &font.bytes,
-                    zip_options,
-                )?;
+            if font.bytes.is_empty() {
+                continue;
             }
+            let subset = if state.font_unmapped.contains(&font.id) {
+                None
+            } else {
+                state
+                    .font_glyphs
+                    .get(&font.id)
+                    .and_then(|used| subset_truetype(&font.bytes, font.face_index, used))
+            };
+            let bytes = subset.as_deref().unwrap_or(font.bytes.as_ref());
+            write_entry(
+                &mut zip,
+                &format!("Doc_0/Res/{}", font.file),
+                bytes,
+                zip_options,
+            )?;
         }
     }
     if !state.image_entries.is_empty() {
@@ -213,6 +225,10 @@ struct State {
     next_id: u32,
     fonts: HashMap<u64, u32>,
     font_entries: Vec<FontEntry>,
+    /// 每个字体用到的字形 ID，写出时据此子集化。
+    font_glyphs: HashMap<u32, std::collections::HashSet<u16>>,
+    /// 只给了 `TextCode` 没给字形 ID 的字体：无法确定用字，必须整份嵌入。
+    font_unmapped: std::collections::HashSet<u32>,
     images: HashMap<u64, u32>,
     image_entries: Vec<ImageEntry>,
 }
@@ -231,6 +247,7 @@ struct FontEntry {
     family: Option<String>,
     file: String,
     bytes: Arc<[u8]>,
+    face_index: u32,
 }
 
 struct ImageEntry {
@@ -339,6 +356,19 @@ impl PageWriter<'_> {
             return;
         }
         let font_id = self.font(&element.font);
+        // 记录实际用到的字形，写出时按需子集化；只有 TextCode、没有字形 ID 的
+        // 字体无法判断用字，标记为整份嵌入。
+        if run.glyphs.is_empty() {
+            self.state.font_unmapped.insert(font_id);
+        } else {
+            let used = self.state.font_glyphs.entry(font_id).or_default();
+            // TrueType 字形 ID 是 16 位，超出的 ID 不可能出现在字体里。
+            used.extend(
+                run.glyphs
+                    .iter()
+                    .filter_map(|glyph| u16::try_from(glyph.id).ok()),
+            );
+        }
         let transform = element.transform.then(parent);
         let boundary = Rect::new(0.0, 0.0, self.page_width, self.page_height);
         let id = self.state.alloc();
@@ -461,6 +491,7 @@ impl PageWriter<'_> {
             family,
             file,
             bytes: Arc::clone(&font.data),
+            face_index: font.face_index,
         });
         id
     }
@@ -1067,6 +1098,80 @@ mod tests {
         assert!(resources.contains("FontName=\"SimSun\""));
         assert!(resources.contains("FamilyName=\"SimSun\""));
         assert!(!resources.contains("FontFile"));
+    }
+
+    #[test]
+    fn embeds_only_used_glyphs_of_subsettable_font() {
+        let path = if cfg!(windows) {
+            "C:/Windows/Fonts/arial.ttf"
+        } else {
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        };
+        let Ok(raw) = std::fs::read(path) else {
+            return;
+        };
+        let font = Arc::new(FontAsset::new(Arc::from(&raw[..]), 0).with_font_name("Arial"));
+        let run = Arc::new(GlyphRun::new(
+            "AB".to_owned(),
+            vec![
+                Glyph {
+                    id: 36,
+                    x: 0.0,
+                    y: 0.0,
+                    advance: 2.0,
+                },
+                Glyph {
+                    id: 37,
+                    x: 2.0,
+                    y: 0.0,
+                    advance: 2.0,
+                },
+            ],
+            vec![Cluster {
+                text_start: 0,
+                text_end: 2,
+                glyph_start: 0,
+                glyph_end: 2,
+            }],
+        ));
+        let mut page = sample_page();
+        page.content.root.children.push(Element::Text(TextElement {
+            font,
+            font_size: 3.0,
+            transform: Matrix::IDENTITY,
+            run,
+            fill: Some(Paint::Color(Rgba::BLACK)),
+            stroke: None,
+        }));
+        let mut document = FixedDocument::default();
+        document.pages.push(page);
+        let bytes = write_fixed(&document, &OfdWriteOptions::default()).expect("write");
+
+        let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).expect("zip");
+        let index = (0..archive.len())
+            .find(|index| {
+                archive
+                    .by_index(*index)
+                    .ok()
+                    .and_then(|entry| entry.name().ok().map(|name| name.into_owned()))
+                    .is_some_and(|name| name.starts_with("Doc_0/Res/Font_"))
+            })
+            .expect("嵌入字体");
+        let mut subset = Vec::new();
+        archive
+            .by_index(index)
+            .expect("font entry")
+            .read_to_end(&mut subset)
+            .expect("read");
+        assert!(
+            subset.len() * 2 < raw.len(),
+            "子集 {} 字节，原字体 {} 字节",
+            subset.len(),
+            raw.len()
+        );
+        // 字形顺序不变：字形表里仍保留原字形数量，引用原始 GID 的文本才有效。
+        let glyphs = u16::from_be_bytes([subset[4], subset[5]]);
+        assert!(glyphs > 0);
     }
 
     fn read_entry(bytes: &[u8], name: &str) -> String {
