@@ -231,6 +231,44 @@ fn cell(text: &str) -> Cell {
 }
 
 #[test]
+fn weight_columns_get_real_widths() {
+    let mut flow = FlowDocument::new(Metadata::default());
+    let mut table = Table::new(vec![
+        Column {
+            width: ColumnWidth::Weight(1),
+        },
+        Column {
+            width: ColumnWidth::Weight(2),
+        },
+    ]);
+    table.rows = vec![Row::new(vec![cell("甲"), cell("乙")])];
+    flow.push(Block::Table(table));
+
+    let back = read_back(&flow);
+    let table = back.sections[0]
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            Block::Table(table) => Some(table),
+            _ => None,
+        })
+        .expect("表格");
+    let widths: Vec<i64> = table
+        .columns
+        .iter()
+        .map(|column| match column.width {
+            ColumnWidth::Twips(value) => value.0,
+            _ => 0,
+        })
+        .collect();
+    assert!(
+        widths.iter().all(|width| *width > 0),
+        "权重列应换算成实际宽度: {widths:?}"
+    );
+    assert!(widths[1] > widths[0], "2:1 权重: {widths:?}");
+}
+
+#[test]
 fn round_trips_images_positions_and_floating_objects() {
     let mut flow = FlowDocument::new(Metadata::default());
     let id = flow.resources.add_image(ImageAsset::new(

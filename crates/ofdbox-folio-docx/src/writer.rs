@@ -89,6 +89,8 @@ struct Writer<'a> {
     /// 已登记的书签名。
     anchors: HashMap<u64, String>,
     next_anchor: u32,
+    /// 当前分节的正文宽度（twips），表格权重列宽按它换算。
+    content_width: i64,
 }
 
 impl<'a> Writer<'a> {
@@ -106,6 +108,7 @@ impl<'a> Writer<'a> {
             next_area: 1,
             anchors: HashMap::new(),
             next_anchor: 1,
+            content_width: 0,
         }
     }
 
@@ -123,6 +126,10 @@ impl<'a> Writer<'a> {
     fn write_body(&mut self) {
         let sections = &self.document.sections;
         for (index, section) in sections.iter().enumerate() {
+            self.content_width = (section.setup.width.0
+                - section.setup.margins.left.0
+                - section.setup.margins.right.0)
+                .max(1);
             let mut blocks = String::new();
             self.blocks_xml(&section.blocks, &mut blocks);
             self.body.push_str(&blocks);
@@ -526,15 +533,15 @@ impl<'a> Writer<'a> {
     // ---- 表格 ----
 
     fn table_xml(&mut self, table: &ofdbox_folio_ir::Table, out: &mut String) {
-        out.push_str("<w:tbl><w:tblPr><w:tblW w:type=\"auto\" w:w=\"0\"/>");
+        let widths = self.column_widths(table);
+        let total: i64 = widths.iter().sum();
+        out.push_str(&format!(
+            "<w:tbl><w:tblPr><w:tblW w:type=\"dxa\" w:w=\"{total}\"/>"
+        ));
         out.push_str(&table_borders_xml(&table.borders));
         out.push_str(&margins_xml(&table.cell_padding));
         out.push_str("</w:tblPr><w:tblGrid>");
-        for column in &table.columns {
-            let width = match column.width {
-                ColumnWidth::Twips(value) => value.0,
-                _ => 0,
-            };
+        for width in &widths {
             out.push_str(&format!("<w:gridCol w:w=\"{width}\"/>"));
         }
         out.push_str("</w:tblGrid>");
@@ -542,6 +549,44 @@ impl<'a> Writer<'a> {
             self.row_xml(row, out);
         }
         out.push_str("</w:tbl>");
+    }
+
+    /// 表格每列的绝对宽度（twips）：固定列取原值，权重列按正文宽度均分。
+    fn column_widths(&self, table: &ofdbox_folio_ir::Table) -> Vec<i64> {
+        let mut widths = Vec::with_capacity(table.columns.len());
+        let mut weights = 0_u32;
+        let mut fixed = 0_i64;
+        for column in &table.columns {
+            match column.width {
+                ColumnWidth::Twips(value) => {
+                    let value = value.0.max(0);
+                    fixed += value;
+                    widths.push(value);
+                }
+                ColumnWidth::Weight(weight) => {
+                    weights += u32::from(weight.max(1));
+                    widths.push(0);
+                }
+                _ => {
+                    weights += 1;
+                    widths.push(0);
+                }
+            }
+        }
+        if weights > 0 {
+            let remaining = (self.content_width - fixed).max(1);
+            for (index, column) in table.columns.iter().enumerate() {
+                let weight = match column.width {
+                    ColumnWidth::Weight(weight) => u32::from(weight.max(1)),
+                    ColumnWidth::Twips(_) => 0,
+                    _ => 1,
+                };
+                if weight > 0 {
+                    widths[index] = remaining * i64::from(weight) / i64::from(weights);
+                }
+            }
+        }
+        widths
     }
 
     fn row_xml(&mut self, row: &Row, out: &mut String) {

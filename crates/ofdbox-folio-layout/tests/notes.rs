@@ -199,6 +199,47 @@ fn endnote_goes_to_the_end_of_the_document() {
 }
 
 #[test]
+fn note_chars_are_prepared_for_the_font_subset() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    // 脚注正文用了正文里没出现过的字符：没进字表时字形号是 0（.notdef），
+    // 写进 OFD 会被子集丢掉，渲染出来是空白。
+    flow.notes.push(Note::new(
+        NoteKind::Footnote,
+        1,
+        vec![Block::Paragraph(Paragraph::plain("zqxjk", note_style()))],
+    ));
+    flow.push(Block::Paragraph(paragraph_with_note(
+        "body",
+        NoteRef::new(NoteKind::Footnote, 1),
+    )));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    // 文本层是逐字符一项，摊平成 (字符, 字形号) 再逐个检查。
+    let glyphs: Vec<(char, u32)> = fixed.pages[0]
+        .text
+        .items
+        .iter()
+        .flat_map(|item| {
+            item.run
+                .text
+                .chars()
+                .zip(item.run.glyphs.iter().map(|glyph| glyph.id))
+        })
+        .collect();
+    for ch in ['z', 'q', 'x', 'j', 'k'] {
+        let id = glyphs
+            .iter()
+            .find(|(candidate, _)| *candidate == ch)
+            .map(|(_, id)| *id)
+            .unwrap_or_else(|| panic!("脚注字符 {ch} 缺失"));
+        assert_ne!(id, 0, "脚注字符 {ch} 没进字表（.notdef）");
+    }
+}
+
+#[test]
 fn missing_note_body_is_reported() {
     let Some(mut fonts) = fonts() else {
         return;

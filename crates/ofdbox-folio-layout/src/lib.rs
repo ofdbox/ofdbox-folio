@@ -479,6 +479,10 @@ impl<'a> Engine<'a> {
                 }
             }
         }
+        // 脚注尾注的正文在页底/文末才排，也要先准备好字体，否则子集里没有这些字形。
+        for note in &self.document.notes {
+            collect_block_chars(&note.blocks, self, &mut wanted, &mut fallbacks);
+        }
 
         // 全文用到的字符，供「排版时才生成文字」的样式兜底；目录标题与页码是
         // 排版时生成的，也要算进去。
