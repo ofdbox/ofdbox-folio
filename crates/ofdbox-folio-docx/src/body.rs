@@ -4,10 +4,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
-    AnchorId, AssetId, Block, Cell, Column, ColumnWidth, Diagnostic, DiagnosticCode, Field,
-    FieldKind, FlowDocument, HeaderFooter, ImageAsset, Inline, InlineImage, Link, LinkTarget,
-    Metadata, Note, NoteKind, NoteRef, Paragraph, Row, Section, Table, TextRun, TextStyle,
-    TocBlock, Twips, detect_image_format, image_dimensions,
+    Align, AnchorId, AssetId, Block, Cell, Column, ColumnWidth, Diagnostic, DiagnosticCode, Field,
+    FieldKind, FloatingObject, FlowDocument, HeaderFooter, ImageAsset, ImageBlock, Inline,
+    InlineImage, Link, LinkTarget, Metadata, Note, NoteKind, NoteRef, Paragraph, Point, Row,
+    Section, Table, TextRun, TextStyle, TocBlock, Twips, WrapMode, detect_image_format,
+    image_dimensions,
 };
 
 use crate::DocxError;
@@ -27,6 +28,14 @@ use crate::xml::{
 /// 读取 DOCX，产出 Flow IR。
 pub(crate) fn read(bytes: &[u8], options: &DocxReadOptions) -> Result<FlowDocument, DocxError> {
     Builder::new(bytes, options)?.run()
+}
+
+/// 一个 `w:drawing` 的解析结果。
+enum Drawing {
+    /// 行内图片。
+    Inline(InlineImage),
+    /// 浮动图片。
+    Floating(FloatingObject),
 }
 
 /// 读取过程的状态。
@@ -253,6 +262,10 @@ impl<'a> Builder<'a> {
         if resolved.page_break_before.unwrap_or(false) {
             blocks.push(Block::PageBreak);
         }
+        // 段落里的浮动对象脱离正文流，先作为块级元素输出（位置由对象自己带）。
+        for floating in std::mem::take(&mut sink.floatings) {
+            blocks.push(Block::Floating(Box::new(floating)));
+        }
         let mut segments: Vec<&[Inline]> = Vec::new();
         let mut segment_start = 0_usize;
         for boundary in sink.breaks.iter().copied() {
@@ -373,11 +386,11 @@ impl<'a> Builder<'a> {
                     "delText" => {
                         let _ = self.read_text(reader)?;
                     }
-                    "drawing" => {
-                        if let Some(image) = self.parse_drawing(reader)? {
-                            sink.push_inline(Inline::Image(image));
-                        }
-                    }
+                    "drawing" => match self.parse_drawing(reader)? {
+                        Some(Drawing::Inline(image)) => sink.push_inline(Inline::Image(image)),
+                        Some(Drawing::Floating(object)) => sink.floatings.push(object),
+                        None => {}
+                    },
                     "pict" => {
                         self.warn_once(
                             "pict",
@@ -846,22 +859,44 @@ impl<'a> Builder<'a> {
         Ok(Some(Cell::new(blocks)))
     }
 
-    // ---- 图片 ----
+    // ---- 图片与浮动对象 ----
 
-    fn parse_drawing(
-        &mut self,
-        reader: &mut XmlReader<'_>,
-    ) -> Result<Option<InlineImage>, DocxError> {
+    /// 解析 `w:drawing`：行内返回 `wp:inline`，浮动返回 `wp:anchor` 的位置与绕排。
+    fn parse_drawing(&mut self, reader: &mut XmlReader<'_>) -> Result<Option<Drawing>, DocxError> {
         let mut extent: Option<(f64, f64)> = None;
         let mut embed = None;
         let mut alt = None;
-        let mut floating = false;
+        let mut anchor = false;
+        let mut wrap = WrapMode::None;
+        let mut offset_x: Option<f64> = None;
+        let mut offset_y: Option<f64> = None;
+        // 当前在 positionH / positionV 里，用来区分两个方向的 posOffset。
+        let mut horizontal = false;
+        let mut vertical = false;
         let mut depth = 0_usize;
         loop {
             match reader.read_event().map_err(crate::xml::xml_error)? {
                 quick_xml::events::Event::Start(element) => {
-                    if local_name(&element) == "anchor" {
-                        floating = true;
+                    match local_name(&element).as_str() {
+                        "anchor" => anchor = true,
+                        "positionH" => horizontal = true,
+                        "positionV" => vertical = true,
+                        "wrapSquare" => wrap = WrapMode::Square,
+                        "wrapTopAndBottom" => wrap = WrapMode::TopBottom,
+                        "wrapNone" => wrap = WrapMode::None,
+                        "posOffset" => {
+                            // `wp:posOffset` 的值是元素文本，不是属性。
+                            let text = self.read_text(reader)?;
+                            if let Ok(value) = text.trim().parse::<f64>() {
+                                if horizontal {
+                                    offset_x = Some(value);
+                                } else if vertical {
+                                    offset_y = Some(value);
+                                }
+                            }
+                            continue;
+                        }
+                        _ => {}
                     }
                     depth += 1;
                 }
@@ -879,35 +914,63 @@ impl<'a> Builder<'a> {
                             .filter(|value| !value.trim().is_empty())
                             .or_else(|| attr(&element, "name"));
                     }
+                    "posOffset" => {
+                        if let Some(value) = attr_f64(&element, "body") {
+                            if horizontal {
+                                offset_x = Some(value);
+                            } else if vertical {
+                                offset_y = Some(value);
+                            }
+                        }
+                    }
+                    "wrapSquare" => wrap = WrapMode::Square,
+                    "wrapTopAndBottom" => wrap = WrapMode::TopBottom,
+                    "wrapNone" => wrap = WrapMode::None,
                     _ => {}
                 },
-                quick_xml::events::Event::End(_) => {
+                quick_xml::events::Event::End(element) => {
                     if depth == 0 {
                         break;
                     }
                     depth -= 1;
+                    match element.local_name().as_ref() {
+                        "positionH" => horizontal = false,
+                        "positionV" => vertical = false,
+                        _ => {}
+                    }
                 }
                 quick_xml::events::Event::Eof => break,
                 _ => {}
             }
         }
-        if floating {
-            self.warn_once(
-                "anchor",
-                DiagnosticCode::Approximation,
-                "浮动图片按行内图片处理",
-            );
-        }
+
         let Some(rid) = embed else {
             return Ok(None);
         };
         let Some(asset) = self.image_asset(&rid)? else {
             return Ok(None);
         };
-        let mut image = InlineImage::new(asset);
-        image.size = extent.map(|(cx, cy)| (emu_to_twips(cx), emu_to_twips(cy)));
+        let size = extent.map(|(cx, cy)| (emu_to_twips(cx), emu_to_twips(cy)));
+        if !anchor {
+            let mut image = InlineImage::new(asset);
+            image.size = size;
+            image.alt = alt;
+            return Ok(Some(Drawing::Inline(image)));
+        }
+
+        // 浮动图片：位置换算成相对版心左上角的毫米。
+        let mut image = ImageBlock::new(asset);
+        image.size = size;
         image.alt = alt;
-        Ok(Some(image))
+        image.align = Align::Left;
+        let position = Point::new(
+            offset_x.map(|value| value / 36000.0).unwrap_or(0.0),
+            offset_y.map(|value| value / 36000.0).unwrap_or(0.0),
+        );
+        let mut object = FloatingObject::new(position, Block::Image(image));
+        object.width = size.map(|(width, _)| width);
+        object.wrap = wrap;
+        Ok(Some(Drawing::Floating(object)))
     }
 
     fn image_asset(&mut self, rid: &str) -> Result<Option<AssetId>, DocxError> {
@@ -1009,6 +1072,8 @@ struct InlineSink {
     anchor: Option<AnchorId>,
     /// 进行中的复杂域。
     field: Option<FieldState>,
+    /// 段落里出现的浮动对象，按块级元素另排。
+    floatings: Vec<FloatingObject>,
 }
 
 /// 进行中的复杂域。

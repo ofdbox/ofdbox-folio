@@ -641,7 +641,7 @@ fn parse_tabs(reader: &mut XmlReader<'_>) -> Result<Vec<TabStop>, DocxError> {
                     Some("center") => TabAlign::Center,
                     Some("right") => TabAlign::Right,
                     Some("decimal") => TabAlign::Decimal,
-                    // clear/ar 不是文本对齐用的制表位。
+                    // clear/bar 不是文本对齐用的制表位。
                     Some("clear") | Some("bar") => continue,
                     _ => TabAlign::Left,
                 };

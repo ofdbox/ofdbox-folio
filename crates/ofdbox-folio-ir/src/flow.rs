@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use crate::asset::AssetId;
+use crate::geometry::Point;
 use crate::meta::{AttachmentInfo, Metadata};
 use crate::paint::Rgba;
 use crate::units::Twips;
@@ -191,6 +192,46 @@ pub enum Block {
     Toc(TocBlock),
     /// 分页符。
     PageBreak,
+    /// 浮动对象：脱离正文流、按页面坐标定位。
+    Floating(Box<FloatingObject>),
+}
+
+/// 浮动对象的绕排方式。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum WrapMode {
+    /// 不绕排：正文照原样排，对象覆盖在上面。
+    #[default]
+    None,
+    /// 上下型：正文排在对象上方与下方。
+    TopBottom,
+    /// 四周型：与对象重叠的段落让到对象一侧（整段让开，不逐行绕排）。
+    Square,
+}
+
+/// 一个浮动对象。
+#[derive(Clone, Debug, PartialEq)]
+pub struct FloatingObject {
+    /// 左上角位置，单位 twip，相对页面版心左上角。
+    pub position: Point,
+    /// 宽度；None 表示占满版心。
+    pub width: Option<Twips>,
+    /// 内容。
+    pub block: Box<Block>,
+    /// 绕排方式。
+    pub wrap: WrapMode,
+}
+
+impl FloatingObject {
+    /// 创建浮动对象。
+    pub fn new(position: Point, block: Block) -> Self {
+        Self {
+            position,
+            width: None,
+            block: Box::new(block),
+            wrap: WrapMode::None,
+        }
+    }
 }
 
 /// 段落。

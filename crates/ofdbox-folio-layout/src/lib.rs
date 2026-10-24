@@ -39,6 +39,19 @@ const NOTE_INDENT: f64 = 8.0;
 /// 注释之间的间距（毫米）。
 const NOTE_GAP: f64 = 1.6;
 
+/// 四周型绕排的排除区（页面坐标，毫米）。
+#[derive(Clone, Copy, Debug)]
+struct FloatExclusion {
+    /// 上边界。
+    top: f64,
+    /// 下边界。
+    bottom: f64,
+    /// 左边界。
+    left: f64,
+    /// 右边界。
+    right: f64,
+}
+
 /// 一条待排的注释。
 struct PendingNote {
     /// 引用本身。
@@ -348,6 +361,8 @@ struct Engine<'a> {
     bottom_inset: f64,
     /// 待排在文档末尾的尾注。
     endnotes: Vec<PendingNote>,
+    /// 本页的四周型绕排排除区。
+    float_exclusions: Vec<FloatExclusion>,
     headings: Vec<(u8, String, usize, f64)>,
     /// 字体缺字形的字符计数，最后汇总成一条诊断。
     missing_chars: usize,
@@ -396,6 +411,7 @@ impl<'a> Engine<'a> {
             page_notes: Vec::new(),
             bottom_inset: 0.0,
             endnotes: Vec::new(),
+            float_exclusions: Vec::new(),
             headings: Vec::new(),
             missing_chars: 0,
         }
@@ -707,7 +723,7 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// 切到下一栏；没有下一栏时返回 alse。
+    /// 切到下一栏；没有下一栏时返回 false。
     fn next_column(&mut self) -> bool {
         let count = usize::from(self.column_count.max(1));
         if self.column_index + 1 >= count {
@@ -827,6 +843,7 @@ impl<'a> Engine<'a> {
             Block::PageBreak => self.new_page(),
             Block::Table(table) => self.place_table(table),
             Block::Toc(toc) => self.place_toc(toc),
+            Block::Floating(floating) => self.place_floating(floating),
             _ => self.warn("未知块类型，已跳过"),
         }
     }
@@ -923,6 +940,84 @@ impl<'a> Engine<'a> {
         self.cursor = saved.1;
         self.in_frame = saved.2;
         top
+    }
+
+    // ---- 浮动对象 ----
+
+    /// 排一个浮动对象：按页面坐标绝对定位，再按绕排方式影响正文游标。
+    ///
+    /// 不参与正文流，不产生分页；所在页由「当前游标所在的页」决定。
+    fn place_floating(&mut self, floating: &ofdbox_folio_ir::FloatingObject) {
+        if self.in_frame {
+            self.warn("浮动对象嵌在表格/页眉里，已按普通内容处理");
+            self.place_block(&floating.block);
+            return;
+        }
+        let page = self.page_frame();
+        let width = floating
+            .width
+            .map(|width| width.to_mm())
+            .unwrap_or(page.width)
+            .clamp(1.0, page.width);
+        let x = (page.left + floating.position.x).clamp(page.left, page.left + page.width);
+        let y = (page.top + floating.position.y).max(page.top);
+        let saved = (self.frame, self.cursor, self.in_frame);
+        self.in_frame = true;
+        self.frame = Frame {
+            left: x,
+            width,
+            top: y,
+            bottom: f64::MAX,
+        };
+        self.cursor = y;
+        self.place_block(&floating.block);
+        let bottom = self.cursor;
+        self.frame = saved.0;
+        self.cursor = saved.1;
+        self.in_frame = saved.2;
+
+        match floating.wrap {
+            ofdbox_folio_ir::WrapMode::None => {
+                // 浮在上面，正文不受影响。
+            }
+            ofdbox_folio_ir::WrapMode::TopBottom => {
+                // 正文从对象下方继续。
+                if bottom > self.cursor {
+                    self.cursor = bottom;
+                }
+            }
+            ofdbox_folio_ir::WrapMode::Square => {
+                // 记录一块排除区域：与它垂直重叠的段落让到对象另一侧。
+                self.float_exclusions.push(FloatExclusion {
+                    top: y,
+                    bottom,
+                    left: x,
+                    right: x + width,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    /// 当前段落要避开的浮动区域（四周型绕排）。
+    ///
+    /// 只按段落整体让开：对象在左半页就整段右移，在右半页就缩右边距。
+    fn floating_insets(&self, top: f64, bottom: f64) -> (f64, f64) {
+        let page = self.page_frame();
+        let mut left = 0.0_f64;
+        let mut right = 0.0_f64;
+        for exclusion in &self.float_exclusions {
+            if exclusion.bottom <= top || exclusion.top >= bottom {
+                continue;
+            }
+            let middle = page.left + page.width / 2.0;
+            if exclusion.left + exclusion.right < 2.0 * middle {
+                left = left.max(exclusion.right - page.left);
+            } else {
+                right = right.max(page.left + page.width - exclusion.left);
+            }
+        }
+        (left, right)
     }
 
     // ---- 脚注与尾注 ----
@@ -1560,6 +1655,7 @@ impl<'a> Engine<'a> {
             links,
             images,
             lines,
+            inset_left,
         } = laid;
 
         self.advance_space(style.space_before);
@@ -1595,6 +1691,7 @@ impl<'a> Engine<'a> {
                 baseline,
                 &links,
                 &images,
+                inset_left,
             );
             self.cursor += height;
         }
@@ -1611,8 +1708,10 @@ impl<'a> Engine<'a> {
         let page_number = self.page_number();
         let (pieces, links, images) = self.measure_paragraph(paragraph, page_number, total_pages);
         let content = self.content_width();
-        let indent_left = style.left_indent.to_mm().max(0.0);
-        let indent_right = style.right_indent.to_mm().max(0.0);
+        // 四周型浮动对象：与它垂直重叠的整段让到对象另一侧。
+        let (float_left, float_right) = self.floating_insets(self.cursor, self.cursor + content);
+        let indent_left = style.left_indent.to_mm().max(0.0) + float_left;
+        let indent_right = style.right_indent.to_mm().max(0.0) + float_right;
         let width = (content - indent_left - indent_right).max(1.0);
         let first_width = (width - style.first_line_indent.to_mm()).max(1.0);
         let lines = linebreak::break_lines(&pieces, first_width, width);
@@ -1622,12 +1721,13 @@ impl<'a> Engine<'a> {
             links,
             images,
             lines,
+            inset_left: float_left,
         }
     }
 
     /// 在框内排段落，最多排到下边界 limit；返回 (下一个未排的行, 总行数)。
     ///
-    /// orce 为真时至少排一行，保证拆分能推进。
+    /// force 为真时至少排一行，保证拆分能推进。
     fn place_paragraph_bounded(
         &mut self,
         paragraph: &Paragraph,
@@ -1641,6 +1741,7 @@ impl<'a> Engine<'a> {
             links,
             images,
             lines,
+            inset_left,
         } = self.lay_out_paragraph(paragraph, self.total_pages);
         let line_count = lines.len();
         if start_line == 0 {
@@ -1668,6 +1769,7 @@ impl<'a> Engine<'a> {
                 baseline,
                 &links,
                 &images,
+                inset_left,
             );
             self.cursor += height;
             index += 1;
@@ -1869,11 +1971,12 @@ impl<'a> Engine<'a> {
         baseline: f64,
         links: &[(usize, usize, LinkTarget)],
         images: &[MeasuredImage],
+        inset_left: f64,
     ) {
         if line.is_empty() {
             return;
         }
-        let indent_left = style.left_indent.to_mm().max(0.0);
+        let indent_left = style.left_indent.to_mm().max(0.0) + inset_left;
         let first_indent = if first {
             style.first_line_indent.to_mm()
         } else {
@@ -2462,6 +2565,8 @@ struct LaidParagraph {
     images: Vec<MeasuredImage>,
     /// 行区间。
     lines: Vec<LineSpan>,
+    /// 因浮动对象而增加的水平内缩。
+    inset_left: f64,
 }
 
 /// 表格行里某个单元格的续排位置。

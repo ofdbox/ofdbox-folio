@@ -73,6 +73,16 @@ fn sample() -> Vec<u8> {
         <pic:pic><pic:blipFill><a:blip r:embed="rId9"/></pic:blipFill></pic:pic>
       </a:graphicData></a:graphic>
     </wp:inline></w:drawing></w:r></w:p>
+    <w:p><w:r><w:drawing><wp:anchor>
+      <wp:positionH relativeFrom="column"><wp:posOffset>720000</wp:posOffset></wp:positionH>
+      <wp:positionV relativeFrom="paragraph"><wp:posOffset>360000</wp:posOffset></wp:positionV>
+      <wp:extent cx="360000" cy="360000"/>
+      <wp:wrapSquare wrapText="bothSides"/>
+      <wp:docPr id="2" name="浮动图" descr="浮动示例"/>
+      <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:pic><pic:blipFill><a:blip r:embed="rId9"/></pic:blipFill></pic:pic>
+      </a:graphicData></a:graphic>
+    </wp:anchor></w:drawing></w:r></w:p>
     <w:p><w:r><w:br w:type="page"/></w:r></w:p>
     <w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>第二页</w:t></w:r></w:p>
     <w:sectPr>
@@ -358,6 +368,32 @@ fn reads_footnote_bodies_and_references() {
         .flat_map(|paragraph| paragraph.runs.iter())
         .any(|inline| matches!(inline, Inline::Note(note) if note.id == 1));
     assert!(referenced, "正文里应有脚注引用");
+}
+
+#[test]
+fn reads_anchored_drawings_as_floating_objects() {
+    let flow = read();
+    let floating = flow.sections[0]
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            Block::Floating(object) => Some(object),
+            _ => None,
+        })
+        .expect("浮动对象");
+    // 720000 EMU = 20mm，360000 EMU = 10mm。
+    assert!(
+        (floating.position.x - 20.0).abs() < 0.1,
+        "x={}",
+        floating.position.x
+    );
+    assert!(
+        (floating.position.y - 10.0).abs() < 0.1,
+        "y={}",
+        floating.position.y
+    );
+    assert_eq!(floating.wrap, ofdbox_folio_ir::WrapMode::Square);
+    assert!(matches!(*floating.block, Block::Image(_)));
 }
 
 #[test]
