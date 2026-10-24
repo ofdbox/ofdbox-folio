@@ -1291,6 +1291,14 @@ fn parse_core(text: &str) -> Metadata {
             continue;
         };
         let tag = local_name(&element);
+        // 只对已知字段读取文本；容器元素（如 cp:coreProperties）直接忽略，
+        // 否则会把整棵子树当成一个字段的文本，什么也匹配不到。
+        if !matches!(
+            tag.as_str(),
+            "title" | "creator" | "subject" | "keywords" | "language"
+        ) {
+            continue;
+        }
         let mut value = String::new();
         let mut depth = 0_usize;
         loop {

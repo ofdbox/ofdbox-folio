@@ -1,8 +1,8 @@
 //! OFDBox Folio 的 DOCX 适配层。
 //!
-//! 负责把 DOCX 解析为 Flow IR（`read_flow`）；DOCX 的版式接近 Word 但不承诺
-//! 逐行一致。本 crate 不接触 Fixed IR，也不做排版与渲染。写出 DOCX 随后按
-//! 里程碑补齐。
+//! 负责 DOCX ↔ Flow IR 的双向适配：`read_flow` 把 DOCX 解析成 Flow IR，
+//! `write_flow` 把 Flow IR 写成 DOCX 包。本 crate 不接触 Fixed IR，也不做排版
+//! 与渲染；DOCX 的版式接近 Word 但不承诺逐行一致。
 //!
 //! 实现约定：
 //!
@@ -19,6 +19,7 @@ mod numbering;
 mod package;
 mod props;
 mod styles;
+mod writer;
 mod xml;
 
 use std::io::Cursor;
@@ -69,6 +70,9 @@ pub fn probe(bytes: &[u8]) -> bool {
     };
     archive.index_for_name("word/document.xml").is_some()
 }
+
+/// 从内存写出 DOCX 包。
+pub use writer::{DocxWriteOptions, write_flow, write_flow_path};
 
 /// 从内存读取 DOCX，产出 Flow IR。
 pub fn read_flow(bytes: &[u8], options: &DocxReadOptions) -> Result<FlowDocument, DocxError> {
