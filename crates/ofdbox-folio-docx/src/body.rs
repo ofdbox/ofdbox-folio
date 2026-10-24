@@ -604,7 +604,23 @@ impl<'a> Builder<'a> {
         if let Some(gallery) = gallery
             && is_toc_gallery(&gallery)
         {
-            return Ok(vec![Block::Toc(TocBlock::default())]);
+            // 目录控件里那段文字是标题（如「目录」），条目由排版按标题重算。
+            let title = blocks.iter().find_map(|block| match block {
+                Block::Paragraph(paragraph) => {
+                    let text = runs_text(&paragraph.runs);
+                    if text.trim().is_empty() {
+                        None
+                    } else {
+                        Some(text.trim().to_owned())
+                    }
+                }
+                _ => None,
+            });
+            let toc = TocBlock {
+                title,
+                ..TocBlock::default()
+            };
+            return Ok(vec![Block::Toc(toc)]);
         }
         Ok(blocks)
     }
@@ -1044,15 +1060,25 @@ fn collect_bookmarks(xml: &str) -> HashMap<String, AnchorId> {
 /// 读取 `sdtPr` 里的内容控件库分类。
 fn parse_sdt_gallery(reader: &mut XmlReader<'_>) -> Result<Option<String>, DocxError> {
     let mut gallery = None;
+    // docPartGallery 藏在 docPartObj 里，必须按深度读到配对 End，不能跳子树。
+    let mut depth = 0_usize;
     loop {
         match reader.read_event().map_err(crate::xml::xml_error)? {
-            quick_xml::events::Event::Start(element) => skip_element(reader, &element)?,
+            quick_xml::events::Event::Start(element) => {
+                depth += 1;
+                let _ = element;
+            }
             quick_xml::events::Event::Empty(element) => {
                 if is_element(&element, "docPartGallery") {
                     gallery = attr(&element, "val");
                 }
             }
-            quick_xml::events::Event::End(_) => break,
+            quick_xml::events::Event::End(_) => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+            }
             quick_xml::events::Event::Eof => break,
             _ => {}
         }

@@ -15,12 +15,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
-    Align, Block, Border, ColumnWidth, Diagnostic, DiagnosticCode, Element, FieldKind, FillRule,
-    FixedDocument, FlowDocument, FontAsset, FontProvider, Group, HeaderFooter, HeaderFooterSet,
-    ImageAsset, ImageBlock, ImageElement, Inline, LineCap, LineJoin, LineSpacing, LinkArea,
-    LinkTarget, Matrix, OutlineItem, Page, PageInfo, PageSetup, Paint, ParaStyle, Paragraph, Path,
-    PathElement, Point, Rect, Rotation, Row, Scene, Size, StrokePaint, StrokeStyle, Table,
-    TextElement, TextItem, TextLayer, TextLine, TextStyle, Twips,
+    Align, Block, Border, Cell, Column, ColumnWidth, Diagnostic, DiagnosticCode, Element,
+    FieldKind, FillRule, FixedDocument, FlowDocument, FontAsset, FontProvider, Group, HeaderFooter,
+    HeaderFooterSet, ImageAsset, ImageBlock, ImageElement, Inline, LineCap, LineJoin, LineSpacing,
+    LinkArea, LinkTarget, Margins, Matrix, OutlineItem, Page, PageInfo, PageSetup, Paint,
+    ParaStyle, Paragraph, Path, PathElement, Point, Rect, Rotation, Row, Scene, Size, StrokePaint,
+    StrokeStyle, Table, TextElement, TextItem, TextLayer, TextLine, TextStyle, Twips,
 };
 
 use font::{FontKey, FontStore};
@@ -63,7 +63,8 @@ pub fn layout(
 
 /// 带选项的排版入口。
 ///
-/// 文档引用「总页数」字段时执行两遍：第一遍得到页数，第二遍代入。
+/// 引用「总页数」字段时先排一遍拿页数；含自动目录时先排一遍拿标题页码，再代入
+/// 重排，直到目录页码稳定（最多 4 遍）。
 pub fn layout_with(
     document: &FlowDocument,
     fonts: &mut dyn FontProvider,
@@ -72,12 +73,54 @@ pub fn layout_with(
     if document.sections.is_empty() {
         return Err(LayoutError::NoSection);
     }
-    let first = Engine::new(document, options).run(fonts, None);
-    if !uses_total_pages(document) {
-        return Ok(first);
+    let needs_toc = uses_toc(document);
+    let needs_total = uses_total_pages(document);
+    if !needs_toc && !needs_total {
+        let (fixed, _) = Engine::new(document, options).run(fonts, None, None);
+        return Ok(fixed);
     }
-    let total = first.pages.len();
-    Ok(Engine::new(document, options).run(fonts, Some(total)))
+
+    // 第一遍：目录内容为空，只用来拿标题页码与总页数。
+    let mut total_pages = None;
+    let mut toc_entries: Option<Vec<TocEntry>> = None;
+    let mut last = None;
+    for _ in 0..4 {
+        let (fixed, headings) =
+            Engine::new(document, options).run(fonts, total_pages, toc_entries.clone());
+        let next_entries: Option<Vec<TocEntry>> = needs_toc.then(|| {
+            headings
+                .iter()
+                .map(|(level, title, page, _)| (*level, title.clone(), *page))
+                .collect()
+        });
+        let next_total = needs_total.then_some(fixed.pages.len());
+        let stable = next_entries == toc_entries && next_total == total_pages;
+        total_pages = next_total;
+        toc_entries = next_entries;
+        last = Some(fixed);
+        if stable {
+            break;
+        }
+    }
+    Ok(last.expect("至少排过一遍"))
+}
+
+/// 文档是否含自动目录。
+fn uses_toc(document: &FlowDocument) -> bool {
+    fn blocks_use_toc(blocks: &[Block]) -> bool {
+        blocks.iter().any(|block| match block {
+            Block::Toc(_) => true,
+            Block::Table(table) => table
+                .rows
+                .iter()
+                .any(|row| row.cells.iter().any(|cell| blocks_use_toc(&cell.blocks))),
+            _ => false,
+        })
+    }
+    document
+        .sections
+        .iter()
+        .any(|section| blocks_use_toc(&section.blocks))
 }
 
 /// 文档是否引用总页数字段。
@@ -230,6 +273,8 @@ struct Engine<'a> {
     footers: HeaderFooterSet,
     /// 两遍布局时已知的总页数。
     total_pages: Option<usize>,
+    /// 上一遍排版收集到的目录条目。
+    toc_entries: Option<Vec<TocEntry>>,
     headings: Vec<(u8, String, usize, f64)>,
     /// 字体缺字形的字符计数，最后汇总成一条诊断。
     missing_chars: usize,
@@ -268,14 +313,21 @@ impl<'a> Engine<'a> {
             headers: HeaderFooterSet::default(),
             footers: HeaderFooterSet::default(),
             total_pages: None,
+            toc_entries: None,
             headings: Vec::new(),
             missing_chars: 0,
         }
     }
 
-    fn run(mut self, provider: &mut dyn FontProvider, total_pages: Option<usize>) -> FixedDocument {
+    fn run(
+        mut self,
+        provider: &mut dyn FontProvider,
+        total_pages: Option<usize>,
+        toc_entries: Option<Vec<TocEntry>>,
+    ) -> (FixedDocument, Vec<(u8, String, usize, f64)>) {
         self.prepare_fonts(provider);
         self.total_pages = total_pages;
+        self.toc_entries = toc_entries;
         for section in &self.document.sections {
             self.begin_section(&section.setup, &section.headers, &section.footers);
             for block in &section.blocks {
@@ -302,16 +354,19 @@ impl<'a> Engine<'a> {
                 format!("有 {} 个字符在当前字体中缺少字形", self.missing_chars),
             );
         }
+
         self.fixed.outline = self.build_outline();
         self.fixed.engine.layout_version = LAYOUT_VERSION;
-        self.fixed
+        (self.fixed, self.headings)
     }
 
     // ---- 字体 ----
 
     /// 收集字符集并逐个字体解析一次度量。
     ///
-    /// 表格单元格与页眉页脚里的文字同样要预解析，否则排版时会逐字报缺字体。
+    /// 表格单元格与页眉页脚里的文字同样要预解析；自动目录与字段用的样式不在 IR
+    /// 的 run 里（排版时才生成文字），因此把这些样式的字体按全文字符集预解析，
+    /// 否则目录条目会因为「字体没准备」而画成空框。
     fn prepare_fonts(&mut self, provider: &mut dyn FontProvider) {
         let mut wanted: HashMap<FontKey, HashSet<char>> = HashMap::new();
         let mut fallbacks: HashMap<String, Vec<String>> = HashMap::new();
@@ -323,6 +378,35 @@ impl<'a> Engine<'a> {
                 }
             }
         }
+
+        // 全文用到的字符，供「排版时才生成文字」的样式兜底；目录标题与页码是
+        // 排版时生成的，也要算进去。
+        let mut generated: HashSet<char> = "0123456789".chars().collect();
+        for section in &self.document.sections {
+            collect_toc_text(&section.blocks, &mut generated);
+        }
+        let all_chars: HashSet<char> = wanted
+            .values()
+            .flatten()
+            .copied()
+            .chain(generated.iter().copied())
+            .collect();
+        let mut extra_styles: Vec<TextStyle> = vec![self.document.styles.default_character.clone()];
+        for section in &self.document.sections {
+            collect_toc_styles(&section.blocks, &mut extra_styles);
+        }
+        for style in extra_styles {
+            let style = self.resolve_char_style(&style, None);
+            let key = FontKey::new(&style.family.name, style.bold, style.italic);
+            fallbacks
+                .entry(style.family.name.clone())
+                .or_insert_with(|| style.family.fallback.clone());
+            wanted
+                .entry(key)
+                .or_default()
+                .extend(all_chars.iter().copied());
+        }
+
         for (key, chars) in &wanted {
             let chain = fallbacks.get(&key.family).cloned().unwrap_or_default();
             self.fonts.prepare(provider, key, &chain, chars);
@@ -613,7 +697,7 @@ impl<'a> Engine<'a> {
             Block::Image(image) => self.place_image_block(image),
             Block::PageBreak => self.new_page(),
             Block::Table(table) => self.place_table(table),
-            Block::Toc(_) => self.warn("自动目录尚未实现（A2）"),
+            Block::Toc(toc) => self.place_toc(toc),
             _ => self.warn("未知块类型，已跳过"),
         }
     }
@@ -705,6 +789,75 @@ impl<'a> Engine<'a> {
         self.frame = saved.0;
         self.cursor = saved.1;
         self.in_frame = saved.2;
+    }
+
+    // ---- 自动目录 ----
+
+    /// 排自动目录：标题 + 每条「左标题 / 右页码」的两列表格。
+    ///
+    /// 页码来自上一遍排版的结果；目录自身占位会让页码整体后移，`layout_with`
+    /// 会反复代入直到稳定。标题文字沿用 `TocStyle` 的三种样式。
+    fn place_toc(&mut self, toc: &ofdbox_folio_ir::TocBlock) {
+        if self.in_frame {
+            self.warn("目录放在表格单元格里，已跳过");
+            return;
+        }
+        let Some(entries) = self.toc_entries.clone() else {
+            // 第一遍排版没有条目，等后续遍次。
+            return;
+        };
+        let entries: Vec<TocEntry> = entries
+            .into_iter()
+            .filter(|(level, title, _)| *level <= toc.max_level.max(1) && !title.trim().is_empty())
+            .collect();
+        if entries.is_empty() {
+            self.warn("自动目录没有可用标题");
+            return;
+        }
+
+        if let Some(title) = &toc.title
+            && !title.trim().is_empty()
+        {
+            let mut heading = Paragraph::plain(title.clone(), toc.style.title_style.clone());
+            heading.heading_level = None;
+            self.place_paragraph(&heading, self.total_pages);
+        }
+
+        let page_width = (toc.style.page_number_style.size.to_mm() * 3.0).max(12.0);
+        let mut rows = Vec::with_capacity(entries.len());
+        for (level, title, page) in entries {
+            let indent = toc
+                .style
+                .indent_per_level
+                .to_mm()
+                .max(0.0)
+                .mul_add(f64::from(level.saturating_sub(1)), 0.0);
+            let mut left = Paragraph::plain(title, toc.style.entry_style.clone());
+            left.style.left_indent = Twips::from_mm(indent);
+            left.style.align = Align::Left;
+            // 大纲目标是 0 基页序，目录里写 1 基页码。
+            let mut right =
+                Paragraph::plain((page + 1).to_string(), toc.style.page_number_style.clone());
+            right.style.align = Align::Right;
+            rows.push(Row::new(vec![
+                Cell::new(vec![Block::Paragraph(left)]),
+                Cell::new(vec![Block::Paragraph(right)]),
+            ]));
+        }
+
+        let mut table = Table::new(vec![
+            Column {
+                width: ColumnWidth::Weight(1),
+            },
+            Column {
+                width: ColumnWidth::Twips(Twips::from_mm(page_width)),
+            },
+        ]);
+        table.rows = rows;
+        table.header_rows = 0;
+        table.borders = ofdbox_folio_ir::TableBorders::default();
+        table.cell_padding = Margins::default();
+        self.place_table(&table);
     }
 
     /// 在临时页里量一组块的高度（不产出任何元素）。
@@ -1413,19 +1566,20 @@ impl<'a> Engine<'a> {
 
     // ---- 大纲 ----
 
-    fn build_outline(&mut self) -> Vec<OutlineItem> {
+    fn build_outline(&self) -> Vec<OutlineItem> {
         let mut roots: Vec<OutlineItem> = Vec::new();
         // 父链：每项是（层级，在 roots 中的路径）。
         let mut path: Vec<(u8, usize)> = Vec::new();
-        for (level, title, page, y) in std::mem::take(&mut self.headings) {
+        for (level, title, page, y) in &self.headings {
+            let level = *level;
             while path.last().is_some_and(|(parent, _)| *parent >= level) {
                 path.pop();
             }
             let item = OutlineItem {
-                title,
+                title: title.clone(),
                 destination: ofdbox_folio_ir::Destination {
-                    page,
-                    point: Point::new(0.0, y),
+                    page: *page,
+                    point: Point::new(0.0, *y),
                 },
                 children: Vec::new(),
             };
@@ -1524,6 +1678,48 @@ fn apply_text_direct(base: &mut TextStyle, over: &TextStyle) {
     }
 }
 
+/// 收集目录标题里排版时才出现的字符。
+fn collect_toc_text(blocks: &[Block], chars: &mut HashSet<char>) {
+    for block in blocks {
+        match block {
+            Block::Toc(toc) => {
+                if let Some(title) = &toc.title {
+                    chars.extend(title.chars());
+                }
+            }
+            Block::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        collect_toc_text(&cell.blocks, chars);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// 收集块里的目录样式（标题/条目/页码），供字体预解析。
+fn collect_toc_styles(blocks: &[Block], styles: &mut Vec<TextStyle>) {
+    for block in blocks {
+        match block {
+            Block::Toc(toc) => {
+                styles.push(toc.style.title_style.clone());
+                styles.push(toc.style.entry_style.clone());
+                styles.push(toc.style.page_number_style.clone());
+            }
+            Block::Table(table) => {
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        collect_toc_styles(&cell.blocks, styles);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// 递归收集块（含表格单元格）里的字符。
 fn collect_block_chars(
     blocks: &[Block],
@@ -1556,6 +1752,9 @@ fn line_image_height(pieces: &[Piece], line: &LineSpan, images: &[MeasuredImage]
         .map(|image| image.height)
         .fold(0.0, f64::max)
 }
+
+/// 目录条目：层级、标题、页码。
+type TocEntry = (u8, String, usize);
 
 /// 当前排版的横向框：表格单元格、页眉页脚都会换一个框。
 #[derive(Clone, Copy, Debug, Default)]
