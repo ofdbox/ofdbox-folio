@@ -172,6 +172,98 @@ fn repeats_table_header_rows_on_the_next_page() {
 }
 
 #[test]
+fn splits_a_row_taller_than_a_page_across_pages() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    let mut rows = vec![Row {
+        cells: vec![cell("表头甲"), cell("表头乙")],
+        is_header: true,
+        height: None,
+    }];
+    // 单元格里塞 90 段小字，整行远高于一页。
+    let mut tall_cell = Vec::new();
+    for index in 0..140 {
+        tall_cell.push(Block::Paragraph(paragraph(&format!(
+            "很长的单元格内容第 {index} 行"
+        ))));
+    }
+    let mut row = Row::new(vec![Cell::new(tall_cell), cell("旁边")]);
+    row.height = None;
+    rows.push(row);
+    rows.push(Row::new(vec![cell("表格最后一行"), cell("尾")]));
+
+    let mut table = table(rows, 1);
+    table.cell_padding = Margins::uniform(Twips::from_mm(1.0));
+    // 单列表格更常见：改成两列。
+    table.columns = vec![
+        Column {
+            width: ColumnWidth::Twips(Twips::from_mm(90.0)),
+        },
+        Column {
+            width: ColumnWidth::Twips(Twips::from_mm(60.0)),
+        },
+    ];
+    flow.push(Block::Table(table));
+
+    let fixed = layout_with(&flow, &mut fonts, LayoutOptions::default()).expect("layout");
+    assert!(
+        fixed.pages.len() >= 3,
+        "超高行应跨页续排，实际页数: {}",
+        fixed.pages.len()
+    );
+
+    // 每一页都有续排的超高行内容，且每页都重复表头。
+    for (index, page) in fixed.pages.iter().enumerate() {
+        let text = texts(page);
+        assert!(
+            text.iter().any(|(value, _, _)| value == "表头甲"),
+            "第 {} 页缺少表头: {text:?}",
+            index + 1
+        );
+        assert!(
+            text.iter()
+                .any(|(value, _, _)| value.starts_with("很长的单元格内容第")),
+            "第 {} 页缺少单元格续排内容: {text:?}",
+            index + 1
+        );
+    }
+    // 第一段与最后一段分处不同页，说明是同一行被拆开续排，而不是整行挪页。
+    let page_of = |needle: &str| {
+        fixed
+            .pages
+            .iter()
+            .position(|page| texts(page).iter().any(|(value, _, _)| value == needle))
+            .map(|index| index + 1)
+    };
+    let first_page = page_of("很长的单元格内容第 0 行").expect("首段");
+    let last_page = page_of("很长的单元格内容第 139 行").expect("末段");
+    assert!(
+        last_page > first_page,
+        "同一行的首末段应分页: {first_page} vs {last_page}"
+    );
+
+    // 最后一行整行落在末尾，不会重复。
+    let last = fixed.pages.last().expect("最后一页");
+    assert!(
+        texts(last)
+            .iter()
+            .any(|(value, _, _)| value == "表格最后一行"),
+        "最后一行应排完: {:?}",
+        texts(last)
+    );
+    assert!(
+        fixed
+            .report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("表格行跨页")),
+        "应记录行跨页诊断"
+    );
+}
+
+#[test]
 fn lays_out_header_and_footer_with_page_fields() {
     let Some(mut fonts) = fonts() else {
         return;

@@ -902,35 +902,74 @@ impl<'a> Engine<'a> {
             .min(table.rows.len());
         let page_bottom = self.bottom();
         let mut index = 0_usize;
+        // 行内拆分的续排位置：`Some` 表示这一行还没排完。
+        let mut resume: Option<Vec<Option<CellContinuation>>> = None;
+        let mut guard = 0_usize;
         while index < table.rows.len() {
+            guard += 1;
+            if guard > table.rows.len() * 8 + 16 {
+                self.warn("表格分页次数异常，已停止排这张表");
+                break;
+            }
             let snapshot = self.snapshot();
             let top = self.cursor;
-            let bottom = self.layout_row(table, &widths, index, top);
-            let overflow = bottom > page_bottom + 1e-6;
-            if overflow && index > 0 {
-                // 本页放不下：回滚，换页，重排表头，再试一次。
-                self.restore(snapshot);
-                self.new_page();
-                // 表格跨页后页面上仍然有正文，页眉要跟着换页重排。
-                self.start_page_body();
-                for header in 0..header_rows {
-                    let height = self.layout_row(table, &widths, header, self.cursor);
-                    self.cursor = height;
-                }
-                let retry = self.layout_row(table, &widths, index, self.cursor);
-                if retry > page_bottom + 1e-6 && header_rows == 0 {
-                    // 整页也放不下：允许溢出，避免死循环。
-                    self.diagnostic(DiagnosticCode::Geometry, "表格行高于可用高度，已允许溢出");
-                }
-                self.cursor = retry;
+            let fragment = self.layout_row(
+                table,
+                &widths,
+                index,
+                top,
+                page_bottom,
+                resume.as_deref(),
+                false,
+            );
+            let complete = fragment.continuation.iter().all(Option::is_none);
+            if complete && fragment.bottom <= page_bottom + 1e-6 {
+                // 本页放得下整行。
+                self.cursor = fragment.bottom;
                 index += 1;
+                resume = None;
                 continue;
             }
-            if overflow {
-                self.diagnostic(DiagnosticCode::Geometry, "表格行高于可用高度，已允许溢出");
+            if !fragment.placed_any {
+                // 一行都没有落下：整行挪到下一页，重排表头后再试。
+                self.restore(snapshot);
+                self.new_page();
+                self.start_page_body();
+                self.repeat_header_rows(table, &widths, header_rows, page_bottom);
+                let retry =
+                    self.layout_row(table, &widths, index, self.cursor, page_bottom, None, true);
+                if retry.bottom > page_bottom + 1e-6 {
+                    self.diagnostic(
+                        DiagnosticCode::Geometry,
+                        "表格行高于可用高度，已按行拆分或允许溢出",
+                    );
+                }
+                self.cursor = retry.bottom;
+                index += 1;
+                resume = None;
+                continue;
             }
-            self.cursor = bottom;
-            index += 1;
+            // 行内拆分：本页保留已排的部分，剩余内容续到下一页。
+            self.cursor = fragment.bottom;
+            self.new_page();
+            self.start_page_body();
+            self.repeat_header_rows(table, &widths, header_rows, page_bottom);
+            if complete {
+                // 只是内边距/固定行高溢出，行本身已经排完。
+                index += 1;
+                resume = None;
+            } else {
+                self.diagnostic(DiagnosticCode::Geometry, "表格行跨页，已按行续排");
+                resume = Some(fragment.continuation);
+            }
+        }
+    }
+
+    /// 跨页时重排表头行。
+    fn repeat_header_rows(&mut self, table: &Table, widths: &[f64], count: usize, limit: f64) {
+        for header in 0..count {
+            let fragment = self.layout_row(table, widths, header, self.cursor, limit, None, true);
+            self.cursor = fragment.bottom;
         }
     }
 
@@ -972,8 +1011,22 @@ impl<'a> Engine<'a> {
         widths
     }
 
-    /// 排一行，返回行底部的 y；同时画这一行的边框。
-    fn layout_row(&mut self, table: &Table, widths: &[f64], index: usize, top: f64) -> f64 {
+    /// 排一行（可能只排一部分），返回本页占用的底部与每格的续排位置。
+    ///
+    /// `limit` 是本页可用的下边界：单元格内容排到边界就停，剩余部分通过
+    /// `CellContinuation` 交给下一页续排。`resume` 是本行在上一页留下的续排位置，
+    /// `force` 表示即使一行都放不下也要硬排一行（防止死循环）。
+    #[allow(clippy::too_many_arguments)]
+    fn layout_row(
+        &mut self,
+        table: &Table,
+        widths: &[f64],
+        index: usize,
+        top: f64,
+        limit: f64,
+        resume: Option<&[Option<CellContinuation>]>,
+        force: bool,
+    ) -> RowFragment {
         let row: &Row = &table.rows[index];
         let padding_top = table.cell_padding.top.to_mm().max(0.0);
         let padding_bottom = table.cell_padding.bottom.to_mm().max(0.0);
@@ -986,6 +1039,8 @@ impl<'a> Engine<'a> {
 
         let mut x = saved_frame.left;
         let mut max_bottom = top;
+        let mut placed_any = false;
+        let mut continuation = vec![None; row.cells.len()];
         for (column, cell) in row.cells.iter().enumerate() {
             let width = widths.get(column).copied().unwrap_or(0.0);
             if width <= 0.0 {
@@ -993,16 +1048,21 @@ impl<'a> Engine<'a> {
             }
             let inner_left = x + padding_left;
             let inner_width = (width - padding_left - padding_right).max(1.0);
-            self.frame = Frame {
-                left: inner_left,
-                width: inner_width,
-                bottom: saved_frame.bottom.max(top + 1.0),
-            };
-            self.cursor = top + padding_top;
-            for block in &cell.blocks {
-                self.place_block(block);
-            }
-            max_bottom = max_bottom.max(self.cursor + padding_bottom);
+            let resume_at = resume.and_then(|items| items.get(column).copied().flatten());
+            let outcome = self.layout_cell(
+                cell,
+                Frame {
+                    left: inner_left,
+                    width: inner_width,
+                    bottom: limit,
+                },
+                top + padding_top,
+                resume_at,
+                force,
+            );
+            placed_any |= outcome.placed_any;
+            max_bottom = max_bottom.max(outcome.bottom + padding_bottom);
+            continuation[column] = outcome.continuation;
             x += width;
         }
 
@@ -1010,12 +1070,85 @@ impl<'a> Engine<'a> {
         self.cursor = saved_cursor;
         self.in_frame = saved_in_frame;
 
+        let complete = continuation.iter().all(Option::is_none);
         let mut height = (max_bottom - top).max(1.0);
-        if let Some(fixed) = row.height {
+        if complete && let Some(fixed) = row.height {
             height = height.max(fixed.to_mm());
         }
-        self.draw_row_borders(table, widths, index, top, top + height);
-        top + height
+        if placed_any {
+            self.draw_row_borders(table, widths, index, top, top + height);
+        }
+        RowFragment {
+            bottom: top + height,
+            continuation,
+            placed_any,
+        }
+    }
+
+    /// 在一个单元格的子框里排版，最多排到 `frame.bottom`。
+    fn layout_cell(
+        &mut self,
+        cell: &ofdbox_folio_ir::Cell,
+        frame: Frame,
+        top: f64,
+        resume: Option<CellContinuation>,
+        force: bool,
+    ) -> CellOutcome {
+        let saved_frame = self.frame;
+        let saved_cursor = self.cursor;
+        let saved_in_frame = self.in_frame;
+        self.frame = frame;
+        self.cursor = top;
+        self.in_frame = true;
+
+        let mut block_index = resume.map(|item| item.block).unwrap_or(0);
+        let mut line = resume.map(|item| item.line).unwrap_or(0);
+        let mut placed_any = false;
+        let mut continuation = None;
+        while block_index < cell.blocks.len() {
+            match &cell.blocks[block_index] {
+                Block::Paragraph(paragraph) => {
+                    // 只有续排的第一个块需要 force；后续块如果放不下就留给下一页。
+                    let force_this = force && block_index == resume.map_or(0, |item| item.block);
+                    let (next, total) =
+                        self.place_paragraph_bounded(paragraph, line, frame.bottom, force_this);
+                    placed_any |= next > line;
+                    if next < total {
+                        continuation = Some(CellContinuation {
+                            block: block_index,
+                            line: next,
+                        });
+                        break;
+                    }
+                    block_index += 1;
+                    line = 0;
+                }
+                block => {
+                    if self.cursor > frame.bottom + 1e-6 && placed_any {
+                        continuation = Some(CellContinuation {
+                            block: block_index,
+                            line: 0,
+                        });
+                        break;
+                    }
+                    let before = self.cursor;
+                    self.place_block(block);
+                    placed_any |= self.cursor > before || matches!(block, Block::Paragraph(_));
+                    block_index += 1;
+                    line = 0;
+                }
+            }
+        }
+
+        let bottom = self.cursor;
+        self.frame = saved_frame;
+        self.cursor = saved_cursor;
+        self.in_frame = saved_in_frame;
+        CellOutcome {
+            bottom,
+            continuation,
+            placed_any,
+        }
     }
 
     /// 画一行里每个单元格的边框。
@@ -1101,15 +1234,14 @@ impl<'a> Engine<'a> {
     }
 
     fn place_paragraph(&mut self, paragraph: &Paragraph, total_pages: Option<usize>) {
-        let style = self.resolve_paragraph_style(&paragraph.style);
-        let page_number = self.page_number();
-        let (pieces, links, images) = self.measure_paragraph(paragraph, page_number, total_pages);
-        let content = self.content_width();
-        let indent_left = style.left_indent.to_mm().max(0.0);
-        let indent_right = style.right_indent.to_mm().max(0.0);
-        let width = (content - indent_left - indent_right).max(1.0);
-        let first_width = (width - style.first_line_indent.to_mm()).max(1.0);
-        let lines = linebreak::break_lines(&pieces, first_width, width);
+        let laid = self.lay_out_paragraph(paragraph, total_pages);
+        let LaidParagraph {
+            style,
+            pieces,
+            links,
+            images,
+            lines,
+        } = laid;
 
         self.advance_space(style.space_before);
 
@@ -1149,6 +1281,83 @@ impl<'a> Engine<'a> {
             self.cursor += height;
         }
         self.cursor += style.space_after.to_mm().max(0.0);
+    }
+
+    /// 测量一个段落：样式、断行单元与行区间。
+    fn lay_out_paragraph(
+        &mut self,
+        paragraph: &Paragraph,
+        total_pages: Option<usize>,
+    ) -> LaidParagraph {
+        let style = self.resolve_paragraph_style(&paragraph.style);
+        let page_number = self.page_number();
+        let (pieces, links, images) = self.measure_paragraph(paragraph, page_number, total_pages);
+        let content = self.content_width();
+        let indent_left = style.left_indent.to_mm().max(0.0);
+        let indent_right = style.right_indent.to_mm().max(0.0);
+        let width = (content - indent_left - indent_right).max(1.0);
+        let first_width = (width - style.first_line_indent.to_mm()).max(1.0);
+        let lines = linebreak::break_lines(&pieces, first_width, width);
+        LaidParagraph {
+            style,
+            pieces,
+            links,
+            images,
+            lines,
+        }
+    }
+
+    /// 在框内排段落，最多排到下边界 limit；返回 (下一个未排的行, 总行数)。
+    ///
+    /// orce 为真时至少排一行，保证拆分能推进。
+    fn place_paragraph_bounded(
+        &mut self,
+        paragraph: &Paragraph,
+        start_line: usize,
+        limit: f64,
+        force: bool,
+    ) -> (usize, usize) {
+        let LaidParagraph {
+            style,
+            pieces,
+            links,
+            images,
+            lines,
+        } = self.lay_out_paragraph(paragraph, self.total_pages);
+        let line_count = lines.len();
+        if start_line == 0 {
+            self.advance_space(style.space_before);
+        }
+        let mut index = start_line;
+        while index < line_count {
+            let line = &lines[index];
+            let size = self.max_size(&pieces, line);
+            let image_height = line_image_height(&pieces, line, &images);
+            let height = self
+                .line_height(&style, &pieces, line)
+                .max(image_height + 0.2 * size);
+            let fits = self.cursor + height <= limit + 1e-6;
+            if !fits && !(force && index == start_line) {
+                break;
+            }
+            let baseline = self.cursor + (0.8 * size).max(image_height);
+            self.emit_line(
+                &style,
+                &pieces,
+                line,
+                index == 0,
+                index + 1 == line_count,
+                baseline,
+                &links,
+                &images,
+            );
+            self.cursor += height;
+            index += 1;
+        }
+        if index >= line_count {
+            self.cursor += style.space_after.to_mm().max(0.0);
+        }
+        (index, line_count)
     }
 
     /// 一段的行高。
@@ -1903,6 +2112,51 @@ struct Frame {
     width: f64,
     /// 底边界，毫米。
     bottom: f64,
+}
+
+/// 测量好的段落。
+struct LaidParagraph {
+    /// 解析后的段落样式。
+    style: ParaStyle,
+    /// 断行单元。
+    pieces: Vec<Piece>,
+    /// 链接区间。
+    links: Vec<(usize, usize, LinkTarget)>,
+    /// 行内图片。
+    images: Vec<MeasuredImage>,
+    /// 行区间。
+    lines: Vec<LineSpan>,
+}
+
+/// 表格行里某个单元格的续排位置。
+#[derive(Clone, Copy, Debug)]
+struct CellContinuation {
+    /// 下一个未排的块下标。
+    block: usize,
+    /// 该块是段落时，已排完的行数。
+    line: usize,
+}
+
+/// 一行（或行的一段）的排版结果。
+#[derive(Clone, Debug)]
+struct RowFragment {
+    /// 本页占用的底部 y。
+    bottom: f64,
+    /// 每格未排完的续排位置；None 表示该格已排完。
+    continuation: Vec<Option<CellContinuation>>,
+    /// 本页是否落下过内容。
+    placed_any: bool,
+}
+
+/// 单元格的排版结果。
+#[derive(Clone, Copy, Debug)]
+struct CellOutcome {
+    /// 内容底部的 y。
+    bottom: f64,
+    /// 未排完时的续排位置。
+    continuation: Option<CellContinuation>,
+    /// 是否落下过内容。
+    placed_any: bool,
 }
 
 /// 一页内容的快照，用于「放到一半发现放不下」时回滚。
