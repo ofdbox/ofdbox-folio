@@ -1,11 +1,12 @@
-//! 从零构造 Flow IR 并写出 DOCX 的完整示例。
+//! 从零构造 Flow IR，同时写出 DOCX 与 OFD 的完整示例。
 //!
 //! ```text
-//! cargo run -p ofdbox-folio --example create_docx -- out.docx
+//! cargo run -p ofdbox-folio --example create_document -- out.docx
 //! ```
 //!
 //! 覆盖：标题与正文格式、制表位与点线前导符、表格、图片、脚注、目录域、
-//! 页眉页脚与页码字段、浮动图片。写完后会用读入器回读一遍打印结构。
+//! 页眉页脚与页码字段、浮动图片。同一份 Flow IR 先写 DOCX，再排版成 Fixed IR
+//! 写 OFD（字体自动子集化），最后回读 DOCX 打印结构。
 
 use std::error::Error;
 use std::sync::Arc;
@@ -18,6 +19,12 @@ use ofdbox_folio::ir::{
     ParaStyle, Paragraph, Point, Row, TabAlign, TabLeader, TabStop, Table, TableBorders, TextRun,
     TextStyle, TocBlock, TocStyle, Twips, WrapMode,
 };
+use ofdbox_folio::layout::{LayoutOptions, layout_with};
+use ofdbox_folio::ofd::{OfdWriteOptions, write_fixed};
+
+mod common;
+
+use common::SystemFonts;
 
 /// 正文字号。
 fn style(size: f64) -> TextStyle {
@@ -245,11 +252,30 @@ fn main() -> Result<(), Box<dyn Error>> {
         blocks: vec![Block::Paragraph(footer)],
     });
 
-    // ---- 写出并回读 ----
+    // ---- 写 DOCX ----
     write_flow_path(&flow, &path, &DocxWriteOptions::default())?;
     let size = std::fs::metadata(&path)?.len();
-    println!("写出: {path} ({size} 字节)");
+    println!("写出 DOCX: {path} ({size} 字节)");
 
+    // ---- 同一份 Flow IR 排成 Fixed IR，再写 OFD ----
+    let mut fonts = SystemFonts::new();
+    let fixed = layout_with(&flow, &mut fonts, LayoutOptions::default())?;
+    for diagnostic in &fixed.report.diagnostics {
+        eprintln!("  排版诊断: {}", diagnostic.message);
+    }
+    let ofd_path = std::path::Path::new(&path)
+        .with_extension("ofd")
+        .to_string_lossy()
+        .to_string();
+    let ofd = write_fixed(&fixed, &OfdWriteOptions::default())?;
+    std::fs::write(&ofd_path, &ofd)?;
+    println!(
+        "写出 OFD: {ofd_path} ({} 字节，{} 页)",
+        ofd.len(),
+        fixed.pages.len()
+    );
+
+    // ---- 回读 DOCX ----
     let back = read_flow_path(&path, &DocxReadOptions::default())?;
     let blocks: usize = back
         .sections

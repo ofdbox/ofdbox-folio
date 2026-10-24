@@ -102,10 +102,10 @@ OFD / PDF 读取 ──────┘
 
 `ofdbox_folio::docx::write_flow()` 把 Flow IR 写成 DOCX 包（`[Content_Types].xml`、`document.xml`、`styles.xml`、页眉页脚、`footnotes.xml`/`endnotes.xml`、`media/*`、`docProps`）：分节与页面设置（含分栏）、段落与字符格式、制表位与前导符、表格（边框/表头行/单元格内边距）、行内与浮动图片（`wp:inline`/`wp:anchor`）、页眉页脚、`PAGE`/`NUMPAGES` 域、超链接、脚注尾注引用、自动目录域、书签与大纲级别。固定 ZIP 时间戳，相同输入产生相同字节。
 
-从零创建一份 DOCX 的完整示例见 `examples/create_docx.rs`（标题、字符格式、制表位点线、表格、行内与浮动图片、脚注、目录域、页眉页脚与页码字段）：
+从零创建文档的完整示例见 `examples/create_document.rs`：同一份 Flow IR 同时写出 DOCX 与 OFD（标题、字符格式、制表位点线、表格、行内与浮动图片、脚注、目录域、页眉页脚与页码字段；OFD 走排版引擎并做字体子集化）：
 
 ```bash
-cargo run -p ofdbox-folio --example create_docx -- out.docx
+cargo run -p ofdbox-folio --example create_document -- out.docx  # 同时产出 out.ofd
 ```
 
 ### DOCX 读取
