@@ -32,7 +32,7 @@ pub use flow::{
     FloatingObject, FlowDocument, FontFamily, HeaderFooter, HeaderFooterSet, ImageBlock, Inline,
     InlineImage, LineSpacing, Link, LinkTarget, Margins, NamedStyle, Note, NoteKind, NoteRef,
     PageSetup, ParaStyle, Paragraph, PositionFrom, Row, Section, StyleSheet, TabAlign, TabLeader,
-    TabStop, Table, TableBorders, TextRun, TextStyle, TocBlock, TocStyle, WrapMode,
+    TabStop, Table, TableBorders, TextRun, TextStyle, TocBlock, TocStyle, VMerge, WrapMode,
 };
 pub use font::{FontError, FontProvider, FontRequest, extract_truetype_face, subset_truetype};
 pub use geometry::{Matrix, Point, Rect, Rotation, Size};

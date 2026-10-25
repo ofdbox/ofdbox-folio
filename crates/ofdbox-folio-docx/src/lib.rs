@@ -15,6 +15,7 @@
 //! - 库保持静默：不打印、不写日志。
 
 mod body;
+mod image;
 mod numbering;
 mod package;
 mod props;
@@ -72,7 +73,7 @@ pub fn probe(bytes: &[u8]) -> bool {
 }
 
 /// 从内存写出 DOCX 包。
-pub use writer::{DocxWriteOptions, write_flow, write_flow_path};
+pub use writer::{DocxWriteOptions, write_flow, write_flow_path, write_flow_with_report};
 
 /// 从内存读取 DOCX，产出 Flow IR。
 pub fn read_flow(bytes: &[u8], options: &DocxReadOptions) -> Result<FlowDocument, DocxError> {

@@ -1550,14 +1550,24 @@ impl<'a> Engine<'a> {
         let mut max_bottom = top;
         let mut placed_any = false;
         let mut continuation = vec![None; row.cells.len()];
-        for (column, cell) in row.cells.iter().enumerate() {
-            let width = widths.get(column).copied().unwrap_or(0.0);
+        // 列游标：合并单元格按 span 占多列。
+        let mut column = 0_usize;
+        for (cell_index, cell) in row.cells.iter().enumerate() {
+            let span = usize::try_from(cell.span.max(1)).unwrap_or(1);
+            let width: f64 = widths.iter().skip(column).take(span).sum();
             if width <= 0.0 {
+                column += span;
                 continue;
             }
             let inner_left = x + padding_left;
             let inner_width = (width - padding_left - padding_right).max(1.0);
-            let resume_at = resume.and_then(|items| items.get(column).copied().flatten());
+            let resume_at = resume.and_then(|items| items.get(cell_index).copied().flatten());
+            // 纵向合并的延续格内容为空，由上方起始格覆盖。
+            if cell.v_merge == ofdbox_folio_ir::VMerge::Continue {
+                x += width;
+                column += span;
+                continue;
+            }
             let outcome = self.layout_cell(
                 cell,
                 Frame {
@@ -1572,8 +1582,9 @@ impl<'a> Engine<'a> {
             );
             placed_any |= outcome.placed_any;
             max_bottom = max_bottom.max(outcome.bottom + padding_bottom);
-            continuation[column] = outcome.continuation;
+            continuation[cell_index] = outcome.continuation;
             x += width;
+            column += span;
         }
 
         self.frame = saved_frame;
@@ -1673,13 +1684,19 @@ impl<'a> Engine<'a> {
         let rows = table.rows.len();
         let columns = widths.len();
         let left = self.frame.left;
-        let cell_count = table.rows[index].cells.len().min(columns);
         let mut x = left;
-        for (column, width) in widths.iter().copied().take(cell_count).enumerate() {
+        let mut column = 0_usize;
+        for cell in &table.rows[index].cells {
+            let span = usize::try_from(cell.span.max(1)).unwrap_or(1);
+            let width: f64 = widths.iter().skip(column).take(span).sum();
+            if width <= 0.0 {
+                column += span;
+                continue;
+            }
             let is_first_row = index == 0;
             let is_last_row = index + 1 == rows;
             let is_first_column = column == 0;
-            let is_last_column = column + 1 == cell_count;
+            let is_last_column = column + span >= columns;
             let horizontal = if is_first_row || is_last_row {
                 table.borders.outer.or(table.borders.horizontal)
             } else {
@@ -1691,7 +1708,10 @@ impl<'a> Engine<'a> {
                 table.borders.vertical.or(table.borders.outer)
             };
             if let Some(border) = horizontal {
-                self.line(Point::new(x, top), Point::new(x + width, top), border);
+                // 纵向合并的延续格顶部被上方单元格盖住，不再画线。
+                if cell.v_merge != ofdbox_folio_ir::VMerge::Continue {
+                    self.line(Point::new(x, top), Point::new(x + width, top), border);
+                }
                 self.line(Point::new(x, bottom), Point::new(x + width, bottom), border);
             }
             if let Some(border) = vertical {
@@ -1703,6 +1723,7 @@ impl<'a> Engine<'a> {
                 );
             }
             x += width;
+            column += span;
         }
     }
 

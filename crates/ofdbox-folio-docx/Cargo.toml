@@ -13,6 +13,7 @@ categories = ["parser-implementations", "text-processing"]
 
 [dependencies]
 ofdbox-folio-ir.workspace = true
+png.workspace = true
 quick-xml.workspace = true
 zip.workspace = true
 thiserror.workspace = true

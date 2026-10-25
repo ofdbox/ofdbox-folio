@@ -231,6 +231,52 @@ fn cell(text: &str) -> Cell {
 }
 
 #[test]
+fn round_trips_merged_cells() {
+    let mut flow = FlowDocument::new(Metadata::default());
+    let mut table = Table::new(vec![
+        Column {
+            width: ColumnWidth::Weight(1),
+        },
+        Column {
+            width: ColumnWidth::Weight(1),
+        },
+    ]);
+    table.rows = vec![
+        Row::new(vec![cell("横跨两列").with_span(2)]),
+        Row::new(vec![
+            cell("纵向合并").with_v_merge(ofdbox_folio_ir::VMerge::Restart),
+            cell("普通"),
+        ]),
+        Row::new(vec![
+            Cell::new(Vec::new()).with_v_merge(ofdbox_folio_ir::VMerge::Continue),
+            cell("普通"),
+        ]),
+    ];
+    flow.push(Block::Table(table));
+
+    let back = read_back(&flow);
+    let table = back.sections[0]
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            Block::Table(table) => Some(table),
+            _ => None,
+        })
+        .expect("表格");
+    assert_eq!(table.rows.len(), 3);
+    assert_eq!(table.rows[0].cells.len(), 1, "横跨行只有一个单元格");
+    assert_eq!(table.rows[0].cells[0].span, 2);
+    assert_eq!(
+        table.rows[1].cells[0].v_merge,
+        ofdbox_folio_ir::VMerge::Restart
+    );
+    assert_eq!(
+        table.rows[2].cells[0].v_merge,
+        ofdbox_folio_ir::VMerge::Continue
+    );
+}
+
+#[test]
 fn weight_columns_get_real_widths() {
     let mut flow = FlowDocument::new(Metadata::default());
     let mut table = Table::new(vec![
@@ -458,6 +504,108 @@ fn round_trips_footnotes_links_and_toc() {
         .flat_map(|paragraph| paragraph.runs.iter())
         .any(|inline| matches!(inline, Inline::Link(_)));
     assert!(has_link, "应保留超链接");
+}
+
+/// 生成一张纯色 PNG。
+fn solid_png(width: u32, height: u32, pixel: [u8; 4]) -> Vec<u8> {
+    let mut pixels = Vec::new();
+    for _ in 0..(width * height) {
+        pixels.extend(pixel);
+    }
+    let mut png = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("header");
+        writer.write_image_data(&pixels).expect("data");
+    }
+    png
+}
+
+#[test]
+fn writes_masked_image_as_png_with_alpha() {
+    let mut flow = FlowDocument::new(Metadata::default());
+    let base_png = solid_png(2, 2, [200, 100, 50, 255]);
+    let mask_png = solid_png(2, 2, [0, 0, 0, 255]);
+    let mask = Arc::new(ImageAsset::new(
+        ImageFormat::Png,
+        Arc::from(mask_png.as_slice()),
+        2,
+        2,
+    ));
+    let id = flow.resources.add_image(
+        ImageAsset::new(ImageFormat::Png, Arc::from(base_png.as_slice()), 2, 2).with_mask(mask),
+    );
+    flow.push(Block::Image(ImageBlock::new(id)));
+
+    let bytes = write_flow(&flow, &DocxWriteOptions::default()).expect("write");
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).expect("zip");
+    let mut media = archive.by_name("word/media/image1.png").expect("媒体");
+    let mut png_bytes = Vec::new();
+    std::io::Read::read_to_end(&mut media, &mut png_bytes).expect("read");
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
+    decoder.set_transformations(png::Transformations::ALPHA);
+    let mut reader = decoder.read_info().expect("decode");
+    let mut buffer = vec![0; reader.output_buffer_size().unwrap_or(0).max(1)];
+    let info = reader.next_frame(&mut buffer).expect("frame");
+    assert_eq!(info.color_type, png::ColorType::Rgba);
+    // 黑蒙版把整张图压成全透明。
+    assert_eq!(buffer[3], 0, "蒙版应烘进 alpha");
+}
+
+#[test]
+fn reports_unsupported_mask_combination() {
+    let mut flow = FlowDocument::new(Metadata::default());
+    let mask_png = solid_png(2, 2, [255, 255, 255, 255]);
+    let mask = Arc::new(ImageAsset::new(
+        ImageFormat::Png,
+        Arc::from(mask_png.as_slice()),
+        2,
+        2,
+    ));
+    // JPEG 底图 + PNG 蒙版：无法烘进 alpha，应降级并记诊断。
+    let id = flow.resources.add_image(
+        ImageAsset::new(ImageFormat::Jpeg, Arc::from(&b"jpeg-bytes"[..]), 2, 2).with_mask(mask),
+    );
+    assert!(
+        flow.resources.image(id).expect("asset").mask.is_some(),
+        "蒙版应挂在资源上"
+    );
+    flow.push(Block::Image(ImageBlock::new(id)));
+
+    let (_, report) =
+        ofdbox_folio_docx::write_flow_with_report(&flow, &DocxWriteOptions::default())
+            .expect("write");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("蒙版")),
+        "报告: {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn round_trips_attachments() {
+    let mut flow = FlowDocument::new(Metadata::default());
+    flow.attachments.push(ofdbox_folio_ir::Attachment {
+        info: ofdbox_folio_ir::AttachmentInfo {
+            id: ofdbox_folio_ir::AttachmentId::new(1),
+            name: "说明.txt".to_owned(),
+            format: Some("text/plain".to_owned()),
+            size: 12,
+            created: None,
+        },
+        bytes: Arc::from(&b"attachment!"[..]),
+    });
+    flow.push(Block::Paragraph(paragraph("带附件")));
+
+    let back = read_back(&flow);
+    assert_eq!(back.attachments.len(), 1, "附件: {:?}", back.attachments);
+    assert_eq!(back.attachments[0].info.name, "说明.txt");
+    assert_eq!(&back.attachments[0].bytes[..], b"attachment!");
 }
 
 #[test]

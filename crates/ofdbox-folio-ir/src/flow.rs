@@ -760,13 +760,46 @@ impl Row {
 pub struct Cell {
     /// 单元格内容。
     pub blocks: Vec<Block>,
+    /// 横向合并的列数（gridSpan），至少 1。
+    pub span: u32,
+    /// 纵向合并状态（Merge）。
+    pub v_merge: VMerge,
 }
 
 impl Cell {
-    /// 创建单元格。
+    /// 创建普通单元格。
     pub fn new(blocks: Vec<Block>) -> Self {
-        Self { blocks }
+        Self {
+            blocks,
+            span: 1,
+            v_merge: VMerge::None,
+        }
     }
+
+    /// 设置横向合并列数。
+    pub fn with_span(mut self, span: u32) -> Self {
+        self.span = span.max(1);
+        self
+    }
+
+    /// 设置纵向合并状态。
+    pub fn with_v_merge(mut self, v_merge: VMerge) -> Self {
+        self.v_merge = v_merge;
+        self
+    }
+}
+
+/// 单元格的纵向合并状态。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum VMerge {
+    /// 不参与纵向合并。
+    #[default]
+    None,
+    /// 合并组的起始单元格（Merge restart），内容写在这里。
+    Restart,
+    /// 合并组的延续单元格（Merge continue），内容为空、由上方单元格覆盖。
+    Continue,
 }
 
 /// 边框线型。

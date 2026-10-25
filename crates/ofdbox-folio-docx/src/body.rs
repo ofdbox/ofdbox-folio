@@ -4,11 +4,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
-    Align, AnchorId, AssetId, Block, Cell, Column, ColumnWidth, Diagnostic, DiagnosticCode, Field,
-    FieldKind, FloatingObject, FlowDocument, HeaderFooter, ImageAsset, ImageBlock, Inline,
-    InlineImage, Link, LinkTarget, Metadata, Note, NoteKind, NoteRef, Paragraph, Point, Row,
-    Section, Table, TextRun, TextStyle, TocBlock, Twips, WrapMode, detect_image_format,
-    image_dimensions,
+    Align, AnchorId, AssetId, Attachment, AttachmentId, AttachmentInfo, Block, Cell, Column,
+    ColumnWidth, Diagnostic, DiagnosticCode, Field, FieldKind, FloatingObject, FlowDocument,
+    HeaderFooter, ImageAsset, ImageBlock, Inline, InlineImage, Link, LinkTarget, Metadata, Note,
+    NoteKind, NoteRef, Paragraph, Point, Row, Section, Table, TextRun, TextStyle, TocBlock, Twips,
+    VMerge, WrapMode, detect_image_format, image_dimensions,
 };
 
 use crate::DocxError;
@@ -133,6 +133,7 @@ impl<'a> Builder<'a> {
         self.fill_headers_footers()?;
         self.parse_notes(NoteKind::Footnote)?;
         self.parse_notes(NoteKind::Endnote)?;
+        self.parse_attachments()?;
         Ok(self.doc)
     }
 
@@ -498,6 +499,49 @@ impl<'a> Builder<'a> {
         }
         Ok(text)
     }
+    /// 读取附件：清单 word/attachments.xml + 原文件部件（本库约定）。
+    fn parse_attachments(&mut self) -> Result<(), DocxError> {
+        let Some(target) = target_by_kind(&self.relations, "urn:ofdbox:relationships/attachments")
+        else {
+            return Ok(());
+        };
+        let Some(text) = self.package.read_text(&target)? else {
+            return Ok(());
+        };
+        let mut reader = XmlReader::from_str(&text);
+        let mut index = 0_u64;
+        loop {
+            match reader.read_event().map_err(crate::xml::xml_error)? {
+                quick_xml::events::Event::Start(element)
+                | quick_xml::events::Event::Empty(element) => {
+                    if local_name(&element) != "item" {
+                        continue;
+                    }
+                    let Some(part) = attr(&element, "part") else {
+                        continue;
+                    };
+                    let name = attr(&element, "name").unwrap_or_default();
+                    let Some(bytes) = self.package.read(&part)? else {
+                        continue;
+                    };
+                    index += 1;
+                    self.doc.attachments.push(Attachment {
+                        info: AttachmentInfo {
+                            id: AttachmentId::new(index),
+                            name,
+                            format: None,
+                            size: bytes.len() as u64,
+                            created: None,
+                        },
+                        bytes: Arc::from(bytes.as_slice()),
+                    });
+                }
+                quick_xml::events::Event::Eof => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
 
     /// 读取 word/footnotes.xml 或 word/endnotes.xml 里的注释正文。
     fn parse_notes(&mut self, kind: NoteKind) -> Result<(), DocxError> {
@@ -816,15 +860,15 @@ impl<'a> Builder<'a> {
 
     fn parse_cell(&mut self, reader: &mut XmlReader<'_>) -> Result<Option<Cell>, DocxError> {
         let mut span = 1_u32;
-        let mut merged = false;
+        let mut v_merge = VMerge::None;
         let mut blocks = Vec::new();
         loop {
             match reader.read_event().map_err(crate::xml::xml_error)? {
                 quick_xml::events::Event::Start(element) => match local_name(&element).as_str() {
                     "tcPr" => {
-                        let (cell_span, cell_merged) = parse_cell_props(reader)?;
+                        let (cell_span, cell_merge) = parse_cell_props(reader)?;
                         span = cell_span;
-                        merged = cell_merged;
+                        v_merge = cell_merge;
                     }
                     "p" => {
                         let (mut produced, _) = self.parse_paragraph(reader)?;
@@ -852,11 +896,17 @@ impl<'a> Builder<'a> {
                 "合并单元格（gridSpan）暂不支持，按普通单元格处理",
             );
         }
-        if merged {
-            // 纵向合并的续格留空，保持列对齐。
-            return Ok(Some(Cell::new(Vec::new())));
+        if v_merge == VMerge::Continue {
+            // 纵向合并的续格留空，由上方起始单元格覆盖。
+            return Ok(Some(
+                Cell::new(Vec::new())
+                    .with_span(span)
+                    .with_v_merge(VMerge::Continue),
+            ));
         }
-        Ok(Some(Cell::new(blocks)))
+        Ok(Some(
+            Cell::new(blocks).with_span(span).with_v_merge(v_merge),
+        ))
     }
 
     // ---- 图片与浮动对象 ----
@@ -1256,9 +1306,9 @@ fn parse_row_props(reader: &mut XmlReader<'_>) -> Result<(bool, Option<Twips>), 
 }
 
 /// 单元格属性（`w:tcPr`）：返回 `(列跨度, 是否为纵向合并续格)`。
-fn parse_cell_props(reader: &mut XmlReader<'_>) -> Result<(u32, bool), DocxError> {
+fn parse_cell_props(reader: &mut XmlReader<'_>) -> Result<(u32, VMerge), DocxError> {
     let mut span = 1;
-    let mut merged = false;
+    let mut v_merge = VMerge::None;
     loop {
         match reader.read_event().map_err(crate::xml::xml_error)? {
             quick_xml::events::Event::Start(element) => skip_element(reader, &element)?,
@@ -1269,7 +1319,10 @@ fn parse_cell_props(reader: &mut XmlReader<'_>) -> Result<(u32, bool), DocxError
                     }
                 }
                 "vMerge" => {
-                    merged = attr(&element, "val").as_deref() != Some("restart");
+                    v_merge = match attr(&element, "val").as_deref() {
+                        Some("restart") => VMerge::Restart,
+                        _ => VMerge::Continue,
+                    };
                 }
                 _ => {}
             },
@@ -1278,7 +1331,7 @@ fn parse_cell_props(reader: &mut XmlReader<'_>) -> Result<(u32, bool), DocxError
             _ => {}
         }
     }
-    Ok((span, merged))
+    Ok((span, v_merge))
 }
 
 /// 从关系表里按类型后缀取目标部件。

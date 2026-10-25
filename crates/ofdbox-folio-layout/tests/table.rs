@@ -264,6 +264,56 @@ fn splits_a_row_taller_than_a_page_across_pages() {
 }
 
 #[test]
+fn merged_cell_spans_multiple_columns() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    // 两列各 40mm：跨两列的单元格可用宽度 80mm，短文字一行放得下；
+    // 单列宽度只有 40mm 时会折成两行。
+    let mut table = table(
+        vec![
+            Row::new(vec![
+                cell("跨列单元格里的文字刚好一行放得下就说明占满两列").with_span(2),
+            ]),
+            Row::new(vec![cell("左"), cell("右")]),
+        ],
+        0,
+    );
+    table.columns = vec![
+        ofdbox_folio_ir::Column {
+            width: ofdbox_folio_ir::ColumnWidth::Twips(Twips::from_mm(40.0)),
+        },
+        ofdbox_folio_ir::Column {
+            width: ofdbox_folio_ir::ColumnWidth::Twips(Twips::from_mm(40.0)),
+        },
+    ];
+    table.cell_padding = Margins::uniform(Twips::from_mm(1.0));
+    flow.push(Block::Table(table));
+
+    let fixed = layout_with(&flow, &mut fonts, LayoutOptions::default()).expect("layout");
+    let page = &fixed.pages[0];
+    let lines: Vec<String> = page
+        .text
+        .lines
+        .iter()
+        .map(|line| {
+            let start = line.items.start as usize;
+            let end = line.items.end as usize;
+            page.text.items[start..end]
+                .iter()
+                .map(|item| item.run.text.as_str())
+                .collect()
+        })
+        .collect();
+    let span_lines = lines
+        .iter()
+        .filter(|line| line.contains("跨列单元格"))
+        .count();
+    assert_eq!(span_lines, 1, "跨列单元格应一行排完: {lines:?}");
+}
+
+#[test]
 fn lays_out_header_and_footer_with_page_fields() {
     let Some(mut fonts) = fonts() else {
         return;

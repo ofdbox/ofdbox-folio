@@ -11,10 +11,10 @@ use std::io::{Cursor, Write};
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
-    Align, Block, Border, BorderStyle, Cell, ColumnWidth, Field, FieldKind, FlowDocument,
-    FontFamily, HeaderFooter, ImageFormat, Inline, LineSpacing, LinkTarget, Margins, Metadata,
-    NoteKind, PageSetup, ParaStyle, Paragraph, PositionFrom, Row, TabAlign, TabLeader,
-    TableBorders, TextStyle, TocBlock, Twips, WrapMode,
+    Align, Block, Border, BorderStyle, Cell, ColumnWidth, Diagnostic, DiagnosticCode, Field,
+    FieldKind, FlowDocument, FontFamily, HeaderFooter, ImageFormat, Inline, LineSpacing,
+    LinkTarget, Margins, Metadata, NoteKind, PageSetup, ParaStyle, Paragraph, PositionFrom, Report,
+    Row, TabAlign, TabLeader, TableBorders, TextStyle, TocBlock, Twips, WrapMode,
 };
 
 use crate::DocxError;
@@ -42,6 +42,14 @@ pub fn write_flow(
     document: &FlowDocument,
     options: &DocxWriteOptions,
 ) -> Result<Vec<u8>, DocxError> {
+    Ok(write_flow_with_report(document, options)?.0)
+}
+
+/// 写出 DOCX，并返回写出过程中的降级诊断（例如无法写入的图片蒙版）。
+pub fn write_flow_with_report(
+    document: &FlowDocument,
+    options: &DocxWriteOptions,
+) -> Result<(Vec<u8>, Report), DocxError> {
     Writer::new(document, options).run()
 }
 
@@ -91,6 +99,8 @@ struct Writer<'a> {
     next_anchor: u32,
     /// 当前分节的正文宽度（twips），表格权重列宽按它换算。
     content_width: i64,
+    /// 写出过程中的降级诊断。
+    report: Report,
 }
 
 impl<'a> Writer<'a> {
@@ -109,16 +119,19 @@ impl<'a> Writer<'a> {
             anchors: HashMap::new(),
             next_anchor: 1,
             content_width: 0,
+            report: Report::new(),
         }
     }
 
-    fn run(mut self) -> Result<Vec<u8>, DocxError> {
+    fn run(mut self) -> Result<(Vec<u8>, Report), DocxError> {
         if self.document.sections.is_empty() {
             return Err(DocxError::Structure("没有可分节的内容".to_owned()));
         }
         self.write_body();
         let notes = self.notes_xml()?;
-        self.package(notes)
+        let report = std::mem::take(&mut self.report);
+        let bytes = self.package(notes)?;
+        Ok((bytes, report))
     }
 
     // ---- 正文 ----
@@ -611,7 +624,16 @@ impl<'a> Writer<'a> {
     }
 
     fn cell_xml(&mut self, cell: &Cell, out: &mut String) {
-        out.push_str("<w:tc><w:tcPr/>");
+        out.push_str("<w:tc><w:tcPr>");
+        if cell.span > 1 {
+            out.push_str(&format!("<w:gridSpan w:val=\"{}\"/>", cell.span));
+        }
+        match cell.v_merge {
+            ofdbox_folio_ir::VMerge::Restart => out.push_str("<w:vMerge w:val=\"restart\"/>"),
+            ofdbox_folio_ir::VMerge::Continue => out.push_str("<w:vMerge/>"),
+            _ => {}
+        }
+        out.push_str("</w:tcPr>");
         let mut content = String::new();
         self.blocks_xml(&cell.blocks, &mut content);
         if content.is_empty()
@@ -626,8 +648,6 @@ impl<'a> Writer<'a> {
         out.push_str(&content);
         out.push_str("</w:tc>");
     }
-
-    // ---- 图片 ----
 
     /// 生成一个 `w:r`，内含行内或浮动图片。
     fn drawing_xml(
@@ -683,7 +703,20 @@ impl<'a> Writer<'a> {
             return Some((*rid, name, ""));
         }
         let image = self.document.resources.image(asset)?;
-        let extension = extension_of(image.format);
+        // 有蒙版时先尝试把透明度烘进 PNG；不支持的组合降级为底图并记诊断。
+        let (format, encoded) = match crate::image::composite_masked_png(image) {
+            Some(png) => (ImageFormat::Png, Arc::from(png.as_slice())),
+            None => {
+                if image.mask.is_some() {
+                    self.report.push(Diagnostic::warning(
+                        DiagnosticCode::Image,
+                        "图片蒙版无法写入 DOCX（只支持 PNG 底图 + PNG 蒙版），已写底图",
+                    ));
+                }
+                (image.format, Arc::clone(&image.encoded))
+            }
+        };
+        let extension = extension_of(format);
         let index = self.media.len() + 1;
         let path = format!("word/media/image{index}.{extension}");
         let rid = self.next_rel_id();
@@ -695,7 +728,7 @@ impl<'a> Writer<'a> {
             external: false,
         });
         let name = format!("image{index}.{extension}");
-        self.media.push((path.clone(), Arc::clone(&image.encoded)));
+        self.media.push((path.clone(), encoded));
         self.images.insert(asset.get(), (rid, path));
         Some((rid, name, extension))
     }
@@ -878,6 +911,42 @@ impl<'a> Writer<'a> {
             target: "styles.xml".to_owned(),
             external: false,
         });
+        // 附件：清单部件 + 原文件部件（DOCX 没有标准附件概念，这是本库的约定）。
+        let attachments: Vec<(String, String, Arc<[u8]>)> = self
+            .document
+            .attachments
+            .iter()
+            .enumerate()
+            .map(|(index, attachment)| {
+                let part = format!("word/attachments/{index}.bin");
+                let name = attachment.info.name.clone();
+                (part, name, Arc::clone(&attachment.bytes))
+            })
+            .collect();
+        let attachments_manifest = if attachments.is_empty() {
+            None
+        } else {
+            let mut manifest = String::from(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><attachments xmlns=\"urn:ofdbox:attachments\">",
+            );
+            for (part, name, bytes) in &attachments {
+                manifest.push_str(&format!(
+                    "<item part=\"{}\" name=\"{}\" size=\"{}\"/>",
+                    esc(part),
+                    esc(name),
+                    bytes.len()
+                ));
+            }
+            manifest.push_str("</attachments>");
+            let id = self.next_rel_id();
+            self.relationships.push(Relationship {
+                id,
+                kind: "urn:ofdbox:relationships/attachments".to_owned(),
+                target: "attachments.xml".to_owned(),
+                external: false,
+            });
+            Some(manifest)
+        };
         let mut rels = String::from(
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">",
         );
@@ -944,6 +1013,17 @@ impl<'a> Writer<'a> {
         for (path, bytes) in &self.media {
             write_entry(&mut zip, path, bytes, zip_options)?;
         }
+        if let Some(manifest) = &attachments_manifest {
+            write_entry(
+                &mut zip,
+                "word/attachments.xml",
+                manifest.as_bytes(),
+                zip_options,
+            )?;
+            for (part, _, bytes) in &attachments {
+                write_entry(&mut zip, part, bytes, zip_options)?;
+            }
+        }
         write_entry(&mut zip, "docProps/core.xml", core.as_bytes(), zip_options)?;
         write_entry(&mut zip, "docProps/app.xml", app.as_bytes(), zip_options)?;
         let cursor = zip
@@ -962,6 +1042,7 @@ impl<'a> Writer<'a> {
             ("jpg", "image/jpeg"),
             ("bmp", "image/bmp"),
             ("tiff", "image/tiff"),
+            ("bin", "application/octet-stream"),
         ] {
             xml.push_str(&format!(
                 "<Default Extension=\"{extension}\" ContentType=\"{mime}\"/>"
@@ -1006,6 +1087,11 @@ impl<'a> Writer<'a> {
         }
         if notes.1.is_some() {
             xml.push_str("<Override PartName=\"/word/endnotes.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml\"/>");
+        }
+        if !self.document.attachments.is_empty() {
+            xml.push_str(
+                "<Override PartName=\"/word/attachments.xml\" ContentType=\"application/vnd.ofdbox.attachments+xml\"/>",
+            );
         }
         xml.push_str("</Types>");
         xml
