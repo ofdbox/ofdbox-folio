@@ -25,7 +25,7 @@ missing_docs = "warn"
 
 [workspace.dependencies]
 thiserror = "2"
-ofdbox-core = "0.0.2"
+ofdbox-core = ">=0.0.1, <0.1"
 quick-xml = "0.42"
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 lopdf = { version = "0.45", features = ["wasm_js"] }
