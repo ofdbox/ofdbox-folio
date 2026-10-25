@@ -428,9 +428,7 @@ impl<'a> Engine<'a> {
         self.toc_entries = toc_entries;
         for section in &self.document.sections {
             self.begin_section(&section.setup, &section.headers, &section.footers);
-            for block in &section.blocks {
-                self.place_block(block);
-            }
+            self.place_blocks(&section.blocks);
             self.finish_page();
         }
         if self.fixed.pages.is_empty() {
@@ -849,6 +847,69 @@ impl<'a> Engine<'a> {
             Block::Toc(toc) => self.place_toc(toc),
             Block::Floating(floating) => self.place_floating(floating),
             _ => self.warn("未知块类型，已跳过"),
+        }
+    }
+
+    /// 顺序排一组块，处理 `keep_with_next`：标题不能孤零零留在页尾。
+    fn place_blocks(&mut self, blocks: &[Block]) {
+        let width = self.content_width();
+        for (index, block) in blocks.iter().enumerate() {
+            self.break_for_keep_with_next(blocks, index, width);
+            self.place_block(block);
+        }
+    }
+
+    /// 当前块带 `keep_with_next`（可连成链）且和下一块开头放不进本页时提前换栏/换页。
+    fn break_for_keep_with_next(&mut self, blocks: &[Block], index: usize, width: f64) {
+        if self.in_frame || !self.page_body {
+            return;
+        }
+        let mut needed = 0.0_f64;
+        let mut cursor = index;
+        while let Some(block) = blocks.get(cursor) {
+            let keep =
+                matches!(block, Block::Paragraph(paragraph) if paragraph.style.keep_with_next);
+            if !keep {
+                break;
+            }
+            needed += self.measure_blocks(std::slice::from_ref(block), width);
+            cursor += 1;
+        }
+        if cursor == index {
+            return;
+        }
+        let Some(next) = blocks.get(cursor) else {
+            return;
+        };
+        needed += self.block_leading_height(next, width);
+        let content = self.bottom() - self.frame.top;
+        if needed <= content && self.cursor + needed > self.bottom() + 1e-6 {
+            self.new_flow();
+        }
+    }
+
+    /// 一个块「开头」需要的高度：段落取首行，表格取表头加首行，其它取整块。
+    fn block_leading_height(&mut self, block: &Block, width: f64) -> f64 {
+        match block {
+            Block::Paragraph(paragraph) => {
+                let laid = self.lay_out_paragraph(paragraph, self.total_pages);
+                let Some(line) = laid.lines.first() else {
+                    return 0.0;
+                };
+                let size = self.max_size(&laid.pieces, line);
+                let image_height = line_image_height(&laid.pieces, line, &laid.images);
+                laid.style.space_before.to_mm().max(0.0)
+                    + self
+                        .line_height(&laid.style, &laid.pieces, line)
+                        .max(image_height + 0.2 * size)
+            }
+            Block::Table(table) => {
+                let mut head = table.clone();
+                let rows = usize::try_from(table.header_rows).unwrap_or(0).max(1);
+                head.rows.truncate(rows.min(table.rows.len()));
+                self.measure_blocks(&[Block::Table(head)], width)
+            }
+            _ => self.measure_blocks(std::slice::from_ref(block), width),
         }
     }
 
@@ -1674,32 +1735,90 @@ impl<'a> Engine<'a> {
         }
 
         let line_count = lines.len();
-        for (index, line) in lines.iter().enumerate() {
-            let size = self.max_size(&pieces, line);
-            // 行内图片底部贴基线，行盒必须按图片高度加高，否则图片会盖住上一行。
-            let image_height = line_image_height(&pieces, line, &images);
-            let height = self
-                .line_height(&style, &pieces, line)
-                .max(image_height + 0.2 * size);
-            if self.cursor + height > self.bottom() + 1e-6 && !self.in_frame && self.page_body {
+
+        // keep_lines_together：整段放不下就整段挪到下一栏/下一页。
+        if !self.in_frame && self.page_body && style.keep_lines_together && line_count > 0 {
+            let block = Block::Paragraph(paragraph.clone());
+            let total = self.measure_blocks(std::slice::from_ref(&block), self.content_width());
+            let content = self.bottom() - self.frame.top;
+            if total <= content && self.cursor + total > self.bottom() + 1e-6 {
                 self.new_flow();
             }
-            let baseline = self.cursor + (0.8 * size).max(image_height);
-            let first = index == 0;
-            self.emit_line(
-                &style,
-                &pieces,
-                line,
-                first,
-                index + 1 == line_count,
-                baseline,
-                &links,
-                &images,
-                inset_left,
-            );
-            self.cursor += height;
+        }
+
+        let mut index = 0_usize;
+        while index < line_count {
+            // 本页还能放下几行。
+            let fit = if self.in_frame {
+                line_count - index
+            } else {
+                self.lines_that_fit(&style, &pieces, &images, &lines, index, self.bottom())
+            };
+            if fit == 0 && !self.in_frame && self.page_body {
+                // 一行都放不下：换栏/换页后重算。
+                self.new_flow();
+                continue;
+            }
+            let mut take = fit.max(1);
+            let at_top = self.cursor <= self.frame.top + 0.01;
+            // 孤行：本页只放得下 1 行、后面还有内容，且不在页首 → 整段挪页。
+            if !self.in_frame && self.page_body && take == 1 && index + 1 < line_count && !at_top {
+                self.new_flow();
+                continue;
+            }
+            // 寡行：换页后只剩 1 行 → 本页少放一行，让下一页至少两行。
+            if !self.in_frame && self.page_body && take >= 2 && index + take + 1 == line_count {
+                take -= 1;
+            }
+            for offset in 0..take {
+                let line = &lines[index + offset];
+                let size = self.max_size(&pieces, line);
+                // 行内图片底部贴基线，行盒必须按图片高度加高，否则图片会盖住上一行。
+                let image_height = line_image_height(&pieces, line, &images);
+                let height = self
+                    .line_height(&style, &pieces, line)
+                    .max(image_height + 0.2 * size);
+                let baseline = self.cursor + (0.8 * size).max(image_height);
+                let first = index + offset == 0;
+                let last = index + offset + 1 == line_count;
+                self.emit_line(
+                    &style, &pieces, line, first, last, baseline, &links, &images, inset_left,
+                );
+                self.cursor += height;
+            }
+            index += take;
+            if index < line_count && !self.in_frame && self.page_body {
+                self.new_flow();
+            }
         }
         self.cursor += style.space_after.to_mm().max(0.0);
+    }
+
+    /// 从第 `start` 行起，当前框还能完整放下几行。
+    fn lines_that_fit(
+        &self,
+        style: &ParaStyle,
+        pieces: &[Piece],
+        images: &[MeasuredImage],
+        lines: &[LineSpan],
+        start: usize,
+        bottom: f64,
+    ) -> usize {
+        let mut y = self.cursor;
+        let mut count = 0;
+        for line in &lines[start..] {
+            let size = self.max_size(pieces, line);
+            let image_height = line_image_height(pieces, line, images);
+            let height = self
+                .line_height(style, pieces, line)
+                .max(image_height + 0.2 * size);
+            if y + height > bottom + 1e-6 {
+                break;
+            }
+            y += height;
+            count += 1;
+        }
+        count
     }
 
     /// 测量一个段落：样式、断行单元与行区间。
