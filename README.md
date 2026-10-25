@@ -98,6 +98,10 @@ OFD / PDF 读取 ──────┘
 - **自动目录**：`Block::Toc` 展开成「条目 + 制表符 + 页码」的段落，页码落在版心右边的右制表位上并带点线前导符；先空跑一遍取页码，再逐步代入直到稳定。
 - **样式**：命名样式沿 `based_on` 链继承，直接格式覆盖非默认字段。
 
+### 系统字体
+
+`ofdbox_folio::fonts::SystemFonts` 是唯一的「字体族名 → 本机字体文件」解析实现（候选表 + 缓存 + 结果稳定），示例与 CLI 共用；`used_fonts()` 返回实际命中的文件，CLI 的 `--report` 会写成 `FONT <族名> -> <文件>`。
+
 ### DOCX 读写
 
 `ofdbox_folio::docx::write_flow()` 把 Flow IR 写成 DOCX 包（`[Content_Types].xml`、`document.xml`、`styles.xml`、页眉页脚、`footnotes.xml`/`endnotes.xml`、`media/*`、`docProps`）：分节与页面设置（含分栏）、段落与字符格式、制表位与前导符、表格（边框/表头行/单元格内边距）、行内与浮动图片（`wp:inline`/`wp:anchor`）、页眉页脚、`PAGE`/`NUMPAGES` 域、超链接、脚注尾注引用、自动目录域、书签与大纲级别。固定 ZIP 时间戳，相同输入产生相同字节。

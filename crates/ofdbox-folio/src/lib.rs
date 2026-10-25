@@ -22,6 +22,9 @@ pub use reader::{CacheOptions, CacheStats, Document, OpenOptions, PageSelection,
 /// Flow IR、Fixed IR 与阅读器契约。
 pub use ofdbox_folio_ir as ir;
 
+/// 系统字体解析（族名 → 本机字体文件），示例与 CLI 共用。
+pub mod fonts;
+
 /// Flow IR 到 Fixed IR 的单向排版。
 #[cfg(feature = "layout")]
 pub use ofdbox_folio_layout as layout;
