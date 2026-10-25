@@ -393,6 +393,14 @@ fn reads_anchored_drawings_as_floating_objects() {
         floating.position.y
     );
     assert_eq!(floating.wrap, ofdbox_folio_ir::WrapMode::Square);
+    // positionH 是 column，positionV 是 paragraph。
+    assert_eq!(
+        floating.position_from,
+        (
+            ofdbox_folio_ir::PositionFrom::Column,
+            ofdbox_folio_ir::PositionFrom::Paragraph
+        )
+    );
     assert!(matches!(*floating.block, Block::Image(_)));
 }
 

@@ -209,11 +209,28 @@ pub enum WrapMode {
     Square,
 }
 
+/// 浮动对象位置的参考基准。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PositionFrom {
+    /// 相对页面左上角。
+    Page,
+    /// 相对版心（正文区域）左上角。
+    #[default]
+    Margin,
+    /// 相对当前栏左上角（单栏时等同版心）。
+    Column,
+    /// 相对锚定段落（排版时按版心处理，属于已知近似）。
+    Paragraph,
+}
+
 /// 一个浮动对象。
 #[derive(Clone, Debug, PartialEq)]
 pub struct FloatingObject {
-    /// 左上角位置，单位 twip，相对页面版心左上角。
+    /// 左上角位置，单位毫米。
     pub position: Point,
+    /// 水平/垂直位置的参考基准。
+    pub position_from: (PositionFrom, PositionFrom),
     /// 宽度；None 表示占满版心。
     pub width: Option<Twips>,
     /// 内容。
@@ -223,10 +240,11 @@ pub struct FloatingObject {
 }
 
 impl FloatingObject {
-    /// 创建浮动对象。
+    /// 创建浮动对象（位置相对版心左上角）。
     pub fn new(position: Point, block: Block) -> Self {
         Self {
             position,
+            position_from: (PositionFrom::Margin, PositionFrom::Margin),
             width: None,
             block: Box::new(block),
             wrap: WrapMode::None,

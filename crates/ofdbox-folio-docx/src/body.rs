@@ -873,14 +873,23 @@ impl<'a> Builder<'a> {
         // 当前在 positionH / positionV 里，用来区分两个方向的 posOffset。
         let mut horizontal = false;
         let mut vertical = false;
+        let mut from_h = ofdbox_folio_ir::PositionFrom::Margin;
+        let mut from_v = ofdbox_folio_ir::PositionFrom::Margin;
+
         let mut depth = 0_usize;
         loop {
             match reader.read_event().map_err(crate::xml::xml_error)? {
                 quick_xml::events::Event::Start(element) => {
                     match local_name(&element).as_str() {
                         "anchor" => anchor = true,
-                        "positionH" => horizontal = true,
-                        "positionV" => vertical = true,
+                        "positionH" => {
+                            horizontal = true;
+                            from_h = position_from(attr(&element, "relativeFrom").as_deref());
+                        }
+                        "positionV" => {
+                            vertical = true;
+                            from_v = position_from(attr(&element, "relativeFrom").as_deref());
+                        }
                         "wrapSquare" => wrap = WrapMode::Square,
                         "wrapTopAndBottom" => wrap = WrapMode::TopBottom,
                         "wrapNone" => wrap = WrapMode::None,
@@ -968,6 +977,7 @@ impl<'a> Builder<'a> {
             offset_y.map(|value| value / 36000.0).unwrap_or(0.0),
         );
         let mut object = FloatingObject::new(position, Block::Image(image));
+        object.position_from = (from_h, from_v);
         object.width = size.map(|(width, _)| width);
         object.wrap = wrap;
         Ok(Some(Drawing::Floating(object)))
@@ -1372,6 +1382,17 @@ fn find_element_text(text: &str, name: &str) -> Option<String> {
 }
 
 /// EMU（1/914400 英寸）换算成 twip。
+///
+/// `relativeFrom` 属性 → 位置基准。
+fn position_from(value: Option<&str>) -> ofdbox_folio_ir::PositionFrom {
+    match value.unwrap_or_default() {
+        "page" => ofdbox_folio_ir::PositionFrom::Page,
+        "column" => ofdbox_folio_ir::PositionFrom::Column,
+        "paragraph" => ofdbox_folio_ir::PositionFrom::Paragraph,
+        _ => ofdbox_folio_ir::PositionFrom::Margin,
+    }
+}
+
 fn emu_to_twips(emu: f64) -> Twips {
     Twips::new((emu / 635.0).round() as i64)
 }

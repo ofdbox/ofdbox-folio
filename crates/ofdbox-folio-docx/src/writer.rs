@@ -13,8 +13,8 @@ use std::sync::Arc;
 use ofdbox_folio_ir::{
     Align, Block, Border, BorderStyle, Cell, ColumnWidth, Field, FieldKind, FlowDocument,
     FontFamily, HeaderFooter, ImageFormat, Inline, LineSpacing, LinkTarget, Margins, Metadata,
-    NoteKind, PageSetup, ParaStyle, Paragraph, Row, TabAlign, TabLeader, TableBorders, TextStyle,
-    TocBlock, Twips, WrapMode,
+    NoteKind, PageSetup, ParaStyle, Paragraph, PositionFrom, Row, TabAlign, TabLeader,
+    TableBorders, TextStyle, TocBlock, Twips, WrapMode,
 };
 
 use crate::DocxError;
@@ -635,7 +635,7 @@ impl<'a> Writer<'a> {
         image: ofdbox_folio_ir::AssetId,
         size: Option<(Twips, Twips)>,
         alt: Option<&str>,
-        anchor: Option<(f64, f64, WrapMode)>,
+        anchor: Option<(f64, f64, WrapMode, (PositionFrom, PositionFrom))>,
     ) -> String {
         let Some((rid, name, extension)) = self.image_relationship(image) else {
             return String::new();
@@ -654,14 +654,16 @@ impl<'a> Writer<'a> {
                 "<w:drawing><wp:inline xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\"><wp:extent cx=\"{cx}\" cy=\"{cy}\"/><wp:docPr id=\"{doc_id}\" name=\"{}\" descr=\"{alt_text}\"/><wp:cNvGraphicFramePr><a:graphicFrameLocks xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" noChangeAspect=\"1\"/></wp:cNvGraphicFramePr>{picture}</wp:inline></w:drawing>",
                 esc(&name)
             ),
-            Some((x, y, wrap)) => {
+            Some((x, y, wrap, from)) => {
                 let wrap_xml = match wrap {
                     WrapMode::TopBottom => "<wp:wrapTopAndBottom/>".to_owned(),
                     WrapMode::Square => "<wp:wrapSquare wrapText=\"bothSides\"/>".to_owned(),
                     _ => "<wp:wrapNone/>".to_owned(),
                 };
+                let from_h = relative_from(from.0);
+                let from_v = relative_from(from.1);
                 format!(
-                    "<w:drawing><wp:anchor xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\" simplePos=\"0\" relativeHeight=\"{doc_id}\" behindDoc=\"1\" locked=\"0\" layoutInCell=\"1\" allowOverlap=\"1\"><wp:simplePos x=\"0\" y=\"0\"/><wp:positionH relativeFrom=\"column\"><wp:posOffset>{}</wp:posOffset></wp:positionH><wp:positionV relativeFrom=\"paragraph\"><wp:posOffset>{}</wp:posOffset></wp:positionV><wp:extent cx=\"{cx}\" cy=\"{cy}\"/>{wrap_xml}<wp:docPr id=\"{doc_id}\" name=\"{}\" descr=\"{alt_text}\"/><wp:cNvGraphicFramePr><a:graphicFrameLocks xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" noChangeAspect=\"1\"/></wp:cNvGraphicFramePr>{picture}</wp:anchor></w:drawing>",
+                    "<w:drawing><wp:anchor xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\" simplePos=\"0\" relativeHeight=\"{doc_id}\" behindDoc=\"1\" locked=\"0\" layoutInCell=\"1\" allowOverlap=\"1\"><wp:simplePos x=\"0\" y=\"0\"/><wp:positionH relativeFrom=\"{from_h}\"><wp:posOffset>{}</wp:posOffset></wp:positionH><wp:positionV relativeFrom=\"{from_v}\"><wp:posOffset>{}</wp:posOffset></wp:positionV><wp:extent cx=\"{cx}\" cy=\"{cy}\"/>{wrap_xml}<wp:docPr id=\"{doc_id}\" name=\"{}\" descr=\"{alt_text}\"/><wp:cNvGraphicFramePr><a:graphicFrameLocks xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" noChangeAspect=\"1\"/></wp:cNvGraphicFramePr>{picture}</wp:anchor></w:drawing>",
                     (x * 36000.0).round() as i64,
                     (y * 36000.0).round() as i64,
                     esc(&name)
@@ -735,7 +737,12 @@ impl<'a> Writer<'a> {
             image,
             size,
             alt,
-            Some((floating.position.x, floating.position.y, floating.wrap)),
+            Some((
+                floating.position.x,
+                floating.position.y,
+                floating.wrap,
+                floating.position_from,
+            )),
         );
         if run.is_empty() {
             return;
@@ -1178,6 +1185,16 @@ fn core_xml(metadata: &Metadata) -> String {
     }
     xml.push_str("</cp:coreProperties>");
     xml
+}
+
+/// `relativeFrom` 属性的取值。
+fn relative_from(value: PositionFrom) -> &'static str {
+    match value {
+        PositionFrom::Page => "page",
+        PositionFrom::Column => "column",
+        PositionFrom::Paragraph => "paragraph",
+        _ => "margin",
+    }
 }
 
 /// XML 转义。

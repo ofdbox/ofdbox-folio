@@ -1035,8 +1035,19 @@ impl<'a> Engine<'a> {
             .map(|width| width.to_mm())
             .unwrap_or(page.width)
             .clamp(1.0, page.width);
-        let x = (page.left + floating.position.x).clamp(page.left, page.left + page.width);
-        let y = (page.top + floating.position.y).max(page.top);
+        // 按参考基准换算左上角：page 相对页面原点，margin/column 相对版心，
+        // paragraph 暂按版心处理（已知近似）。
+        let (from_h, from_v) = floating.position_from;
+        let origin_x = match from_h {
+            ofdbox_folio_ir::PositionFrom::Page => 0.0,
+            _ => page.left,
+        };
+        let origin_y = match from_v {
+            ofdbox_folio_ir::PositionFrom::Page => 0.0,
+            _ => page.top,
+        };
+        let x = (origin_x + floating.position.x).clamp(0.0, page.left + page.width);
+        let y = (origin_y + floating.position.y).max(0.0);
         let saved = (self.frame, self.cursor, self.in_frame);
         self.in_frame = true;
         self.frame = Frame {
@@ -1756,6 +1767,19 @@ impl<'a> Engine<'a> {
 
         let line_count = lines.len();
 
+        // 四周型浮动对象：与对象垂直重叠的段落逐行重排（每行按当时的可用宽度断行）。
+        if !self.in_frame && line_count > 0 {
+            // 用整段估算高度探测：只要有一段落在绕排带里就改走逐行路径。
+            let first_size = self.max_size(&pieces, &lines[0]);
+            let estimate = line_count as f64 * (first_size * 1.2).max(1.0);
+            let (probe_left, probe_right) =
+                self.floating_insets(self.cursor, self.cursor + estimate);
+            if probe_left > 0.0 || probe_right > 0.0 {
+                self.place_paragraph_wrapped(&style, &pieces, &links, &images);
+                return;
+            }
+        }
+
         // keep_lines_together：整段放不下就整段挪到下一栏/下一页。
         if !self.in_frame && self.page_body && style.keep_lines_together && line_count > 0 {
             let block = Block::Paragraph(paragraph.clone());
@@ -1810,6 +1834,66 @@ impl<'a> Engine<'a> {
         self.cursor += style.space_after.to_mm().max(0.0);
     }
 
+    /// 逐行绕排：每行按当前 y 处的可用宽度重新断行，绕过四周型浮动对象。
+    fn place_paragraph_wrapped(
+        &mut self,
+        style: &ParaStyle,
+        pieces: &[Piece],
+        links: &[(usize, usize, LinkTarget)],
+        images: &[MeasuredImage],
+    ) {
+        let content = self.content_width();
+        let mut from = 0_usize;
+        let mut first = true;
+        let mut guard = 0_usize;
+        while from < pieces.len() {
+            guard += 1;
+            if guard > pieces.len() * 4 + 32 {
+                break;
+            }
+            // 用当前字号估算行高，决定这一行落在哪个绕排带里。
+            let estimate = self.max_size(
+                pieces,
+                &LineSpan {
+                    start: from,
+                    end: (from + 1).min(pieces.len()),
+                },
+            ) * 1.2;
+            let (left, right) = self.floating_insets(self.cursor, self.cursor + estimate);
+            let indent_left = style.left_indent.to_mm().max(0.0) + left;
+            let indent_right = style.right_indent.to_mm().max(0.0) + right;
+            let width = (content - indent_left - indent_right).max(1.0);
+            let first_indent = if first {
+                style.first_line_indent.to_mm()
+            } else {
+                0.0
+            };
+            let first_width = (width - first_indent).max(1.0);
+            let lines = linebreak::break_lines(&pieces[from..], first_width, width);
+            let Some(relative) = lines.first() else {
+                break;
+            };
+            let span = LineSpan {
+                start: from + relative.start,
+                end: from + relative.end,
+            };
+            let line_box = self.line_box(style, pieces, images, &span);
+            if self.cursor + line_box.height > self.bottom() + 1e-6 && self.page_body {
+                self.new_flow();
+                continue;
+            }
+            let baseline = self.cursor + line_box.ascent;
+            let last = span.end >= pieces.len();
+            self.emit_line(
+                style, pieces, &span, first, last, baseline, links, images, left,
+            );
+            self.cursor += line_box.height;
+            from = span.end;
+            first = false;
+        }
+        self.cursor += style.space_after.to_mm().max(0.0);
+    }
+
     /// 从第 `start` 行起，当前框还能完整放下几行。
     fn lines_that_fit(
         &self,
@@ -1843,10 +1927,9 @@ impl<'a> Engine<'a> {
         let page_number = self.page_number();
         let (pieces, links, images) = self.measure_paragraph(paragraph, page_number, total_pages);
         let content = self.content_width();
-        // 四周型浮动对象：与它垂直重叠的整段让到对象另一侧。
-        let (float_left, float_right) = self.floating_insets(self.cursor, self.cursor + content);
-        let indent_left = style.left_indent.to_mm().max(0.0) + float_left;
-        let indent_right = style.right_indent.to_mm().max(0.0) + float_right;
+        // 这里按整宽断行；与浮动对象重叠的段落由 place_paragraph_wrapped 逐行重排。
+        let indent_left = style.left_indent.to_mm().max(0.0);
+        let indent_right = style.right_indent.to_mm().max(0.0);
         let width = (content - indent_left - indent_right).max(1.0);
         let first_width = (width - style.first_line_indent.to_mm()).max(1.0);
         let lines = linebreak::break_lines(&pieces, first_width, width);
@@ -1856,7 +1939,7 @@ impl<'a> Engine<'a> {
             links,
             images,
             lines,
-            inset_left: float_left,
+            inset_left: 0.0,
         }
     }
 

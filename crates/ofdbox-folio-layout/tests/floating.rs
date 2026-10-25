@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use ofdbox_folio_ir::{
     Block, FloatingObject, FlowDocument, FontError, FontProvider, FontRequest, ImageAsset,
-    ImageBlock, ImageFormat, Metadata, Paragraph, Point, TextStyle, Twips, WrapMode,
+    ImageBlock, ImageFormat, Metadata, Paragraph, Point, PositionFrom, TextStyle, Twips, WrapMode,
 };
 use ofdbox_folio_layout::layout;
 
@@ -140,8 +140,8 @@ fn square_wrap_indents_paragraphs_beside_the_object() {
     };
     let mut flow = FlowDocument::new(Metadata::default());
     let image = image_block(&mut flow);
-    // 左半页的浮动图，四周型绕排。
-    let mut floating = FloatingObject::new(Point::new(10.0, 10.0), image);
+    // 左半页顶部的浮动图，四周型绕排：正文与它垂直重叠时要逐行让开。
+    let mut floating = FloatingObject::new(Point::new(10.0, 0.0), image);
     floating.width = Some(Twips::from_mm(25.0));
     floating.wrap = WrapMode::Square;
     flow.push(Block::Floating(Box::new(floating)));
@@ -162,6 +162,84 @@ fn square_wrap_indents_paragraphs_beside_the_object() {
         text_x >= image_x + image_w - 1.0,
         "正文应让到图片右侧: text_x={text_x} image_right={}",
         image_x + image_w
+    );
+}
+
+#[test]
+fn page_relative_position_ignores_margins() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    let mut image = image_block(&mut flow);
+    if let Block::Image(block) = &mut image {
+        block.size = Some((Twips::from_mm(20.0), Twips::from_mm(20.0)));
+    }
+    let mut floating = FloatingObject::new(Point::new(30.0, 40.0), image);
+    floating.width = Some(Twips::from_mm(20.0));
+    floating.position_from = (PositionFrom::Page, PositionFrom::Page);
+    flow.push(Block::Floating(Box::new(floating)));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let (x, y, _, _) = image_rect(&fixed.pages[0]);
+    // 相对页面左上角：不再叠加页边距。
+    assert!((x - 30.0).abs() < 0.5, "page 基准 x={x}");
+    assert!((y - 40.0).abs() < 0.5, "page 基准 y={y}");
+}
+
+#[test]
+fn square_wrap_releases_lines_below_the_object() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    let mut image = image_block(&mut flow);
+    if let Block::Image(block) = &mut image {
+        block.size = Some((Twips::from_mm(25.0), Twips::from_mm(20.0)));
+    }
+    let mut floating = FloatingObject::new(Point::new(10.0, 0.0), image);
+    floating.width = Some(Twips::from_mm(25.0));
+    floating.wrap = WrapMode::Square;
+    flow.push(Block::Floating(Box::new(floating)));
+
+    // 足够长的一段：前几行在绕排带里，后面的行应该回到左边距。
+    let text = (0..20)
+        .map(|index| format!("第{index}句用来占满多行以便观察逐行绕排。"))
+        .collect::<Vec<_>>()
+        .join("");
+    flow.push(Block::Paragraph(paragraph(&text)));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let page = &fixed.pages[0];
+    let (_, _, image_w, image_h) = image_rect(page);
+    let image_right = 25.4 + 10.0 + image_w;
+    let band_bottom = 25.4 + image_h;
+
+    let xs: Vec<(f64, f64)> = page
+        .text
+        .lines
+        .iter()
+        .map(|line| (line.bbox.x, line.bbox.y))
+        .collect();
+    let in_band: Vec<f64> = xs
+        .iter()
+        .filter(|(_, y)| *y < band_bottom - 1.0)
+        .map(|(x, _)| *x)
+        .collect();
+    let below_band: Vec<f64> = xs
+        .iter()
+        .filter(|(_, y)| *y > band_bottom + 1.0)
+        .map(|(x, _)| *x)
+        .collect();
+    assert!(!in_band.is_empty(), "应有行落在绕排带里");
+    assert!(
+        in_band.iter().all(|x| *x >= image_right - 1.0),
+        "带内的行应让到图片右侧: {in_band:?}"
+    );
+    assert!(!below_band.is_empty(), "应有行落在绕排带下方");
+    assert!(
+        below_band.iter().all(|x| (*x - 25.4).abs() < 1.0),
+        "带下方的行应回到左边距: {below_band:?}"
     );
 }
 

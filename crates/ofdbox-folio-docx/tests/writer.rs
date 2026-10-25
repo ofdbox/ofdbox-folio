@@ -308,6 +308,13 @@ fn round_trips_images_positions_and_floating_objects() {
         })
         .expect("浮动对象");
     assert_eq!(floating.wrap, WrapMode::Square);
+    assert_eq!(
+        floating.position_from,
+        (
+            ofdbox_folio_ir::PositionFrom::Margin,
+            ofdbox_folio_ir::PositionFrom::Margin
+        )
+    );
     assert!((floating.position.x - 30.0).abs() < 0.1);
     assert!((floating.position.y - 20.0).abs() < 0.1);
 }
