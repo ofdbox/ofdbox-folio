@@ -47,6 +47,12 @@ pub(crate) struct FontData {
     glyphs: HashMap<char, u32>,
     /// 字体里没有的字符。
     missing: HashSet<char>,
+    /// 上升高度（em）。
+    pub ascender: f64,
+    /// 下降高度（em，负数）。
+    pub descender: f64,
+    /// 行间距（em）。
+    pub line_gap: f64,
 }
 
 impl FontData {
@@ -69,12 +75,19 @@ impl FontData {
     pub fn is_missing(&self, ch: char) -> bool {
         self.missing.contains(&ch)
     }
+
+    /// 单倍行高的高度（em）：ascent - descent + lineGap。
+    pub fn line_height(&self) -> f64 {
+        (self.ascender - self.descender + self.line_gap).max(0.5)
+    }
 }
 
 /// 按家族名解析并缓存字体。
 #[derive(Default)]
 pub(crate) struct FontStore {
     fonts: HashMap<FontKey, Option<FontData>>,
+    /// 逐字形兜底字体：主字体缺字形时用它的字形。
+    fallback: Option<FontData>,
 }
 
 impl FontStore {
@@ -92,6 +105,24 @@ impl FontStore {
         let bytes = self.load(provider, key, fallbacks);
         let data = bytes.and_then(|bytes| Self::build(bytes, key, chars));
         self.fonts.insert(key.clone(), data);
+    }
+
+    /// 预解析兜底字体：用「不指定族名」的请求，交给提供者给一个通用字体。
+    pub fn prepare_fallback(&mut self, provider: &mut dyn FontProvider, chars: &HashSet<char>) {
+        if self.fallback.is_some() {
+            return;
+        }
+        let request = FontRequest::default();
+        let Ok(Some(bytes)) = provider.load(&request) else {
+            return;
+        };
+        let key = FontKey::new("", false, false);
+        self.fallback = Self::build(bytes, &key, chars);
+    }
+
+    /// 兜底字体。
+    pub fn fallback(&self) -> Option<&FontData> {
+        self.fallback.as_ref()
     }
 
     /// 取已解析字体。
@@ -135,9 +166,12 @@ impl FontStore {
     fn build(bytes: Arc<[u8]>, key: &FontKey, chars: &HashSet<char>) -> Option<FontData> {
         let index = FACE_INDEX;
         // `Face` 借用字体字节，先算完度量再移动 `bytes`。
-        let (advances, glyphs, missing) = {
+        let (advances, glyphs, missing, ascender, descender, line_gap) = {
             let face = Face::parse(&bytes, index).ok()?;
             let units = f64::from(face.units_per_em()).max(1.0);
+            let ascender = f64::from(face.ascender()) / units;
+            let descender = f64::from(face.descender()) / units;
+            let line_gap = f64::from(face.line_gap()) / units;
             let mut advances = HashMap::with_capacity(chars.len());
             let mut glyphs = HashMap::with_capacity(chars.len());
             let mut missing = HashSet::new();
@@ -156,7 +190,7 @@ impl FontStore {
                     }
                 }
             }
-            (advances, glyphs, missing)
+            (advances, glyphs, missing, ascender, descender, line_gap)
         };
         Some(FontData {
             bytes,
@@ -165,6 +199,9 @@ impl FontStore {
             advances,
             glyphs,
             missing,
+            ascender,
+            descender,
+            line_gap,
         })
     }
 }

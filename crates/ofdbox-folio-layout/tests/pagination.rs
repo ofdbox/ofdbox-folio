@@ -195,6 +195,28 @@ fn keep_with_next_chain_moves_together() {
 }
 
 #[test]
+fn measuring_for_keep_with_next_does_not_duplicate_headings() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    fill_page(&mut flow, 30, "填充");
+    let mut heading = paragraph("唯一标题");
+    heading.style.keep_with_next = true;
+    heading.heading_level = Some(1);
+    flow.push(Block::Paragraph(heading));
+    flow.push(Block::Paragraph(paragraph("标题后的正文")));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    assert_eq!(
+        fixed.outline.len(),
+        1,
+        "大纲不应重复登记: {:?}",
+        fixed.outline
+    );
+}
+
+#[test]
 fn single_page_document_is_unaffected() {
     let Some(mut fonts) = fonts() else {
         return;

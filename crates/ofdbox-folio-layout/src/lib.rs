@@ -514,6 +514,8 @@ impl<'a> Engine<'a> {
             let chain = fallbacks.get(&key.family).cloned().unwrap_or_default();
             self.fonts.prepare(provider, key, &chain, chars);
         }
+        // 逐字形兜底：主字体缺字时换到通用字体，避免中文整段变空白。
+        self.fonts.prepare_fallback(provider, &all_chars);
     }
 
     fn collect_chars(
@@ -561,6 +563,19 @@ impl<'a> Engine<'a> {
         let id = self.fixed.resources.add_font_asset(asset);
         let stored = self.fixed.resources.font(id)?.clone();
         self.font_assets.insert(key.clone(), Arc::clone(&stored));
+        Some(stored)
+    }
+
+    /// 兜底字体的资源（逐字形回退用），按固定 key 缓存。
+    fn fallback_asset(&mut self) -> Option<Arc<FontAsset>> {
+        let key = FontKey::new("", false, false);
+        if let Some(asset) = self.font_assets.get(&key) {
+            return Some(Arc::clone(asset));
+        }
+        let asset = self.fonts.fallback()?.asset();
+        let id = self.fixed.resources.add_font_asset(asset);
+        let stored = self.fixed.resources.font(id)?.clone();
+        self.font_assets.insert(key, Arc::clone(&stored));
         Some(stored)
     }
 
@@ -896,12 +911,8 @@ impl<'a> Engine<'a> {
                 let Some(line) = laid.lines.first() else {
                     return 0.0;
                 };
-                let size = self.max_size(&laid.pieces, line);
-                let image_height = line_image_height(&laid.pieces, line, &laid.images);
-                laid.style.space_before.to_mm().max(0.0)
-                    + self
-                        .line_height(&laid.style, &laid.pieces, line)
-                        .max(image_height + 0.2 * size)
+                let line_box = self.line_box(&laid.style, &laid.pieces, &laid.images, line);
+                laid.style.space_before.to_mm().max(0.0) + line_box.height
             }
             Block::Table(table) => {
                 let mut head = table.clone();
@@ -1350,6 +1361,11 @@ impl<'a> Engine<'a> {
     fn measure_blocks(&mut self, blocks: &[Block], width: f64) -> f64 {
         let saved_page = std::mem::take(&mut self.page);
         let saved = (self.frame, self.cursor, self.in_frame);
+        // 测量不能有副作用：大纲、脚注预留、浮动排除区都要还原。
+        let saved_headings = self.headings.len();
+        let saved_notes = self.page_notes.len();
+        let saved_inset = self.bottom_inset;
+        let saved_exclusions = self.float_exclusions.len();
         self.in_frame = true;
         self.frame = Frame {
             left: 0.0,
@@ -1366,6 +1382,10 @@ impl<'a> Engine<'a> {
         self.frame = saved.0;
         self.cursor = saved.1;
         self.in_frame = saved.2;
+        self.headings.truncate(saved_headings);
+        self.page_notes.truncate(saved_notes);
+        self.bottom_inset = saved_inset;
+        self.float_exclusions.truncate(saved_exclusions);
         height
     }
 
@@ -1772,19 +1792,15 @@ impl<'a> Engine<'a> {
             }
             for offset in 0..take {
                 let line = &lines[index + offset];
-                let size = self.max_size(&pieces, line);
-                // 行内图片底部贴基线，行盒必须按图片高度加高，否则图片会盖住上一行。
-                let image_height = line_image_height(&pieces, line, &images);
-                let height = self
-                    .line_height(&style, &pieces, line)
-                    .max(image_height + 0.2 * size);
-                let baseline = self.cursor + (0.8 * size).max(image_height);
+                // 行盒高度与基线都由字体度量决定，图片按高度撑高行盒。
+                let line_box = self.line_box(&style, &pieces, &images, line);
+                let baseline = self.cursor + line_box.ascent;
                 let first = index + offset == 0;
                 let last = index + offset + 1 == line_count;
                 self.emit_line(
                     &style, &pieces, line, first, last, baseline, &links, &images, inset_left,
                 );
-                self.cursor += height;
+                self.cursor += line_box.height;
             }
             index += take;
             if index < line_count && !self.in_frame && self.page_body {
@@ -1807,11 +1823,7 @@ impl<'a> Engine<'a> {
         let mut y = self.cursor;
         let mut count = 0;
         for line in &lines[start..] {
-            let size = self.max_size(pieces, line);
-            let image_height = line_image_height(pieces, line, images);
-            let height = self
-                .line_height(style, pieces, line)
-                .max(image_height + 0.2 * size);
+            let height = self.line_box(style, pieces, images, line).height;
             if y + height > bottom + 1e-6 {
                 break;
             }
@@ -1873,16 +1885,14 @@ impl<'a> Engine<'a> {
         let mut index = start_line;
         while index < line_count {
             let line = &lines[index];
-            let size = self.max_size(&pieces, line);
-            let image_height = line_image_height(&pieces, line, &images);
-            let height = self
-                .line_height(&style, &pieces, line)
-                .max(image_height + 0.2 * size);
+            // 行盒高度与基线都由字体度量决定，图片按高度撑高行盒。
+            let line_box = self.line_box(&style, &pieces, &images, line);
+            let height = line_box.height;
             let fits = self.cursor + height <= limit + 1e-6;
             if !fits && !(force && index == start_line) {
                 break;
             }
-            let baseline = self.cursor + (0.8 * size).max(image_height);
+            let baseline = self.cursor + line_box.ascent;
             self.emit_line(
                 &style,
                 &pieces,
@@ -1903,10 +1913,11 @@ impl<'a> Engine<'a> {
         (index, line_count)
     }
 
-    /// 一段的行高。
+    /// 一行的高度：单倍行高按字体 ascent/descent/lineGap 计算，倍数与固定行距在此基础上调整。
     fn line_height(&self, style: &ParaStyle, pieces: &[Piece], line: &LineSpan) -> f64 {
         let size = self.max_size(pieces, line);
-        let single = 1.2 * size;
+        let (_, height_em) = self.font_metrics(pieces, line);
+        let single = size * height_em;
         let base = match style.line_spacing {
             LineSpacing::Single => single,
             LineSpacing::Multiple(factor) if factor.is_finite() && factor > 0.0 => single * factor,
@@ -1916,6 +1927,47 @@ impl<'a> Engine<'a> {
             _ => single,
         };
         if base <= 0.0 { single } else { base }
+    }
+
+    /// 行内主字体的垂直度量：(ascent, 单倍行高)，单位 em。
+    fn font_metrics(&self, pieces: &[Piece], line: &LineSpan) -> (f64, f64) {
+        let mut best: Option<(f64, (f64, f64))> = None;
+        for piece in &pieces[line.start..line.end] {
+            let Some(style) = self.styles.get(piece.style) else {
+                continue;
+            };
+            let size = style.size.to_mm();
+            let key = FontKey::new(&style.family.name, style.bold, style.italic);
+            let metrics = match self.fonts.get(&key) {
+                Some(font) => (font.ascender.max(0.1), font.line_height()),
+                // 字体没解析出来时退回经验值，与旧行为一致。
+                None => (0.8, 1.2),
+            };
+            if best.is_none_or(|(best_size, _)| size > best_size) {
+                best = Some((size, metrics));
+            }
+        }
+        best.map(|(_, metrics)| metrics).unwrap_or((0.8, 1.2))
+    }
+
+    /// 一行的行盒高度与基线偏移（相对行盒顶部）。
+    fn line_box(
+        &self,
+        style: &ParaStyle,
+        pieces: &[Piece],
+        images: &[MeasuredImage],
+        line: &LineSpan,
+    ) -> LineBox {
+        let size = self.max_size(pieces, line);
+        let image_height = line_image_height(pieces, line, images);
+        let (ascent_em, _) = self.font_metrics(pieces, line);
+        let height = self
+            .line_height(style, pieces, line)
+            .max(image_height + 0.2 * size);
+        // 基线：文字按字体 ascent 下移，行内有图片时贴图片底部。
+        let ascent = (size * ascent_em).max(image_height);
+        let ascent = ascent.min((height - 0.1).max(0.0));
+        LineBox { height, ascent }
     }
 
     fn max_size(&self, pieces: &[Piece], line: &LineSpan) -> f64 {
@@ -2040,11 +2092,16 @@ impl<'a> Engine<'a> {
                 pieces.push(Piece::text('\t', 0.0, index));
                 continue;
             }
-            let (width, missing) = self
-                .fonts
-                .get(&key)
-                .map(|data| (data.advance(ch) * size, data.is_missing(ch)))
-                .unwrap_or((0.5 * size, true));
+            // 主字体缺字时用兜底字体的字形宽度；两者都缺才算缺字。
+            let (width, missing) = match self.fonts.get(&key) {
+                Some(data) if !data.is_missing(ch) => (data.advance(ch) * size, false),
+                _ => match self.fonts.fallback() {
+                    Some(fallback) if !fallback.is_missing(ch) => {
+                        (fallback.advance(ch) * size, false)
+                    }
+                    _ => (0.5 * size, true),
+                },
+            };
             if missing {
                 self.missing_chars += 1;
             }
@@ -2328,19 +2385,26 @@ impl<'a> Engine<'a> {
             return;
         };
         let key = FontKey::new(&style.family.name, style.bold, style.italic);
-        let Some(font) = self.font_asset(&key) else {
-            self.diagnostic(
-                DiagnosticCode::MissingFont,
-                format!("字体缺失，跳过字符 {:?} 的绘制", piece.ch),
-            );
+        // 主字体缺这个字形时换兜底字体：中英混排里英文样式排中文很常见。
+        let (use_fallback, glyph) = match self.fonts.get(&key) {
+            Some(data) if !data.is_missing(piece.ch) => (false, data.glyph(piece.ch)),
+            _ => match self.fonts.fallback() {
+                Some(fallback) if !fallback.is_missing(piece.ch) => {
+                    (true, fallback.glyph(piece.ch))
+                }
+                // 两者都没有这个字形：仍写 .notdef，保持文本层完整。
+                _ => (false, 0),
+            },
+        };
+        let asset = if use_fallback {
+            self.fallback_asset()
+        } else {
+            self.font_asset(&key)
+        };
+        let Some(font) = asset else {
             return;
         };
         let size = style.size.to_mm();
-        let glyph = self
-            .fonts
-            .get(&key)
-            .map(|data| data.glyph(piece.ch))
-            .unwrap_or(0);
         let run = Arc::new(ofdbox_folio_ir::GlyphRun::new(
             piece.ch.to_string(),
             vec![ofdbox_folio_ir::Glyph {
@@ -2674,6 +2738,14 @@ struct Frame {
     top: f64,
     /// 底边界，毫米。
     bottom: f64,
+}
+
+/// 一行的行盒。
+struct LineBox {
+    /// 行盒高度（毫米）。
+    height: f64,
+    /// 基线相对行盒顶部的偏移（毫米）。
+    ascent: f64,
 }
 
 /// 测量好的段落。
