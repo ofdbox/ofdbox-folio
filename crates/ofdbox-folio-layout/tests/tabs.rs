@@ -185,6 +185,71 @@ fn centre_and_decimal_tabs_align_as_expected() {
 }
 
 #[test]
+fn tab_stop_beyond_the_margin_is_clamped() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    // 制表位声明在页边距之外：内容必须被裁回正文右边缘，并记一条诊断。
+    flow.push(Block::Paragraph(tabbed(
+        "超长制表位",
+        "99",
+        TabStop::new(Twips::from_mm(400.0), TabAlign::Right, TabLeader::None),
+    )));
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let page = &fixed.pages[0];
+    let right = 25.4 + (210.0 - 25.4 * 2.0);
+    let edge = right_edge(page, "9");
+    assert!(
+        edge <= right + 0.2,
+        "内容右边界 {edge:.2} 应不越过正文右边缘 {right:.2}"
+    );
+    assert!(
+        fixed
+            .report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("制表位")),
+        "应有制表位诊断: {:?}",
+        fixed.report.diagnostics
+    );
+}
+
+#[test]
+fn tab_content_wider_than_the_gap_does_not_overlap() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    // 制表位很近、后面文字很长：右对齐会把起点推到 x 之前，必须退化成紧接排布。
+    flow.push(Block::Paragraph(tabbed(
+        "abc",
+        "0123456789",
+        TabStop::new(Twips::from_mm(10.0), TabAlign::Right, TabLeader::None),
+    )));
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let page = &fixed.pages[0];
+    let items = chars(page);
+    let mut previous_x = f64::MIN;
+    for (text, x) in &items {
+        assert!(
+            *x + 0.01 >= previous_x,
+            "字符 {text:?} 与前文重叠: x={x:.2} previous_x={previous_x:.2}"
+        );
+        previous_x = *x;
+    }
+    assert!(
+        fixed
+            .report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("制表位")),
+        "应有制表位诊断: {:?}",
+        fixed.report.diagnostics
+    );
+}
+
+#[test]
 fn dot_leader_fills_the_gap() {
     let Some(mut fonts) = fonts() else {
         return;

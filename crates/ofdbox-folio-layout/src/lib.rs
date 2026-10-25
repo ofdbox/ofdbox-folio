@@ -2292,6 +2292,8 @@ impl<'a> Engine<'a> {
         }
 
         let left = self.frame.left;
+        // 正文右边缘：制表位与后续内容都不能越过它。
+        let right = left + self.content_width();
         let default_step = DEFAULT_TAB_STEP;
         let stop = style
             .tabs
@@ -2300,7 +2302,7 @@ impl<'a> Engine<'a> {
             .min_by(|a, b| a.position.cmp(&b.position));
         let (target, align, leader) = match stop {
             Some(stop) => (
-                left + stop.position.to_mm().max(0.0),
+                (left + stop.position.to_mm().max(0.0)).min(right),
                 stop.align,
                 stop.leader,
             ),
@@ -2308,11 +2310,17 @@ impl<'a> Engine<'a> {
                 // 没有显式制表位：按默认步进推到下一个格点。
                 let offset = x - left;
                 let next = ((offset / default_step).floor() + 1.0) * default_step;
-                (left + next, TabAlign::Left, TabLeader::None)
+                ((left + next).min(right), TabAlign::Left, TabLeader::None)
             }
         };
 
-        let start = match align {
+        // 制表位声明在正文宽度之外：裁到右边缘并记诊断。
+        if let Some(stop) = stop
+            && stop.position.to_mm() > self.content_width() + 0.01
+        {
+            self.diagnostic(DiagnosticCode::Geometry, "制表位超出正文宽度，已裁到右边缘");
+        }
+        let mut start = match align {
             TabAlign::Left => target,
             TabAlign::Right => target - remaining,
             TabAlign::Center => target - remaining / 2.0,
@@ -2321,8 +2329,17 @@ impl<'a> Engine<'a> {
                 None => target - remaining,
             },
             _ => target,
+        };
+        // 制表位后面的内容放不进剩余空间：不再右对齐，紧接前文，避免重叠。
+        if start < x {
+            self.diagnostic(
+                DiagnosticCode::Geometry,
+                "制表位后的内容放不下，已紧接前文排布",
+            );
+            start = x;
         }
-        .max(x);
+        // 仍然越界（制表位声明在页边距之外）时裁到正文右边缘。
+        let start = start.min((right - remaining).max(x));
 
         if start > x + 0.4 {
             let color = self
