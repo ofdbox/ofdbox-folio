@@ -34,7 +34,41 @@ pub struct RasterTarget {
     data: Vec<u8>,
 }
 
+/// 页内区域光栅参数。
+///
+/// 显示核心把一页切成 tile 后，逐块调用 [`CpuRenderer::render_scene_region`]：
+/// `origin_px` 是这块 tile 左上角在“整页设备像素坐标”中的位置，`dpi` 是当前
+/// 渲染分辨率（通常为 96 × zoom × 设备像素比）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RenderRegion {
+    /// 区域左上角在整页设备像素坐标中的位置。
+    pub origin_px: (f64, f64),
+    /// 渲染 DPI。
+    pub dpi: f64,
+}
+
+impl RenderRegion {
+    /// 创建区域参数。
+    pub fn new(origin_px: (f64, f64), dpi: f64) -> Self {
+        Self { origin_px, dpi }
+    }
+}
+
 impl RasterTarget {
+    /// 按设备像素尺寸创建目标。
+    ///
+    /// 用于显示核心的 tile 光栅：尺寸由 tile 大小决定（通常 512×512），
+    /// 因此不会再乘 DPI。
+    pub fn from_pixels(width: u32, height: u32, dpi: f64) -> Result<Self, RenderError> {
+        if width == 0 || height == 0 {
+            return Err(RenderError::InvalidPage);
+        }
+        if width > u32::from(u16::MAX) || height > u32::from(u16::MAX) {
+            return Err(RenderError::Backend("目标尺寸超出 u16 范围".to_owned()));
+        }
+        Ok(Self::new(width as u16, height as u16, dpi))
+    }
+
     /// 创建指定像素尺寸的目标。
     pub fn new(width: u16, height: u16, dpi: f64) -> Self {
         Self {
@@ -206,6 +240,39 @@ impl CpuRenderer {
         scene: &Scene,
         target: &mut RasterTarget,
     ) -> Result<(), RenderError> {
+        let device = Matrix::scale(target.dpi / 25.4, target.dpi / 25.4);
+        self.render_scene_with(scene, target, device)
+    }
+
+    /// 把场景的指定区域渲染到目标。
+    ///
+    /// 目标只需要覆盖 `region` 这块区域；`origin_px` 用“整页设备像素坐标”表示，
+    /// 便于显示核心按 tile 局部刷新。
+    pub fn render_scene_region(
+        &mut self,
+        scene: &Scene,
+        target: &mut RasterTarget,
+        region: RenderRegion,
+    ) -> Result<(), RenderError> {
+        if !(region.dpi.is_finite() && region.dpi > 0.0)
+            || !(region.origin_px.0.is_finite() && region.origin_px.1.is_finite())
+        {
+            return Err(RenderError::InvalidPage);
+        }
+        let k = region.dpi / 25.4;
+        let device = Matrix::scale(k, k).then(Matrix::translate(
+            -region.origin_px.0,
+            -region.origin_px.1,
+        ));
+        self.render_scene_with(scene, target, device)
+    }
+
+    fn render_scene_with(
+        &mut self,
+        scene: &Scene,
+        target: &mut RasterTarget,
+        device: Matrix,
+    ) -> Result<(), RenderError> {
         let mut context = RenderContext::new(target.width, target.height);
         context.set_transform(Affine::IDENTITY);
         context.set_paint(color(self.options.background));
@@ -215,7 +282,6 @@ impl CpuRenderer {
             f64::from(target.width),
             f64::from(target.height),
         ));
-        let device = Matrix::scale(target.dpi / 25.4, target.dpi / 25.4);
         self.draw_group(&mut context, &scene.root, device)?;
         context.flush();
         let mut pixmap = Pixmap::new(target.width, target.height);
@@ -733,6 +799,72 @@ mod tests {
         let mut cache = PixmapCache::new(0);
         cache.insert(1, Arc::new(Pixmap::new(2, 2)));
         assert!(cache.get(1).is_none());
+    }
+
+    fn solid_rect_scene() -> Scene {
+        let mut path = Path::new();
+        path.move_to(Point::new(0.0, 0.0));
+        path.line_to(Point::new(10.0, 0.0));
+        path.line_to(Point::new(10.0, 10.0));
+        path.line_to(Point::new(0.0, 10.0));
+        path.close();
+        Scene {
+            size: Size::new(10.0, 10.0),
+            root: Group {
+                children: vec![Element::Path(PathElement {
+                    path: Arc::new(path),
+                    transform: Matrix::IDENTITY,
+                    fill: Some(Paint::Color(Rgba::from_rgb(255, 0, 0))),
+                    stroke: None,
+                    rule: FillRule::NonZero,
+                })],
+                ..Group::default()
+            },
+            diagnostics: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn renders_region_at_origin_offset() {
+        use super::RenderRegion;
+
+        // 整页 96 DPI 渲染（10mm → 38px），与区域（origin 8,8，10×10）逐像素一致。
+        let scene = solid_rect_scene();
+        let mut renderer = CpuRenderer::new(RenderOptions::default());
+        let mut full = RasterTarget::from_size(scene.size, 96.0).expect("full target");
+        renderer.render_scene(&scene, &mut full).expect("full render");
+
+        let mut tile = RasterTarget::from_pixels(10, 10, 96.0).expect("tile");
+        renderer
+            .render_scene_region(&scene, &mut tile, RenderRegion::new((8.0, 8.0), 96.0))
+            .expect("region render");
+
+        let full_width = usize::from(full.width());
+        for y in 0..10usize {
+            for x in 0..10usize {
+                let fi = ((y + 8) * full_width + (x + 8)) * 4;
+                let ti = (y * 10 + x) * 4;
+                assert_eq!(
+                    &full.data()[fi..fi + 4],
+                    &tile.data()[ti..ti + 4],
+                    "像素 ({x},{y}) 不一致"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn region_outside_page_is_background() {
+        use super::RenderRegion;
+
+        let scene = solid_rect_scene();
+        let mut renderer = CpuRenderer::new(RenderOptions::default());
+        // 页面右侧之外的区域只有白底。
+        let mut tile = RasterTarget::from_pixels(8, 8, 96.0).expect("tile");
+        renderer
+            .render_scene_region(&scene, &mut tile, RenderRegion::new((60.0, 60.0), 96.0))
+            .expect("region render");
+        assert_eq!(&tile.data()[..4], [255, 255, 255, 255]);
     }
 
     #[test]

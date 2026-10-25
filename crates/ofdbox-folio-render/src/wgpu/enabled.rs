@@ -55,6 +55,14 @@ impl WgpuContext {
         pollster::block_on(Self::new())
     }
 
+    /// 复用外部已经创建的设备与队列。
+    ///
+    /// 显示核心接在 UI 框架（如 dioxus-native/anyrender）上时，必须复用框架的
+    /// wgpu 设备，避免同进程创建第二个 GPU 上下文或无法共享纹理。
+    pub fn from_device_queue(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        Self { device, queue }
+    }
+
     /// 设备引用。
     pub fn device(&self) -> &wgpu::Device {
         &self.device
@@ -95,6 +103,45 @@ pub struct WgpuTarget {
 }
 
 impl WgpuTarget {
+    /// 按设备像素尺寸创建目标。
+    ///
+    /// 显示核心按 tile 光栅时使用：tile 尺寸固定为设备像素，不再由页面毫米尺寸换算。
+    pub fn from_pixels(
+        context: &WgpuContext,
+        width: u32,
+        height: u32,
+        dpi: f64,
+    ) -> Result<Self, RenderError> {
+        if width == 0 || height == 0 {
+            return Err(RenderError::InvalidPage);
+        }
+        let texture = context.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ofdbox-wgpu-tile"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Ok(Self {
+            texture,
+            view,
+            width,
+            height,
+            dpi,
+        })
+    }
+
     /// 按 Scene 尺寸创建离屏目标。
     pub fn new(context: &WgpuContext, size: Size, dpi: f64) -> Result<Self, RenderError> {
         let width = (size.width / 25.4 * dpi).ceil().max(1.0) as u32;
@@ -129,10 +176,14 @@ impl WgpuTarget {
     pub fn width(&self) -> u32 {
         self.width
     }
-
     /// 高度（像素）。
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    /// 目标纹理（可直接交给 UI 框架合成）。
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.texture
     }
 
     /// 读回 RGBA8 像素。
@@ -266,7 +317,31 @@ impl WgpuBackend {
 
     /// 渲染到离屏纹理。
     pub fn render_to_target(&self, scene: &Scene, target: &WgpuTarget) -> Result<(), RenderError> {
-        let (edges, paths) = collect_paths(scene, target.dpi);
+        self.render_to_target_with_offset(scene, target, (0.0, 0.0))
+    }
+
+    /// 把场景的指定区域渲染到离屏纹理。
+    ///
+    /// `origin_px` 是区域左上角在整页设备像素坐标中的位置，用于 tile 局部刷新。
+    pub fn render_region(
+        &self,
+        scene: &Scene,
+        target: &WgpuTarget,
+        origin_px: (f64, f64),
+    ) -> Result<(), RenderError> {
+        if !(origin_px.0.is_finite() && origin_px.1.is_finite()) {
+            return Err(RenderError::InvalidPage);
+        }
+        self.render_to_target_with_offset(scene, target, origin_px)
+    }
+
+    fn render_to_target_with_offset(
+        &self,
+        scene: &Scene,
+        target: &WgpuTarget,
+        origin_px: (f64, f64),
+    ) -> Result<(), RenderError> {
+        let (edges, paths) = collect_paths(scene, target.dpi, origin_px);
         if paths.is_empty() {
             return Ok(());
         }
@@ -413,7 +488,11 @@ fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-fn collect_paths(scene: &Scene, dpi: f64) -> (Vec<[f32; 4]>, Vec<DrawPath>) {
+fn collect_paths(
+    scene: &Scene,
+    dpi: f64,
+    origin_px: (f64, f64),
+) -> (Vec<[f32; 4]>, Vec<DrawPath>) {
     let scale = dpi / 25.4;
     let mut edges = Vec::new();
     let mut paths = Vec::new();
@@ -421,6 +500,7 @@ fn collect_paths(scene: &Scene, dpi: f64) -> (Vec<[f32; 4]>, Vec<DrawPath>) {
         &scene.root,
         Matrix::IDENTITY,
         scale,
+        origin_px,
         None,
         1.0,
         &mut edges,
@@ -433,6 +513,7 @@ fn collect_group(
     group: &Group,
     parent: Matrix,
     scale: f64,
+    origin_px: (f64, f64),
     inherited_clip: Option<(u32, u32, u32)>,
     inherited_opacity: f32,
     edges: &mut Vec<[f32; 4]>,
@@ -442,7 +523,7 @@ fn collect_group(
     let opacity = inherited_opacity * group.opacity.clamp(0.0, 1.0);
     let clip = if let Some(clip) = &group.clip {
         let start = u32::try_from(edges.len()).unwrap_or(u32::MAX);
-        flatten_path(&clip.path, transform, scale, edges);
+        flatten_path(&clip.path, transform, scale, origin_px, edges);
         let count = u32::try_from(edges.len()).unwrap_or(u32::MAX) - start;
         Some((start, count, u32::from(clip.rule == FillRule::EvenOdd)))
     } else {
@@ -450,12 +531,12 @@ fn collect_group(
     };
     for element in &group.children {
         match element {
-            Element::Group(child) => {
-                collect_group(child, transform, scale, clip, opacity, edges, paths)
-            }
+            Element::Group(child) => collect_group(
+                child, transform, scale, origin_px, clip, opacity, edges, paths,
+            ),
             Element::Path(path) => {
                 let start = u32::try_from(edges.len()).unwrap_or(u32::MAX);
-                flatten_path(&path.path, transform, scale, edges);
+                flatten_path(&path.path, transform, scale, origin_px, edges);
                 let count = u32::try_from(edges.len()).unwrap_or(u32::MAX) - start;
                 if count == 0 {
                     continue;
@@ -480,10 +561,10 @@ fn collect_group(
                                 scaled_color(start_color, opacity),
                                 scaled_color(end_color, opacity),
                                 [
-                                    (a.x * scale) as f32,
-                                    (a.y * scale) as f32,
-                                    (b.x * scale) as f32,
-                                    (b.y * scale) as f32,
+                                    (a.x * scale - origin_px.0) as f32,
+                                    (a.y * scale - origin_px.1) as f32,
+                                    (b.x * scale - origin_px.0) as f32,
+                                    (b.y * scale - origin_px.1) as f32,
                                 ],
                             )
                         }
@@ -560,7 +641,7 @@ fn collect_group(
                         .then(text.transform)
                         .then(transform);
                     let start = u32::try_from(edges.len()).unwrap_or(u32::MAX);
-                    flatten_path(&builder.path, glyph_transform, scale, edges);
+                    flatten_path(&builder.path, glyph_transform, scale, origin_px, edges);
                     let count = u32::try_from(edges.len()).unwrap_or(u32::MAX) - start;
                     if count == 0 {
                         continue;
@@ -601,17 +682,23 @@ fn scaled_color(color: Rgba, opacity: f32) -> [f32; 4] {
     value
 }
 
-fn flatten_path(path: &Path, transform: Matrix, scale: f64, edges: &mut Vec<[f32; 4]>) {
+fn flatten_path(
+    path: &Path,
+    transform: Matrix,
+    scale: f64,
+    origin_px: (f64, f64),
+    edges: &mut Vec<[f32; 4]>,
+) {
     let mut current = Point::default();
     let mut start = Point::default();
     let push = |edges: &mut Vec<[f32; 4]>, from: Point, to: Point| {
         let from = transform.apply(from);
         let to = transform.apply(to);
         edges.push([
-            (from.x * scale) as f32,
-            (from.y * scale) as f32,
-            (to.x * scale) as f32,
-            (to.y * scale) as f32,
+            (from.x * scale - origin_px.0) as f32,
+            (from.y * scale - origin_px.1) as f32,
+            (to.x * scale - origin_px.0) as f32,
+            (to.y * scale - origin_px.1) as f32,
         ]);
     };
     for segment in path.segments() {
