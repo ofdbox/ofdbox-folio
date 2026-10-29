@@ -1,12 +1,32 @@
 //! Fixed IR 到 OFD 包的写出。
 //!
-//! 当前覆盖路径、文本、图片和基础资源；组裁剪、透明度和渐变的完整语义
-//! 仍以 IR 为准，写出阶段暂做近似。输出使用固定时间戳和内容摘要 DocID，
-//! 保证相同输入产生相同字节。
+//! 页面、图元、资源和大纲先映射为 `ofdbox-core` 的结构化模型对象，再由 core
+//! 负责 XML 序列化和 ZIP 打包。输出 entry 布局保持稳定：
+//! `OFD.xml`、`Doc_0/Document.xml`、`Doc_0/Pages/Page_{n}/Content.xml`、
+//! `Doc_0/PublicRes.xml`（字体）、`Doc_0/DocumentRes.xml`（图片），字体和图片
+//! 分别落在 `Doc_0/Res/` 下。core 固定 ZIP 时间戳并按名字排序条目，因此相同
+//! 输入产生相同字节。
+//!
+//! 当前覆盖路径、文本、图片、基础资源和渐变；组裁剪、透明度按页面坐标近似写
+//! 出，与旧实现保持一致。
 
-use std::collections::HashMap;
-use std::io::{Cursor, Write};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+use ofdbox_core::model::definition::{
+    Action, ActionEvent, ActionKind, Actions, ColorArray, DeltaArray, Dest, DestType, Goto,
+    GotoKind, PageArea, StArray, StBox, StId, StLoc, StPos, StRefId,
+};
+use ofdbox_core::model::document::{OutlineElem, Outlines, PageEntry};
+use ofdbox_core::model::page::{
+    AxialShd, Cap, CgTransform, Clip, ClipArea, ClipContent, ClipPath, Clips, Color, ColorKind,
+    GraphicObject, GraphicUnit, ImageContent, ImageObject, Join, Layer, LayerType, MapType,
+    Page as OfdPage, PageContent, PathContent, PathObject, PathRule, RadialShd, ShdSegment,
+    TextCode, TextContent, TextObject,
+};
+use ofdbox_core::model::res::{Charset, Font, Fonts, MultiMedia, MultiMediaType, MultiMedias, Res};
+use ofdbox_core::model_xml;
+use ofdbox_core::store::{CreateOptions, ObjectContext, OfdFile, Storage, Stored};
 
 use ofdbox_folio_ir::{
     Destination, Element, FillRule, FixedDocument, FontAsset, Glyph, GradientExtend, Group,
@@ -27,7 +47,7 @@ pub struct OfdWriteOptions {
     pub creator: String,
     /// 固定文档 ID；不提供时由页面内容摘要生成。
     pub doc_id: Option<String>,
-    /// 固定 ZIP 时间戳，保证可复现输出。
+    /// 保留字段：core 打包时恒使用固定 ZIP 时间戳，该值不再影响输出。
     pub deterministic: bool,
 }
 
@@ -50,116 +70,124 @@ pub fn write_fixed(
         return Err(OfdError::InvalidStructure("没有可写出的页面".to_owned()));
     }
 
+    // 旧行为：文档公共区域和每页区域都取页面尺寸。
+    let first_size = page_size(&document.pages[0]);
+    let page_area = page_area_value(first_size);
+
     let mut state = State {
         next_id: 1,
         fonts: HashMap::new(),
         font_entries: Vec::new(),
         font_glyphs: HashMap::new(),
-        font_unmapped: std::collections::HashSet::new(),
+        font_unmapped: HashSet::new(),
         images: HashMap::new(),
         image_entries: Vec::new(),
     };
-    let mut pages = Vec::with_capacity(document.pages.len());
+
+    // 先构建全部页面模型：DocID 需要页面序列化结果，且核心建包要求先知道页区域。
+    let mut built_pages = Vec::with_capacity(document.pages.len());
     for page in &document.pages {
         let page_id = state.alloc();
         let layer_id = state.alloc();
         let size = page_size(page);
         let mut writer = PageWriter {
             state: &mut state,
-            content: String::new(),
+            objects: Vec::new(),
             page_width: size.width,
             page_height: size.height,
             clips: Vec::new(),
             opacity: 1.0,
         };
         writer.group(&page.content.root, Matrix::IDENTITY);
-        pages.push(PageXml {
+        let model = OfdPage {
+            templates: Vec::new(),
+            page_res: Vec::new(),
+            area: Some(page_area_value(size)),
+            content: Some(PageContent {
+                layers: vec![Layer {
+                    id: StId::new(layer_id),
+                    layer_type: LayerType::Body,
+                    draw_param: None,
+                    objects: writer.objects,
+                }],
+            }),
+            actions: None,
+        };
+        let bytes = model_xml::to_bytes(&model)
+            .map_err(|error| OfdError::InvalidStructure(format!("序列化页面失败: {error}")))?;
+        built_pages.push(BuiltPage {
             id: page_id,
-            width: size.width,
-            height: size.height,
-            content: page_xml(layer_id, size, &writer.content),
+            model,
+            bytes,
         });
     }
+    // 全局 ID 空间：页、图层、图元、字体和图片资源共用。
     let max_unit_id = state.next_id.saturating_sub(1);
-    let page_refs = pages
-        .iter()
-        .enumerate()
-        .map(|(index, page)| {
-            format!(
-                "<ofd:Page ID=\"{}\" BaseLoc=\"Pages/Page_{index}/Content.xml\"/>",
-                page.id
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("");
-    let outline = outline_xml(&document.outline, &pages);
-    let first = pages.first().expect("pages checked");
-    let mut resources = String::new();
-    if !state.font_entries.is_empty() {
-        resources.push_str("<ofd:PublicRes>PublicRes.xml</ofd:PublicRes>");
-    }
-    if !state.image_entries.is_empty() {
-        resources.push_str("<ofd:DocumentRes>DocumentRes.xml</ofd:DocumentRes>");
-    }
-    let document_xml = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ofd:Document xmlns:ofd=\"http://www.ofdspec.org/2016\"><ofd:CommonData><ofd:MaxUnitID>{max_unit_id}</ofd:MaxUnitID><ofd:PageArea><ofd:PhysicalBox>0 0 {} {}</ofd:PhysicalBox></ofd:PageArea>{resources}</ofd:CommonData><ofd:Pages>{page_refs}</ofd:Pages>{outline}</ofd:Document>",
-        number(first.width),
-        number(first.height)
-    );
+    let page_ids = built_pages.iter().map(|page| page.id).collect::<Vec<_>>();
     let doc_id = options
         .doc_id
         .clone()
-        .unwrap_or_else(|| content_id(&pages, &options.creator));
-    let ofd_xml = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ofd:OFD xmlns:ofd=\"http://www.ofdspec.org/2016\" Version=\"1.1\" DocType=\"OFD\"><ofd:DocBody><ofd:DocInfo><ofd:DocID>{doc_id}</ofd:DocID><ofd:Creator>{}</ofd:Creator></ofd:DocInfo><ofd:DocRoot>Doc_0/Document.xml</ofd:DocRoot></ofd:DocBody></ofd:OFD>",
-        xml_escape(&options.creator)
-    );
+        .unwrap_or_else(|| content_id(&options.creator, &built_pages));
 
-    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    let mut zip_options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
-    if options.deterministic {
-        zip_options = zip_options.last_modified_time(zip::DateTime::default());
+    let file = OfdFile::create_with(CreateOptions {
+        storage: Storage::Memory,
+        doc_id: Some(doc_id.clone()),
+        page_area: Some(page_area.clone()),
+    })?;
+
+    // OFD.xml：覆盖 core 默认的 1.0 版本和元数据。
+    let mut ofd = file.ofd()?;
+    ofd.data.version = "1.1".to_owned();
+    if let Some(body) = ofd.data.doc_bodies.first_mut() {
+        body.doc_info.doc_id = doc_id;
+        body.doc_info.creator = Some(options.creator.clone());
     }
-    write_entry(&mut zip, "OFD.xml", ofd_xml.as_bytes(), zip_options)?;
-    write_entry(
-        &mut zip,
-        "Doc_0/Document.xml",
-        document_xml.as_bytes(),
-        zip_options,
-    )?;
-    for (index, page) in pages.iter().enumerate() {
-        write_entry(
-            &mut zip,
-            &format!("Doc_0/Pages/Page_{index}/Content.xml"),
-            page.content.as_bytes(),
-            zip_options,
-        )?;
+    ofd.save()?;
+
+    let mut doc = file.document(0)?;
+    doc.data.common_data.max_unit_id = StId::new(max_unit_id);
+    doc.data.common_data.page_area = page_area;
+
+    // 手工登记页面：`add_page` 从 Page_1 起且页 ID 不可控，这里保持 Page_0 起。
+    for (index, page) in built_pages.into_iter().enumerate() {
+        let BuiltPage { id, model, .. } = page;
+        let base_loc = StLoc::new(format!("Pages/Page_{index}/Content.xml"));
+        let location = doc.context().resolve(&base_loc)?;
+        let page_context = ObjectContext::child(doc.context(), location.clone())?;
+        Stored::new(model, page_context, location).save()?;
+        doc.data.pages.pages.push(PageEntry {
+            id: id.to_string(),
+            base_loc,
+        });
     }
+
+    // 字体：PublicRes.xml + Res/Font_{id}.{ext}。
     if !state.font_entries.is_empty() {
-        let mut xml = String::from(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ofd:Res xmlns:ofd=\"http://www.ofdspec.org/2016\" BaseLoc=\"Res\"><ofd:Fonts>",
-        );
-        for font in &state.font_entries {
-            xml.push_str(&format!(
-                "<ofd:Font ID=\"{}\" FontName=\"{}\"",
-                font.id,
-                xml_escape(&font.name)
-            ));
-            if let Some(family) = &font.family {
-                xml.push_str(&format!(" FamilyName=\"{}\"", xml_escape(family)));
-            }
-            xml.push_str(" Charset=\"unicode\">");
-            if !font.bytes.is_empty() {
-                xml.push_str(&format!(
-                    "<ofd:FontFile>{}</ofd:FontFile>",
-                    xml_escape(&font.file)
-                ));
-            }
-            xml.push_str("</ofd:Font>");
-        }
-        xml.push_str("</ofd:Fonts></ofd:Res>");
-        write_entry(&mut zip, "Doc_0/PublicRes.xml", xml.as_bytes(), zip_options)?;
+        let fonts = state
+            .font_entries
+            .iter()
+            .map(|font| Font {
+                id: StId::new(font.id),
+                font_name: font.name.clone(),
+                family_name: font.family.clone(),
+                charset: Charset::Unicode,
+                italic: false,
+                bold: false,
+                serif: false,
+                fixed_width: false,
+                font_file: (!font.bytes.is_empty()).then(|| StLoc::new(font.file.clone())),
+            })
+            .collect::<Vec<_>>();
+        save_res(
+            &doc,
+            "PublicRes.xml",
+            Res {
+                base_loc: StLoc::new("Res"),
+                fonts: Some(Fonts { fonts }),
+                ..Default::default()
+            },
+        )?;
+        doc.data.common_data.public_res = vec![StLoc::new("PublicRes.xml")];
         for font in &state.font_entries {
             if font.bytes.is_empty() {
                 continue;
@@ -183,53 +211,54 @@ pub fn write_fixed(
                 .as_deref()
                 .or(face.as_deref())
                 .unwrap_or(font.bytes.as_ref());
-            write_entry(
-                &mut zip,
-                &format!("Doc_0/Res/{}", font.file),
-                bytes,
-                zip_options,
-            )?;
+            let location = doc
+                .context()
+                .resolve(&StLoc::new(format!("Res/{}", font.file)))?;
+            doc.context().write_entry(&location, bytes.to_vec())?;
         }
     }
+
+    // 图片：DocumentRes.xml + Res/Image_{id}.{ext}。
     if !state.image_entries.is_empty() {
-        let mut xml = String::from(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ofd:Res xmlns:ofd=\"http://www.ofdspec.org/2016\" BaseLoc=\"Res\"><ofd:MultiMedias>",
-        );
-        for image in &state.image_entries {
-            xml.push_str(&format!(
-                "<ofd:MultiMedia ID=\"{}\" Type=\"Image\" Format=\"{}\"><ofd:MediaFile>{}</ofd:MediaFile></ofd:MultiMedia>",
-                image.id,
-                image_format_name(image.format),
-                xml_escape(&image.file)
-            ));
-        }
-        xml.push_str("</ofd:MultiMedias></ofd:Res>");
-        write_entry(
-            &mut zip,
-            "Doc_0/DocumentRes.xml",
-            xml.as_bytes(),
-            zip_options,
+        let multi_medias = state
+            .image_entries
+            .iter()
+            .map(|image| MultiMedia {
+                id: StId::new(image.id),
+                media_type: MultiMediaType::Image,
+                format: Some(image_format_name(image.format).to_owned()),
+                media_file: StLoc::new(image.file.clone()),
+            })
+            .collect::<Vec<_>>();
+        save_res(
+            &doc,
+            "DocumentRes.xml",
+            Res {
+                base_loc: StLoc::new("Res"),
+                multi_medias: Some(MultiMedias { multi_medias }),
+                ..Default::default()
+            },
         )?;
+        doc.data.common_data.document_res = vec![StLoc::new("DocumentRes.xml")];
         for image in &state.image_entries {
-            write_entry(
-                &mut zip,
-                &format!("Doc_0/Res/{}", image.file),
-                &image.bytes,
-                zip_options,
-            )?;
+            let location = doc
+                .context()
+                .resolve(&StLoc::new(format!("Res/{}", image.file)))?;
+            doc.context().write_entry(&location, image.bytes.to_vec())?;
         }
     }
-    let cursor = zip
-        .finish()
-        .map_err(|error| OfdError::Io(std::io::Error::other(error)))?;
-    Ok(cursor.into_inner())
+
+    doc.data.outlines = build_outlines(&document.outline, &page_ids);
+    doc.save()?;
+
+    Ok(file.to_bytes()?)
 }
 
-struct PageXml {
+/// 已构建的页面：模型、序列化字节和页面 ID。
+struct BuiltPage {
     id: u32,
-    width: f64,
-    height: f64,
-    content: String,
+    model: OfdPage,
+    bytes: Vec<u8>,
 }
 
 struct State {
@@ -237,9 +266,9 @@ struct State {
     fonts: HashMap<u64, u32>,
     font_entries: Vec<FontEntry>,
     /// 每个字体用到的字形 ID，写出时据此子集化。
-    font_glyphs: HashMap<u32, std::collections::HashSet<u16>>,
+    font_glyphs: HashMap<u32, HashSet<u16>>,
     /// 只给了 `TextCode` 没给字形 ID 的字体：无法确定用字，必须整份嵌入。
-    font_unmapped: std::collections::HashSet<u32>,
+    font_unmapped: HashSet<u32>,
     images: HashMap<u64, u32>,
     image_entries: Vec<ImageEntry>,
 }
@@ -275,7 +304,7 @@ struct ClipSpec {
 
 struct PageWriter<'a> {
     state: &'a mut State,
-    content: String,
+    objects: Vec<GraphicObject>,
     page_width: f64,
     page_height: f64,
     clips: Vec<ClipSpec>,
@@ -309,25 +338,48 @@ impl PageWriter<'_> {
         }
     }
 
+    /// 图元公共属性：页面边界、CTM 和当前裁剪。
+    fn common(&self, transform: Matrix) -> GraphicUnit {
+        GraphicUnit {
+            boundary: StBox::new(0.0, 0.0, self.page_width, self.page_height),
+            ctm: Some(matrix_array(transform)),
+            clips: self.clips_value(),
+            ..Default::default()
+        }
+    }
+
     /// OFD 的裁剪区域位于对象空间，不随对象 CTM 缩放；写出时直接给页面坐标。
-    fn clips_xml(&self) -> String {
+    fn clips_value(&self) -> Option<Clips> {
         if self.clips.is_empty() {
-            return String::new();
+            return None;
         }
-        let mut xml = String::from("<ofd:Clips>");
-        for clip in &self.clips {
-            let path = transform_path(&clip.path, clip.world);
-            let boundary = path
-                .bounds()
-                .unwrap_or_else(|| Rect::new(0.0, 0.0, self.page_width, self.page_height));
-            xml.push_str(&format!(
-                "<ofd:Clip><ofd:Area><ofd:Path Boundary=\"{}\"><ofd:AbbreviatedData>{}</ofd:AbbreviatedData></ofd:Path></ofd:Area></ofd:Clip>",
-                box_text(boundary),
-                path_data(&path)
-            ));
-        }
-        xml.push_str("</ofd:Clips>");
-        xml
+        let clips = self
+            .clips
+            .iter()
+            .map(|clip| {
+                let path = transform_path(&clip.path, clip.world);
+                let boundary = path
+                    .bounds()
+                    .unwrap_or_else(|| Rect::new(0.0, 0.0, self.page_width, self.page_height));
+                Clip {
+                    areas: vec![ClipArea {
+                        draw_param: None,
+                        ctm: None,
+                        content: ClipContent::Path(ClipPath {
+                            content: PathContent {
+                                graphic: GraphicUnit {
+                                    boundary: st_box(boundary),
+                                    ..Default::default()
+                                },
+                                abbreviated_data: path_data(&path),
+                                ..Default::default()
+                            },
+                        }),
+                    }],
+                }
+            })
+            .collect();
+        Some(Clips { clips })
     }
 
     fn path(&mut self, element: &PathElement, parent: Matrix) {
@@ -335,30 +387,33 @@ impl PageWriter<'_> {
             return;
         }
         let transform = element.transform.then(parent);
-        let boundary = Rect::new(0.0, 0.0, self.page_width, self.page_height);
         let id = self.state.alloc();
-        let mut attributes = format!(
-            "ID=\"{id}\" Boundary=\"{}\" CTM=\"{}\" Fill=\"{}\" Stroke=\"{}\"",
-            box_text(boundary),
-            matrix_text(transform),
-            element.fill.is_some(),
-            element.stroke.is_some()
-        );
-        if element.rule == FillRule::EvenOdd {
-            attributes.push_str(" Rule=\"EvenOdd\"");
-        }
-        let mut colors = self.clips_xml();
+        let mut common = self.common(transform);
+        let mut stroke_color = None;
+        let mut fill_color = None;
         if let Some(fill) = &element.fill {
-            colors.push_str(&color_element("FillColor", fill, self.opacity));
+            fill_color = Some(color_value(fill, self.opacity));
         }
         if let Some(stroke) = &element.stroke {
-            colors.push_str(&color_element("StrokeColor", &stroke.paint, self.opacity));
-            attributes.push_str(&stroke_attributes(&stroke.style));
+            stroke_color = Some(color_value(&stroke.paint, self.opacity));
+            apply_stroke(&mut common, &stroke.style);
         }
-        self.content.push_str(&format!(
-            "<ofd:PathObject {attributes}>{colors}<ofd:AbbreviatedData>{}</ofd:AbbreviatedData></ofd:PathObject>",
-            path_data(&element.path)
-        ));
+        self.objects.push(GraphicObject::Path(PathObject {
+            id: StId::new(id),
+            content: PathContent {
+                graphic: common,
+                stroke_color,
+                fill_color,
+                abbreviated_data: path_data(&element.path),
+                stroke: element.stroke.is_some(),
+                fill: element.fill.is_some(),
+                rule: if element.rule == FillRule::EvenOdd {
+                    PathRule::EvenOdd
+                } else {
+                    PathRule::NonZero
+                },
+            },
+        }));
     }
 
     fn text(&mut self, element: &TextElement, parent: Matrix) {
@@ -381,24 +436,18 @@ impl PageWriter<'_> {
             );
         }
         let transform = element.transform.then(parent);
-        let boundary = Rect::new(0.0, 0.0, self.page_width, self.page_height);
         let id = self.state.alloc();
-        let mut attributes = format!(
-            "ID=\"{id}\" Boundary=\"{}\" CTM=\"{}\" Font=\"{font_id}\" Size=\"{}\" Fill=\"{}\" Stroke=\"{}\"",
-            box_text(boundary),
-            matrix_text(transform),
-            number(element.font_size),
-            element.fill.is_some(),
-            element.stroke.is_some()
-        );
-        let mut body = self.clips_xml();
+        let mut common = self.common(transform);
+        let mut stroke_color = None;
+        let mut fill_color = None;
         if let Some(fill) = &element.fill {
-            body.push_str(&color_element("FillColor", fill, self.opacity));
+            fill_color = Some(color_value(fill, self.opacity));
         }
         if let Some(stroke) = &element.stroke {
-            body.push_str(&color_element("StrokeColor", &stroke.paint, self.opacity));
-            attributes.push_str(&stroke_attributes(&stroke.style));
+            stroke_color = Some(color_value(&stroke.paint, self.opacity));
+            apply_stroke(&mut common, &stroke.style);
         }
+        let mut cg_transforms = Vec::new();
         if !run.glyphs.is_empty() {
             let glyphs = run
                 .glyphs
@@ -406,37 +455,43 @@ impl PageWriter<'_> {
                 .map(|glyph| glyph.id.to_string())
                 .collect::<Vec<_>>()
                 .join(" ");
-            body.push_str(&format!(
-                "<ofd:CGTransform CodePosition=\"0\" CodeCount=\"{}\" GlyphCount=\"{}\"><ofd:Glyphs>{glyphs}</ofd:Glyphs></ofd:CGTransform>",
-                run.char_count(),
-                run.glyphs.len()
-            ));
+            cg_transforms.push(CgTransform {
+                code_position: 0,
+                code_count: i32::try_from(run.char_count()).unwrap_or(i32::MAX),
+                glyph_count: i32::try_from(run.glyphs.len()).unwrap_or(i32::MAX),
+                glyphs: Some(glyphs),
+            });
         }
-        let first = run.glyphs.first().copied().unwrap_or(Glyph {
-            id: 0,
-            x: 0.0,
-            y: 0.0,
-            advance: 0.0,
-        });
+        let first = run.glyphs.first().copied().unwrap_or_default();
         // 直接用相邻字形的局部坐标差还原步进，避免字体度量或 HScale 引入偏差；
         // DeltaX/DeltaY 是“本字形之后”的偏移，最后一个字形补 0。
         let deltas_x = position_deltas(&run.glyphs, |glyph| glyph.x);
         let deltas_y = position_deltas(&run.glyphs, |glyph| glyph.y);
-        body.push_str(&format!(
-            "<ofd:TextCode X=\"{}\" Y=\"{}\"",
-            number(first.x),
-            number(first.y)
-        ));
-        if !deltas_x.is_empty() {
-            body.push_str(&format!(" DeltaX=\"{}\"", joined_deltas(&deltas_x)));
-        }
-        if deltas_y.iter().any(|delta| delta.abs() > 1e-6) {
-            body.push_str(&format!(" DeltaY=\"{}\"", joined_deltas(&deltas_y)));
-        }
-        body.push_str(&format!(">{}</ofd:TextCode>", xml_escape(&run.text)));
-        self.content.push_str(&format!(
-            "<ofd:TextObject {attributes}>{body}</ofd:TextObject>"
-        ));
+        let text_code = TextCode {
+            x: Some(first.x),
+            y: Some(first.y),
+            delta_x: Some(DeltaArray::new(deltas_x)),
+            delta_y: deltas_y
+                .iter()
+                .any(|delta| delta.abs() > 1e-6)
+                .then(|| DeltaArray::new(deltas_y)),
+            text: run.text.clone(),
+        };
+        self.objects.push(GraphicObject::Text(TextObject {
+            id: StId::new(id),
+            content: TextContent {
+                graphic: common,
+                font: StRefId::new(font_id),
+                size: element.font_size,
+                stroke: element.stroke.is_some(),
+                fill: element.fill.is_some(),
+                fill_color,
+                stroke_color,
+                cg_transforms,
+                text_codes: vec![text_code],
+                ..Default::default()
+            },
+        }));
     }
 
     fn image(&mut self, element: &ImageElement, parent: Matrix) {
@@ -457,23 +512,19 @@ impl PageWriter<'_> {
             .then(translate)
             .then(element.transform)
             .then(parent);
-        let boundary = Rect::new(0.0, 0.0, self.page_width, self.page_height);
-        let mut attributes = format!(
-            " ID=\"{id}\" Boundary=\"{}\" CTM=\"{}\" ResourceID=\"{resource}\"",
-            box_text(boundary),
-            matrix_text(ctm)
-        );
-        if let Some(mask) = mask {
-            attributes.push_str(&format!(" ImageMask=\"{mask}\""));
-        }
         let alpha = (element.alpha.clamp(0.0, 1.0) * self.opacity).clamp(0.0, 1.0);
-        if alpha < 1.0 {
-            attributes.push_str(&format!(" Alpha=\"{}\"", (alpha * 255.0).round() as u8));
-        }
-        self.content.push_str(&format!(
-            "<ofd:ImageObject{attributes}>{}</ofd:ImageObject>",
-            self.clips_xml()
-        ));
+        let mut common = self.common(ctm);
+        common.alpha = (alpha * 255.0).round().clamp(0.0, 255.0) as i32;
+        self.objects.push(GraphicObject::Image(ImageObject {
+            id: StId::new(id),
+            content: ImageContent {
+                graphic: common,
+                resource_id: StRefId::new(resource),
+                substitution: None,
+                image_mask: mask.map(StRefId::new),
+                border: None,
+            },
+        }));
     }
 
     fn font(&mut self, font: &Arc<FontAsset>) -> u32 {
@@ -532,49 +583,81 @@ impl PageWriter<'_> {
     }
 }
 
-/// 生成 `<ofd:Outlines>` 片段；没有大纲时返回空串。
-fn outline_xml(items: &[OutlineItem], pages: &[PageXml]) -> String {
-    if items.is_empty() {
-        return String::new();
-    }
-    let mut xml = String::from("<ofd:Outlines>");
-    push_outline(&mut xml, items, pages, 0);
-    xml.push_str("</ofd:Outlines>");
-    xml
+/// 通过文档上下文写出 `PublicRes.xml` / `DocumentRes.xml`。
+fn save_res(
+    doc: &Stored<ofdbox_core::model::document::Document>,
+    name: &str,
+    res: Res,
+) -> Result<(), OfdError> {
+    let location = doc.context().resolve(&StLoc::new(name))?;
+    let context = ObjectContext::child(doc.context(), location.clone())?;
+    Stored::new(res, context, location).save()?;
+    Ok(())
 }
 
-fn push_outline(xml: &mut String, items: &[OutlineItem], pages: &[PageXml], depth: usize) {
+/// 生成 `Outlines`；没有大纲时返回 `None`，序列化后不产生节点。
+fn build_outlines(items: &[OutlineItem], page_ids: &[u32]) -> Option<Outlines> {
+    if items.is_empty() {
+        return None;
+    }
+    let first_page = page_ids.first().copied().unwrap_or(1);
+    Some(Outlines {
+        outline_elems: push_outline(items, page_ids, first_page, 0),
+    })
+}
+
+fn push_outline(
+    items: &[OutlineItem],
+    page_ids: &[u32],
+    first_page: u32,
+    depth: usize,
+) -> Vec<OutlineElem> {
     if depth >= MAX_OUTLINE_DEPTH {
-        return;
+        return Vec::new();
     }
-    let first_page = pages.first().map(|page| page.id).unwrap_or(1);
-    for item in items {
-        xml.push_str("<ofd:OutlineElem Title=\"");
-        xml.push_str(&xml_escape(&item.title));
-        xml.push_str("\">");
-        let page_id = pages
-            .get(item.destination.page)
-            .map(|page| page.id)
-            .unwrap_or(first_page);
-        xml.push_str("<ofd:Actions><ofd:Action><ofd:Goto>");
-        xml.push_str(&dest_xml(page_id, item.destination));
-        xml.push_str("</ofd:Goto></ofd:Action></ofd:Actions>");
-        push_outline(xml, &item.children, pages, depth + 1);
-        xml.push_str("</ofd:OutlineElem>");
-    }
+    items
+        .iter()
+        .map(|item| {
+            let page_id = page_ids
+                .get(item.destination.page)
+                .copied()
+                .unwrap_or(first_page);
+            OutlineElem {
+                title: item.title.clone(),
+                count: None,
+                expanded: true,
+                actions: Some(Actions {
+                    actions: vec![Action {
+                        event: ActionEvent::Do,
+                        region: None,
+                        kind: ActionKind::Goto(Goto {
+                            kind: GotoKind::Dest(dest_value(page_id, item.destination)),
+                        }),
+                    }],
+                }),
+                children: push_outline(&item.children, page_ids, first_page, depth + 1),
+            }
+        })
+        .collect()
 }
 
 /// 目标区域：整页用 `Fit`，带坐标用 `XYZ`。
-fn dest_xml(page_id: u32, destination: Destination) -> String {
+fn dest_value(page_id: u32, destination: Destination) -> Dest {
     let Point { x, y } = destination.point;
     if x.abs() < 1e-6 && y.abs() < 1e-6 {
-        format!("<ofd:Dest Type=\"Fit\" PageID=\"{page_id}\"/>")
+        Dest {
+            dest_type: DestType::Fit,
+            page_id: StRefId::new(page_id),
+            ..Default::default()
+        }
     } else {
-        format!(
-            "<ofd:Dest Type=\"XYZ\" PageID=\"{page_id}\" Left=\"{}\" Top=\"{}\"/>",
-            number(x),
-            number(y)
-        )
+        Dest {
+            dest_type: DestType::Xyz,
+            page_id: StRefId::new(page_id),
+            left: Some(x),
+            top: Some(y),
+            ..Default::default()
+        }
     }
 }
 
@@ -587,12 +670,47 @@ fn page_size(page: &Page) -> ofdbox_folio_ir::Size {
     }
 }
 
-fn page_xml(layer_id: u32, size: ofdbox_folio_ir::Size, content: &str) -> String {
-    format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ofd:Page xmlns:ofd=\"http://www.ofdspec.org/2016\"><ofd:Area><ofd:PhysicalBox>0 0 {} {}</ofd:PhysicalBox></ofd:Area><ofd:Content><ofd:Layer ID=\"{layer_id}\">{content}</ofd:Layer></ofd:Content></ofd:Page>",
-        number(size.width),
-        number(size.height)
-    )
+fn page_area_value(size: ofdbox_folio_ir::Size) -> PageArea {
+    PageArea {
+        physical_box: StBox::new(0.0, 0.0, size.width, size.height),
+        ..Default::default()
+    }
+}
+
+fn st_box(rect: Rect) -> StBox {
+    StBox::new(rect.x, rect.y, rect.width, rect.height)
+}
+
+fn matrix_array(matrix: Matrix) -> StArray {
+    StArray::new(vec![
+        matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f,
+    ])
+}
+
+fn st_pos(point: Point) -> StPos {
+    StPos {
+        x: point.x,
+        y: point.y,
+    }
+}
+
+fn apply_stroke(common: &mut GraphicUnit, style: &StrokeStyle) {
+    common.line_width = style.width;
+    common.cap = match style.cap {
+        LineCap::Butt => Cap::Butt,
+        LineCap::Round => Cap::Round,
+        LineCap::Square => Cap::Square,
+    };
+    common.join = match style.join {
+        LineJoin::Miter => Join::Miter,
+        LineJoin::Round => Join::Round,
+        LineJoin::Bevel => Join::Bevel,
+    };
+    common.miter_limit = style.miter_limit;
+    if !style.dash.is_empty() {
+        common.dash_pattern = Some(StArray::new(style.dash.clone()));
+        common.dash_offset = style.dash_offset;
+    }
 }
 
 fn path_data(path: &Path) -> String {
@@ -651,13 +769,13 @@ fn path_data(path: &Path) -> String {
     output.trim_end().to_owned()
 }
 
-fn color_element(name: &str, paint: &Paint, opacity: f32) -> String {
+/// IR 画笔映射为 OFD 颜色；纯色和轴向/径向渐变都落到 `Color`。
+fn color_value(paint: &Paint, opacity: f32) -> Color {
     match paint {
-        Paint::Color(color) => solid_color(name, *color, opacity),
+        Paint::Color(color) => solid_color(*color, opacity),
         Paint::LinearGradient(gradient) => {
             if gradient.stops.len() < 2 {
                 return solid_color(
-                    name,
                     gradient
                         .stops
                         .first()
@@ -665,27 +783,23 @@ fn color_element(name: &str, paint: &Paint, opacity: f32) -> String {
                     opacity,
                 );
             }
-            let mut attributes = format!(
-                " StartPoint=\"{}\" EndPoint=\"{}\" {}",
-                point_text(gradient.start),
-                point_text(gradient.end),
-                map_type(gradient.extend)
-            );
-            if gradient.extend != GradientExtend::Pad {
-                attributes.push_str(&format!(
-                    " MapUnit=\"{}\"",
-                    number(distance(gradient.start, gradient.end))
-                ));
+            let (map_type, map_unit, extend) =
+                gradient_map(gradient.extend, distance(gradient.start, gradient.end));
+            Color {
+                kind: ColorKind::AxialShd(AxialShd {
+                    segments: shd_segments(&gradient.stops, opacity),
+                    map_type,
+                    map_unit,
+                    extend,
+                    start_point: st_pos(gradient.start),
+                    end_point: st_pos(gradient.end),
+                }),
+                ..Default::default()
             }
-            format!(
-                "<ofd:{name}><ofd:AxialShd{attributes}>{}</ofd:AxialShd></ofd:{name}>",
-                segments_xml(&gradient.stops, opacity)
-            )
         }
         Paint::RadialGradient(gradient) => {
             if gradient.stops.len() < 2 {
                 return solid_color(
-                    name,
                     gradient
                         .stops
                         .first()
@@ -693,83 +807,72 @@ fn color_element(name: &str, paint: &Paint, opacity: f32) -> String {
                     opacity,
                 );
             }
-            let mut attributes = format!(
-                " StartPoint=\"{}\" EndPoint=\"{}\" StartRadius=\"{}\" EndRadius=\"{}\"",
-                point_text(gradient.start_center),
-                point_text(gradient.end_center),
-                number(gradient.start_radius),
-                number(gradient.end_radius)
+            let (map_type, map_unit, extend) = gradient_map(
+                gradient.extend,
+                distance(gradient.start_center, gradient.end_center),
             );
-            if gradient.eccentricity.abs() > f64::EPSILON {
-                attributes.push_str(&format!(
-                    " Eccentricity=\"{}\"",
-                    number(gradient.eccentricity)
-                ));
+            Color {
+                kind: ColorKind::RadialShd(RadialShd {
+                    segments: shd_segments(&gradient.stops, opacity),
+                    map_type,
+                    map_unit,
+                    eccentricity: gradient.eccentricity,
+                    angle: gradient.angle,
+                    start_point: st_pos(gradient.start_center),
+                    start_radius: gradient.start_radius,
+                    end_point: st_pos(gradient.end_center),
+                    end_radius: gradient.end_radius,
+                    extend,
+                }),
+                ..Default::default()
             }
-            if gradient.angle.abs() > f64::EPSILON {
-                attributes.push_str(&format!(" Angle=\"{}\"", number(gradient.angle)));
-            }
-            attributes.push_str(&format!(" {}", map_type(gradient.extend)));
-            if gradient.extend != GradientExtend::Pad {
-                attributes.push_str(&format!(
-                    " MapUnit=\"{}\"",
-                    number(distance(gradient.start_center, gradient.end_center))
-                ));
-            }
-            format!(
-                "<ofd:{name}><ofd:RadialShd{attributes}>{}</ofd:RadialShd></ofd:{name}>",
-                segments_xml(&gradient.stops, opacity)
-            )
         }
-        _ => solid_color(name, Rgba::BLACK, opacity),
+        _ => solid_color(Rgba::BLACK, opacity),
     }
 }
 
-fn solid_color(name: &str, color: Rgba, opacity: f32) -> String {
-    let alpha = (f32::from(color.a) * opacity).round().clamp(0.0, 255.0) as u8;
-    let mut xml = format!("<ofd:{name} Value=\"{}\"", color_text(color));
-    if alpha < 255 {
-        xml.push_str(&format!(" Alpha=\"{alpha}\""));
+fn solid_color(color: Rgba, opacity: f32) -> Color {
+    Color {
+        // core 的 ColorArray 用 u32 分量，兼容灰度/CMYK 等超过 255 的通道值。
+        value: Some(ColorArray::new(vec![
+            u32::from(color.r),
+            u32::from(color.g),
+            u32::from(color.b),
+        ])),
+        alpha: color_alpha(color.a, opacity),
+        ..Default::default()
     }
-    xml.push_str("/>");
-    xml
 }
 
-fn segments_xml(stops: &[ofdbox_folio_ir::GradientStop], opacity: f32) -> String {
+fn color_alpha(alpha: u8, opacity: f32) -> i32 {
+    (f32::from(alpha) * opacity).round().clamp(0.0, 255.0) as i32
+}
+
+fn shd_segments(stops: &[ofdbox_folio_ir::GradientStop], opacity: f32) -> Vec<ShdSegment> {
     stops
         .iter()
-        .map(|stop| {
-            let alpha = (f32::from(stop.color.a) * opacity)
-                .round()
-                .clamp(0.0, 255.0) as u8;
-            let mut color = format!("<ofd:Color Value=\"{}\"", color_text(stop.color));
-            if alpha < 255 {
-                color.push_str(&format!(" Alpha=\"{alpha}\""));
-            }
-            color.push_str("/>");
-            format!(
-                "<ofd:Segment Position=\"{}\">{color}</ofd:Segment>",
-                number(stop.offset.clamp(0.0, 1.0))
-            )
+        .map(|stop| ShdSegment {
+            position: Some(stop.offset.clamp(0.0, 1.0)),
+            color: solid_color(stop.color, opacity),
         })
         .collect()
 }
 
-fn map_type(extend: GradientExtend) -> String {
-    // Direct 渐变下 Extend 控制两侧是否延伸；Pad 等价于两侧都延伸。
-    let name = match extend {
-        GradientExtend::Pad => "Direct\" Extend=\"3",
-        GradientExtend::Repeat => "Repeat",
-        GradientExtend::Reflect => "Reflect",
+/// Direct 渐变下 Extend 控制两侧是否延伸；Pad 等价于两侧都延伸。
+fn gradient_map(extend: GradientExtend, map_unit: f64) -> (MapType, Option<f64>, i32) {
+    let map_type = match extend {
+        GradientExtend::Pad => MapType::Direct,
+        GradientExtend::Repeat => MapType::Repeat,
+        GradientExtend::Reflect => MapType::Reflect,
     };
-    format!("MapType=\"{name}\"")
+    if extend == GradientExtend::Pad {
+        (map_type, None, 3)
+    } else {
+        (map_type, Some(map_unit), 0)
+    }
 }
 
-fn point_text(point: ofdbox_folio_ir::Point) -> String {
-    format!("{} {}", number(point.x), number(point.y))
-}
-
-fn distance(a: ofdbox_folio_ir::Point, b: ofdbox_folio_ir::Point) -> f64 {
+fn distance(a: Point, b: Point) -> f64 {
     (b.x - a.x).hypot(b.y - a.y)
 }
 
@@ -780,14 +883,6 @@ fn position_deltas(glyphs: &[Glyph], position: impl Fn(&Glyph) -> f64) -> Vec<f6
     }
     deltas.push(0.0);
     deltas
-}
-
-fn joined_deltas(deltas: &[f64]) -> String {
-    deltas
-        .iter()
-        .map(|delta| number(*delta))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn transform_path(path: &Path, matrix: Matrix) -> Path {
@@ -830,63 +925,6 @@ fn transform_path(path: &Path, matrix: Matrix) -> Path {
     output
 }
 
-fn color_text(color: Rgba) -> String {
-    format!("{} {} {}", color.r, color.g, color.b)
-}
-
-fn stroke_attributes(style: &StrokeStyle) -> String {
-    let mut attributes = format!(" LineWidth=\"{}\"", number(style.width));
-    attributes.push_str(&format!(
-        " Cap=\"{}\" Join=\"{}\" MiterLimit=\"{}\"",
-        match style.cap {
-            LineCap::Butt => "Butt",
-            LineCap::Round => "Round",
-            LineCap::Square => "Square",
-        },
-        match style.join {
-            LineJoin::Miter => "Miter",
-            LineJoin::Round => "Round",
-            LineJoin::Bevel => "Bevel",
-        },
-        number(style.miter_limit)
-    ));
-    if !style.dash.is_empty() {
-        attributes.push_str(&format!(
-            " DashPattern=\"{}\" DashOffset=\"{}\"",
-            style
-                .dash
-                .iter()
-                .map(|value| number(*value))
-                .collect::<Vec<_>>()
-                .join(" "),
-            number(style.dash_offset)
-        ));
-    }
-    attributes
-}
-
-fn box_text(rect: Rect) -> String {
-    format!(
-        "{} {} {} {}",
-        number(rect.x),
-        number(rect.y),
-        number(rect.width),
-        number(rect.height)
-    )
-}
-
-fn matrix_text(matrix: Matrix) -> String {
-    format!(
-        "{} {} {} {} {} {}",
-        number(matrix.a),
-        number(matrix.b),
-        number(matrix.c),
-        number(matrix.d),
-        number(matrix.e),
-        number(matrix.f)
-    )
-}
-
 fn number(value: f64) -> String {
     let mut text = format!("{value:.4}");
     while text.ends_with('0') {
@@ -898,19 +936,12 @@ fn number(value: f64) -> String {
     if text == "-0" { "0".to_owned() } else { text }
 }
 
-fn xml_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-fn content_id(pages: &[PageXml], creator: &str) -> String {
+/// 内容摘要 DocID：FNV-1a over 生成工具名与序列化后的页面 XML。
+fn content_id(creator: &str, pages: &[BuiltPage]) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in creator
         .bytes()
-        .chain(pages.iter().flat_map(|page| page.content.bytes()))
+        .chain(pages.iter().flat_map(|page| page.bytes.iter().copied()))
     {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x100000001b3);
@@ -952,26 +983,19 @@ fn image_format_name(format: ImageFormat) -> &'static str {
     }
 }
 
-fn write_entry(
-    zip: &mut zip::ZipWriter<Cursor<Vec<u8>>>,
-    name: &str,
-    data: &[u8],
-    options: zip::write::SimpleFileOptions,
-) -> Result<(), OfdError> {
-    zip.start_file(name, options)
-        .map_err(|error| OfdError::Io(std::io::Error::other(error)))?;
-    zip.write_all(data)
-        .map_err(|error| OfdError::Io(std::io::Error::other(error)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::{OfdWriteOptions, write_fixed};
     use crate::{OfdDocument, OfdReadOptions};
+    use ofdbox_core::model::definition::{StBox, StId};
+    use ofdbox_core::model::page::{ColorKind, GraphicObject, MapType, Page as OfdPage};
+    use ofdbox_core::model::res::Res;
+    use ofdbox_core::model_xml;
     use ofdbox_folio_ir::{
         Cluster, Destination, DocumentSource, Element, FillRule, FixedDocument, FontAsset, Glyph,
-        GlyphRun, Group, Matrix, OutlineItem, Page, PageInfo, Paint, Path, PathElement, Point,
-        Rect, Rgba, Rotation, Scene, Size, TextElement,
+        GlyphRun, GradientExtend, GradientStop, Group, ImageAsset, ImageElement, ImageFormat,
+        LinearGradient, Matrix, OutlineItem, Page, PageInfo, Paint, Path, PathElement, Point, Rect,
+        Rgba, Rotation, Scene, Size, TextElement,
     };
     use std::io::{Cursor, Read};
     use std::sync::Arc;
@@ -1007,6 +1031,20 @@ mod tests {
         )
     }
 
+    fn text_page(font: Arc<FontAsset>, run: Arc<GlyphRun>) -> Page {
+        let mut page = sample_page();
+        page.content.root.children.clear();
+        page.content.root.children.push(Element::Text(TextElement {
+            font,
+            font_size: 3.0,
+            transform: Matrix::IDENTITY,
+            run,
+            fill: Some(Paint::Color(Rgba::BLACK)),
+            stroke: None,
+        }));
+        page
+    }
+
     #[test]
     fn writes_readable_and_deterministic_package() {
         let mut document = FixedDocument::default();
@@ -1015,6 +1053,36 @@ mod tests {
         let first = write_fixed(&document, &options).expect("write");
         let second = write_fixed(&document, &options).expect("write again");
         assert_eq!(first, second);
+
+        // entry 布局与页索引保持旧行为：Page_0 起，资源固定文件名。
+        let names = entry_names(&first);
+        for name in [
+            "OFD.xml",
+            "Doc_0/Document.xml",
+            "Doc_0/Pages/Page_0/Content.xml",
+        ] {
+            assert!(
+                names.iter().any(|entry| entry == name),
+                "缺少 {name}: {names:?}"
+            );
+        }
+
+        let document_xml = read_entry(&first, "Doc_0/Document.xml");
+        let document: ofdbox_core::model::document::Document =
+            model_xml::from_str(&document_xml).expect("parse document");
+        // 页 ID=1、图层 ID=2、路径 ID=3。
+        assert_eq!(document.common_data.max_unit_id, StId::new(3));
+        assert_eq!(
+            document.common_data.page_area.physical_box,
+            StBox::new(0.0, 0.0, 100.0, 100.0)
+        );
+        assert_eq!(document.pages.pages.len(), 1);
+        assert_eq!(
+            document.pages.pages[0].base_loc.as_str(),
+            "Pages/Page_0/Content.xml"
+        );
+        assert!(document.common_data.public_res.is_empty());
+        assert!(document.common_data.document_res.is_empty());
 
         let mut reader =
             OfdDocument::open_bytes(first, OfdReadOptions::default()).expect("open generated");
@@ -1068,7 +1136,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_font_names_and_explicit_stroke_flags() {
+    fn keeps_font_names_and_default_text_flags() {
         let font = Arc::new(
             FontAsset::new(Arc::from(&b""[..]), 0)
                 .with_font_name("SimSun")
@@ -1089,26 +1157,163 @@ mod tests {
                 glyph_end: 1,
             }],
         ));
+        let mut document = FixedDocument::default();
+        document.pages.push(text_page(font, run));
+        let bytes = write_fixed(&document, &OfdWriteOptions::default()).expect("write");
+
+        let content = read_entry(&bytes, "Doc_0/Pages/Page_0/Content.xml");
+        // TextObject 的 Fill/Stroke 等于默认值，序列化时省略；读回后语义不变。
+        assert!(!content.contains("Stroke="), "{content}");
+        assert!(!content.contains("Fill="), "{content}");
+        assert!(content.contains("DeltaX="), "{content}");
+
+        let page: OfdPage = model_xml::from_str(&content).expect("parse page");
+        let layer = page
+            .content
+            .as_ref()
+            .expect("content")
+            .layers
+            .first()
+            .expect("layer");
+        let text = layer
+            .objects
+            .iter()
+            .find_map(|object| match object {
+                GraphicObject::Text(text) => Some(text),
+                _ => None,
+            })
+            .expect("text object");
+        assert!(text.content.fill);
+        assert!(!text.content.stroke);
+        assert_eq!(text.content.size, 3.0);
+        assert!(
+            text.content.font.0 >= 1,
+            "字体资源 ID 必须非默认: {}",
+            text.content.font.0
+        );
+        assert_eq!(text.content.text_codes[0].text, "A");
+        assert!(text.content.text_codes[0].delta_x.is_some());
+        assert_eq!(text.content.cg_transforms[0].glyphs.as_deref(), Some("1"));
+
+        let resources = read_entry(&bytes, "Doc_0/PublicRes.xml");
+        assert!(resources.contains("FontName=\"SimSun\""));
+        assert!(resources.contains("FamilyName=\"SimSun\""));
+        assert!(!resources.contains("FontFile"));
+        let res: Res = model_xml::from_str(&resources).expect("parse res");
+        let font = res
+            .fonts
+            .as_ref()
+            .and_then(|fonts| fonts.fonts.first())
+            .expect("font");
+        assert_eq!(font.font_name, "SimSun");
+        assert_eq!(font.family_name.as_deref(), Some("SimSun"));
+        assert!(font.font_file.is_none());
+    }
+
+    #[test]
+    fn writes_gradients_images_and_clips_semantically() {
+        let mut clip_path = Path::new();
+        clip_path.move_to(Point::new(0.0, 0.0));
+        clip_path.line_to(Point::new(50.0, 0.0));
+        clip_path.line_to(Point::new(50.0, 50.0));
+        clip_path.close();
+        let mut shape = Path::new();
+        shape.move_to(Point::new(5.0, 5.0));
+        shape.line_to(Point::new(95.0, 5.0));
+        shape.line_to(Point::new(95.0, 95.0));
+        shape.close();
+        let image = Arc::new(ImageAsset::new(
+            ImageFormat::Png,
+            Arc::from(&[0x89, b'P', b'N', b'G'][..]),
+            2,
+            2,
+        ));
         let mut page = sample_page();
-        page.content.root.children.push(Element::Text(TextElement {
-            font,
-            font_size: 3.0,
-            transform: Matrix::IDENTITY,
-            run,
-            fill: Some(Paint::Color(Rgba::BLACK)),
-            stroke: None,
-        }));
+        page.content.root = Group {
+            clip: Some(Arc::new(ofdbox_folio_ir::Clip {
+                path: Arc::new(clip_path),
+                rule: FillRule::NonZero,
+            })),
+            children: vec![
+                Element::Path(PathElement {
+                    path: Arc::new(shape),
+                    transform: Matrix::IDENTITY,
+                    fill: Some(Paint::LinearGradient(LinearGradient {
+                        start: Point::new(0.0, 0.0),
+                        end: Point::new(100.0, 0.0),
+                        stops: vec![
+                            GradientStop {
+                                offset: 0.0,
+                                color: Rgba::from_rgb(255, 0, 0),
+                            },
+                            GradientStop {
+                                offset: 1.0,
+                                color: Rgba::from_rgb(0, 0, 255),
+                            },
+                        ],
+                        extend: GradientExtend::Pad,
+                    })),
+                    stroke: None,
+                    rule: FillRule::NonZero,
+                }),
+                Element::Image(ImageElement {
+                    image,
+                    rect: Rect::new(10.0, 10.0, 20.0, 20.0),
+                    transform: Matrix::IDENTITY,
+                    alpha: 0.5,
+                }),
+            ],
+            ..Group::default()
+        };
         let mut document = FixedDocument::default();
         document.pages.push(page);
         let bytes = write_fixed(&document, &OfdWriteOptions::default()).expect("write");
 
         let content = read_entry(&bytes, "Doc_0/Pages/Page_0/Content.xml");
-        assert!(content.contains("Stroke=\"false\""));
-        assert!(content.contains("DeltaX="));
-        let resources = read_entry(&bytes, "Doc_0/PublicRes.xml");
-        assert!(resources.contains("FontName=\"SimSun\""));
-        assert!(resources.contains("FamilyName=\"SimSun\""));
-        assert!(!resources.contains("FontFile"));
+        assert!(content.contains("AxialShd"), "{content}");
+        assert!(content.contains("Extend=\"3\""), "{content}");
+        assert!(content.contains("Clips"), "{content}");
+        assert!(content.contains("ImageObject"), "{content}");
+        assert!(content.contains("Alpha=\"128\""), "{content}");
+
+        let page: OfdPage = model_xml::from_str(&content).expect("parse page");
+        let objects = &page.content.as_ref().expect("content").layers[0].objects;
+        let GraphicObject::Path(path) = &objects[0] else {
+            panic!("第一个图元应为路径");
+        };
+        assert!(path.content.graphic.clips.is_some(), "裁剪区域丢失");
+        let Some(ColorKind::AxialShd(shd)) =
+            path.content.fill_color.as_ref().map(|color| &color.kind)
+        else {
+            panic!("轴向渐变丢失: {:?}", path.content.fill_color);
+        };
+        assert_eq!(shd.segments.len(), 2);
+        assert_eq!(shd.map_type, MapType::Direct);
+        assert_eq!(shd.extend, 3);
+        let GraphicObject::Image(image) = &objects[1] else {
+            panic!("第二个图元应为图片");
+        };
+        assert_eq!(image.content.graphic.alpha, 128);
+        assert!(image.content.resource_id.0 >= 1, "图片资源 ID 必须非默认");
+
+        let resources = read_entry(&bytes, "Doc_0/DocumentRes.xml");
+        assert!(resources.contains("Format=\"PNG\""), "{resources}");
+        assert!(resources.contains("MediaFile"), "{resources}");
+        let res: Res = model_xml::from_str(&resources).expect("parse res");
+        let media = res.multi_medias.as_ref().expect("multimedias");
+        assert_eq!(media.multi_medias.len(), 1);
+        assert!(
+            media.multi_medias[0]
+                .media_file
+                .as_str()
+                .starts_with("Image_")
+        );
+        assert!(
+            entry_names(&bytes)
+                .iter()
+                .any(|name| name.starts_with("Doc_0/Res/Image_")),
+            "缺少图片 entry"
+        );
     }
 
     #[test]
@@ -1145,17 +1350,8 @@ mod tests {
                 glyph_end: 2,
             }],
         ));
-        let mut page = sample_page();
-        page.content.root.children.push(Element::Text(TextElement {
-            font,
-            font_size: 3.0,
-            transform: Matrix::IDENTITY,
-            run,
-            fill: Some(Paint::Color(Rgba::BLACK)),
-            stroke: None,
-        }));
         let mut document = FixedDocument::default();
-        document.pages.push(page);
+        document.pages.push(text_page(font, run));
         let bytes = write_fixed(&document, &OfdWriteOptions::default()).expect("write");
 
         let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).expect("zip");
@@ -1183,6 +1379,14 @@ mod tests {
         // 字形顺序不变：字形表里仍保留原字形数量，引用原始 GID 的文本才有效。
         let glyphs = u16::from_be_bytes([subset[4], subset[5]]);
         assert!(glyphs > 0);
+    }
+
+    fn entry_names(bytes: &[u8]) -> Vec<String> {
+        let archive = zip::ZipArchive::new(Cursor::new(bytes)).expect("zip");
+        archive
+            .file_names()
+            .map(|name| name.expect("entry name").into_owned())
+            .collect()
     }
 
     fn read_entry(bytes: &[u8], name: &str) -> String {

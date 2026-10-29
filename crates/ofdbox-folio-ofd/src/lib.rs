@@ -1,29 +1,82 @@
 //! OFDBox Folio 的 OFD 适配层。
 //!
 //! 负责把 OFD 包解析为 Fixed IR 页面，以及把 Fixed IR 写出为 OFD 包。
-//! 对外不暴露 `ofdbox-core` 的类型。
+//! 对外不暴露 `ofdbox_core` 的类型。
+//!
+//! 读取基于 `OfdFile`（容器、解密、entry 访问）与 folio 自己的宽松解析：
+//! 先按 typed model 严格解析，失败后规范化 XML 再试一次。
 
 #![allow(clippy::too_many_lines)]
 
 mod attachments;
 mod frontend;
+mod lenient;
 mod outline;
+mod package;
 mod writer;
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 
-use ofdbox_core::{DocumentView, OfdPackage, PageView};
+use ofdbox_core::OfdPackage;
+use ofdbox_core::model::definition::StBox;
+use ofdbox_core::model::document::{Document, PageEntry};
+use ofdbox_core::model::page::Page as PageModel;
+use ofdbox_core::store::OfdFile;
 use ofdbox_folio_ir::{
     AttachmentId, DocumentInfo, DocumentSource, FontProvider, Metadata, Page, PageError, PageInfo,
     Rect, ResourceStore, Rotation, SourceFormat,
 };
 
+use crate::package::{Ctx, Loaded, PackageReader};
+
 pub use frontend::{OfdReadOptions, UnsupportedPolicy};
 pub use writer::{OfdWriteOptions, write_fixed};
+
+/// 宽松解析模式。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LenientMode {
+    /// 只用严格解析。
+    Off,
+    /// 严格解析失败后回退宽松解析（默认）。
+    #[default]
+    OnFailure,
+    /// 所有 entry 都先规范化再解析。
+    Always,
+}
+
+/// 宽松解析时执行的一类修复。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OfdRepair {
+    /// 命名空间前缀/URI 规范化。
+    Namespace,
+    /// 注入缺失的图元/图层 ID。
+    InjectId,
+    /// 注入缺失的必选属性。
+    InjectAttribute,
+    /// 注入缺失的必选子元素。
+    InjectChild,
+    /// 丢弃无法解析的图元（例如缺资源引用的图片）。
+    DropObject,
+    /// 清洗数值分隔符。
+    CleanNumber,
+}
+
+/// 一条宽松解析诊断。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OfdDiagnostic {
+    /// 发生修复的 entry。
+    pub entry: String,
+    /// 修复类型。
+    pub repair: OfdRepair,
+    /// 面向开发者的说明。
+    pub detail: String,
+}
 
 /// 探测字节是否为 OFD 包。
 ///
@@ -77,9 +130,9 @@ impl From<OfdError> for PageError {
 
 /// OFD 文档源。
 pub struct OfdDocument {
-    package: RefCell<OfdPackage>,
-    document: DocumentView,
-    pages: Vec<PageView>,
+    reader: Rc<PackageReader>,
+    document: Loaded<Document>,
+    pages: Vec<PageEntry>,
     info: DocumentInfo,
     store: ResourceStore,
     attachments: attachments::OfdAttachments,
@@ -101,32 +154,23 @@ impl OfdDocument {
         options: OfdReadOptions,
         font_provider: Option<Box<dyn FontProvider>>,
     ) -> Result<Self, OfdError> {
-        let mut package = OfdPackage::from_bytes(bytes)?;
-        let document = package.parse_document()?;
-        let pages = document
-            .pages()
-            .map(|pages| pages.pages().collect::<Vec<_>>())
-            .unwrap_or_default();
-        let attachments = attachments::read(&mut package, &document);
-        let info = DocumentInfo {
-            format: SourceFormat::Ofd,
-            metadata: Metadata::default(),
-            page_count: pages.len(),
-            outline: outline::build_outline(&document, &pages),
-            attachments: attachments.info.clone(),
-        };
-        Ok(Self {
-            package: RefCell::new(package),
-            document,
-            info,
-            page_infos: RefCell::new(vec![None; pages.len()]),
-            pages,
-            attachments,
-            store: ResourceStore::new(),
-            font_cache: HashMap::new(),
-            font_provider,
-            options,
-        })
+        let file = OfdFile::open_bytes(bytes)?;
+        let reader = PackageReader::open(file, &options)?;
+        let root = Ctx::root(Rc::clone(&reader));
+        let ofd = reader.parse_ofd("OFD.xml")?;
+        let doc_root = ofd
+            .doc_bodies
+            .first()
+            .map(|body| body.doc_root.clone())
+            .ok_or_else(|| OfdError::InvalidStructure("OFD.xml 没有 DocBody".to_owned()))?;
+        let document_entry = root.resolve(&doc_root)?;
+        let document_data = reader.parse_document(document_entry.as_str())?;
+        let document = Loaded::new(
+            document_data,
+            Ctx::child(Rc::clone(&reader), &document_entry),
+            document_entry,
+        );
+        Self::from_document(reader, document, options, font_provider)
     }
 
     /// 从文件打开 OFD。
@@ -146,6 +190,36 @@ impl OfdDocument {
         Self::open_bytes_with_fonts(bytes, options, font_provider)
     }
 
+    fn from_document(
+        reader: Rc<PackageReader>,
+        document: Loaded<Document>,
+        options: OfdReadOptions,
+        font_provider: Option<Box<dyn FontProvider>>,
+    ) -> Result<Self, OfdError> {
+        let pages = document.data.pages.pages.clone();
+        let page_count = pages.len();
+        let attachments = attachments::read(document.context(), &document.data);
+        let info = DocumentInfo {
+            format: SourceFormat::Ofd,
+            metadata: Metadata::default(),
+            page_count: pages.len(),
+            outline: outline::build_outline(&document.data, &pages),
+            attachments: attachments.info.clone(),
+        };
+        Ok(Self {
+            reader,
+            document,
+            pages,
+            info,
+            attachments,
+            store: ResourceStore::new(),
+            font_cache: HashMap::new(),
+            font_provider,
+            page_infos: RefCell::new(vec![None; page_count]),
+            options,
+        })
+    }
+
     /// 页面数量。
     pub fn page_count(&self) -> usize {
         self.pages.len()
@@ -156,22 +230,54 @@ impl OfdDocument {
         &self.store
     }
 
-    fn page_physical_box(&self, page: &PageView) -> Result<Rect, PageError> {
-        let mut package = self.package.borrow_mut();
-        let content = package
-            .parse_page_for(page)
+    /// 读取过程中发生的宽松修复（含已加载页面）。
+    pub fn diagnostics(&self) -> Vec<OfdDiagnostic> {
+        self.reader.diagnostics()
+    }
+
+    /// 页面尺寸：页面 Area → 模板页 Area → 文档 PageArea。
+    fn page_physical_box(&self, page: &PageEntry) -> Result<Rect, PageError> {
+        let loaded = self
+            .document
+            .context()
+            .load_page(&page.base_loc)
             .map_err(|error| PageError::Decode(error.to_string()))?;
-        let physical = content
-            .area()
-            .and_then(|area| area.physical_box().and_then(parse_box))
-            .or_else(|| {
-                self.document
-                    .common_data()
-                    .and_then(|common| common.page_area())
-                    .and_then(|area| area.physical_box().and_then(parse_box))
-            })
-            .unwrap_or_else(|| Rect::new(0.0, 0.0, 210.0, 297.0));
-        Ok(Rect::new(0.0, 0.0, physical.width, physical.height))
+        let physical = loaded
+            .data
+            .area
+            .as_ref()
+            .map(|area| area.physical_box)
+            .or_else(|| self.template_physical_box(&loaded))
+            .unwrap_or(self.document.data.common_data.page_area.physical_box);
+        let physical = stbox_rect(physical);
+        if physical.width > 0.0 && physical.height > 0.0 {
+            Ok(physical)
+        } else {
+            Ok(Rect::new(0.0, 0.0, 210.0, 297.0))
+        }
+    }
+
+    /// 页面引用的模板页里第一个声明了 Area 的尺寸。
+    fn template_physical_box(&self, page: &Loaded<PageModel>) -> Option<StBox> {
+        for reference in &page.data.templates {
+            let Some(template) = self
+                .document
+                .data
+                .common_data
+                .template_pages
+                .iter()
+                .find(|template| template.id.0 == reference.template_id.0)
+            else {
+                continue;
+            };
+            let Ok(loaded) = self.document.context().load_page(&template.base_loc) else {
+                continue;
+            };
+            if let Some(area) = &loaded.data.area {
+                return Some(area.physical_box);
+            }
+        }
+        None
     }
 }
 
@@ -199,15 +305,20 @@ impl DocumentSource for OfdDocument {
     }
 
     fn load_page(&mut self, index: usize) -> Result<Page, PageError> {
-        let page = self
+        let entry = self
             .pages
             .get(index)
-            .cloned()
-            .ok_or(PageError::NotFound(index))?;
-        let mut package = self.package.borrow_mut();
+            .ok_or(PageError::NotFound(index))?
+            .clone();
+        let loaded = self
+            .document
+            .context()
+            .load_page(&entry.base_loc)
+            .map_err(|error| PageError::Decode(error.to_string()))?
+            .with_id(entry.id.clone());
         let mut page = frontend::build_page(
-            &mut package,
-            &page,
+            &self.document,
+            &loaded,
             &self.options,
             &mut self.store,
             &mut self.font_cache,
@@ -219,34 +330,24 @@ impl DocumentSource for OfdDocument {
     }
 
     fn load_attachment(&mut self, id: AttachmentId) -> Result<Arc<[u8]>, PageError> {
-        let file = self
-            .attachments
-            .files
-            .iter()
-            .find(|(attachment, _)| *attachment == id)
-            .map(|(_, file)| file.clone())
-            .ok_or_else(|| PageError::Decode(format!("附件不存在: {}", id.get())))?;
-        let mut package = self.package.borrow_mut();
-        attachments::load(&mut package, &self.attachments.dir, &file).map_err(PageError::from)
+        attachments::load(&self.attachments, id).map_err(PageError::from)
     }
 
     fn font_names(&mut self) -> Result<Vec<String>, PageError> {
-        let mut package = self.package.borrow_mut();
-        let document = package
-            .parse_document()
-            .map_err(|error| PageError::Decode(error.to_string()))?;
-        let mut locations = Vec::new();
-        if let Some(common) = document.common_data() {
-            locations.extend(common.public_res().map(str::to_owned));
-            locations.extend(common.document_res().map(str::to_owned));
-        }
         let mut names = BTreeSet::new();
-        for location in locations {
-            let resources = package
-                .parse_res_from_document(&location)
-                .map_err(|error| PageError::Decode(error.to_string()))?;
-            for font in resources.fonts() {
-                for name in [font.font_name(), font.family_name()].into_iter().flatten() {
+        let common = &self.document.data.common_data;
+        for location in common.public_res.iter().chain(common.document_res.iter()) {
+            let Ok(res) = self.document.context().load_res(location) else {
+                continue;
+            };
+            let Some(fonts) = res.data.fonts.as_ref() else {
+                continue;
+            };
+            for font in &fonts.fonts {
+                for name in [Some(font.font_name.as_str()), font.family_name.as_deref()]
+                    .into_iter()
+                    .flatten()
+                {
                     let name = name.trim();
                     if !name.is_empty() {
                         names.insert(name.to_owned());
@@ -258,7 +359,6 @@ impl DocumentSource for OfdDocument {
     }
 
     fn clear_caches(&mut self) {
-        self.package.borrow_mut().clear_cache();
         self.font_cache.clear();
         if let Ok(mut infos) = self.page_infos.try_borrow_mut() {
             infos.fill(None);
@@ -266,21 +366,15 @@ impl DocumentSource for OfdDocument {
     }
 }
 
-fn parse_box(text: &str) -> Option<Rect> {
-    let values = text
-        .split(|character: char| character.is_whitespace() || character == ',')
-        .filter(|value| !value.is_empty())
-        .filter_map(|value| value.parse::<f64>().ok())
-        .collect::<Vec<_>>();
-    if values.len() < 4 {
-        return None;
-    }
-    Some(Rect::new(values[0], values[1], values[2], values[3]))
+/// `StBox` 到 Fixed IR 矩形（原点固定为左上角）。
+fn stbox_rect(value: StBox) -> Rect {
+    Rect::new(0.0, 0.0, value.width, value.height)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{OfdDocument, OfdReadOptions, parse_box};
+    use super::{OfdDocument, OfdReadOptions, stbox_rect};
+    use ofdbox_core::model::definition::StBox;
     use ofdbox_folio_ir::{DocumentSource, Element, Rect};
     use std::io::{Cursor, Write};
 
@@ -291,7 +385,7 @@ mod tests {
             (
                 "OFD.xml",
                 r#"<?xml version="1.0" encoding="UTF-8"?>
-<ofd:OFD xmlns:ofd="http://www.ofdspec.org/2016" Version="1.1" DocType="OFD">
+<ofd:OFD xmlns:ofd="http://www.ofdspec.org/2016" Version="1.0" DocType="OFD">
   <ofd:DocBody>
     <ofd:DocInfo><ofd:DocID>test</ofd:DocID><ofd:Creator>test</ofd:Creator></ofd:DocInfo>
     <ofd:DocRoot>Doc_0/Document.xml</ofd:DocRoot>
@@ -343,10 +437,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_physical_box() {
+    fn converts_physical_box() {
         assert_eq!(
-            parse_box("0 0 210 297"),
-            Some(Rect::new(0.0, 0.0, 210.0, 297.0))
+            stbox_rect(StBox::new(0.0, 0.0, 210.0, 297.0)),
+            Rect::new(0.0, 0.0, 210.0, 297.0)
         );
     }
 
@@ -375,7 +469,7 @@ mod tests {
             (
                 "OFD.xml",
                 r#"<?xml version="1.0" encoding="UTF-8"?>
-<ofd:OFD xmlns:ofd="http://www.ofdspec.org/2016" Version="1.1" DocType="OFD">
+<ofd:OFD xmlns:ofd="http://www.ofdspec.org/2016" Version="1.0" DocType="OFD">
   <ofd:DocBody>
     <ofd:DocInfo><ofd:DocID>outline</ofd:DocID><ofd:Creator>test</ofd:Creator></ofd:DocInfo>
     <ofd:DocRoot>Doc_0/Document.xml</ofd:DocRoot>
@@ -396,12 +490,12 @@ mod tests {
   </ofd:Pages>
   <ofd:Outlines>
     <ofd:OutlineElem Title="扉页">
-      <ofd:Actions><ofd:Action><ofd:Goto><ofd:Dest Type="Fit" PageID="101"/></ofd:Goto></ofd:Action></ofd:Actions>
+      <ofd:Actions><ofd:Action Event="DO"><ofd:Goto><ofd:Dest Type="Fit" PageID="101"/></ofd:Goto></ofd:Action></ofd:Actions>
     </ofd:OutlineElem>
     <ofd:OutlineElem Title="正文">
-      <ofd:Actions><ofd:Action><ofd:Goto><ofd:Dest Type="XYZ" PageID="629" Left="12.5" Top="34"/></ofd:Goto></ofd:Action></ofd:Actions>
+      <ofd:Actions><ofd:Action Event="DO"><ofd:Goto><ofd:Dest Type="XYZ" PageID="629" Left="12.5" Top="34"/></ofd:Goto></ofd:Action></ofd:Actions>
       <ofd:OutlineElem Title="第一节">
-        <ofd:Actions><ofd:Action><ofd:Goto><ofd:Dest Type="Fit" PageID="629"/></ofd:Goto></ofd:Action></ofd:Actions>
+        <ofd:Actions><ofd:Action Event="DO"><ofd:Goto><ofd:Dest Type="Fit" PageID="629"/></ofd:Goto></ofd:Action></ofd:Actions>
       </ofd:OutlineElem>
     </ofd:OutlineElem>
   </ofd:Outlines>
@@ -452,7 +546,7 @@ mod tests {
             (
                 "OFD.xml",
                 br#"<?xml version="1.0" encoding="UTF-8"?>
-<ofd:OFD xmlns:ofd="http://www.ofdspec.org/2016" Version="1.1" DocType="OFD">
+<ofd:OFD xmlns:ofd="http://www.ofdspec.org/2016" Version="1.0" DocType="OFD">
   <ofd:DocBody>
     <ofd:DocInfo><ofd:DocID>attach</ofd:DocID><ofd:Creator>test</ofd:Creator></ofd:DocInfo>
     <ofd:DocRoot>Doc_0/Document.xml</ofd:DocRoot>
@@ -519,5 +613,53 @@ mod tests {
         let document =
             OfdDocument::open_bytes(minimal_ofd(), OfdReadOptions::default()).expect("open");
         assert!(document.info().attachments.is_empty());
+    }
+
+    #[test]
+    fn lenient_mode_repairs_missing_required_fields() {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        let entries = [
+            (
+                "OFD.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<ofd:OFD xmlns:ofd="http://www.ofdspec.org/2016" Version="1.0" DocType="OFD">
+  <ofd:DocBody>
+    <ofd:DocInfo><ofd:DocID>lenient</ofd:DocID></ofd:DocInfo>
+    <ofd:DocRoot>Doc_0/Document.xml</ofd:DocRoot>
+  </ofd:DocBody>
+</ofd:OFD>"#,
+            ),
+            (
+                "Doc_0/Document.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<ofd:Document xmlns:ofd="http://www.ofdspec.org/2016">
+  <ofd:CommonData><ofd:MaxUnitID>3</ofd:MaxUnitID></ofd:CommonData>
+  <ofd:Pages><ofd:Page ID="1" BaseLoc="Pages/Page_0/Content.xml"/></ofd:Pages>
+</ofd:Document>"#,
+            ),
+            (
+                "Doc_0/Pages/Page_0/Content.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<ofd:Page xmlns:ofd="http://www.ofdspec.org/2016">
+  <ofd:Content>
+    <ofd:Layer>
+      <ofd:PathObject Boundary="0 0 10 10">
+        <ofd:AbbreviatedData>M 0 0 L 10 10 C</ofd:AbbreviatedData>
+      </ofd:PathObject>
+    </ofd:Layer>
+  </ofd:Content>
+</ofd:Page>"#,
+            ),
+        ];
+        for (name, content) in entries {
+            zip.start_file(name, options).expect("zip entry");
+            zip.write_all(content.as_bytes()).expect("zip write");
+        }
+        let bytes = zip.finish().expect("zip finish").into_inner();
+        let mut document = OfdDocument::open_bytes(bytes, OfdReadOptions::default()).expect("open");
+        let page = document.load_page(0).expect("page");
+        assert_eq!(page.content.size.width, 210.0);
+        assert!(!document.diagnostics().is_empty());
     }
 }

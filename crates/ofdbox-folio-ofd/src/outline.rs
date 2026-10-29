@@ -6,46 +6,49 @@
 
 use std::collections::HashMap;
 
-use ofdbox_core::{DocumentView, OutlineElemView, PageView};
+use ofdbox_core::model::definition::{ActionKind, GotoKind};
+use ofdbox_core::model::document::{Document, OutlineElem, PageEntry};
 use ofdbox_folio_ir::{Destination, OutlineItem, Point};
 
 /// 大纲树最大嵌套深度，避免异常文件把解析拖入深递归。
 const MAX_DEPTH: usize = 16;
 
 /// 把文档大纲映射为 Fixed IR 的大纲树。
-pub(crate) fn build_outline(document: &DocumentView, pages: &[PageView]) -> Vec<OutlineItem> {
-    let Some(outlines) = document.outlines() else {
+pub(crate) fn build_outline(document: &Document, pages: &[PageEntry]) -> Vec<OutlineItem> {
+    let Some(outlines) = document.outlines.as_ref() else {
         return Vec::new();
     };
     let index: HashMap<String, usize> = pages
         .iter()
         .enumerate()
-        .filter_map(|(position, page)| page.id().map(|id| (id.to_owned(), position)))
+        .map(|(position, page)| (page.id.clone(), position))
         .collect();
     outlines
-        .outline_elems()
+        .outline_elems
+        .iter()
         .map(|elem| convert(elem, &index, 0))
         .collect()
 }
 
 /// 转换单个大纲节点。
-fn convert(elem: OutlineElemView, index: &HashMap<String, usize>, depth: usize) -> OutlineItem {
-    let title = elem
-        .title()
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .unwrap_or("未命名")
-        .to_owned();
+fn convert(elem: &OutlineElem, index: &HashMap<String, usize>, depth: usize) -> OutlineItem {
+    let title = elem.title.trim();
+    let title = if title.is_empty() {
+        "未命名".to_owned()
+    } else {
+        title.to_owned()
+    };
     let children = if depth + 1 < MAX_DEPTH {
-        elem.children()
+        elem.children
+            .iter()
             .map(|child| convert(child, index, depth + 1))
             .collect()
     } else {
         Vec::new()
     };
     // 分组节点可能自己没有跳转，退化到第一个能跳的子节点。
-    let destination = destination(&elem, index)
-        .or_else(|| children.iter().map(|child| child.destination).next())
+    let destination = destination(elem, index)
+        .or_else(|| children.first().map(|child| child.destination))
         .unwrap_or(Destination {
             page: 0,
             point: Point::new(0.0, 0.0),
@@ -58,17 +61,21 @@ fn convert(elem: OutlineElemView, index: &HashMap<String, usize>, depth: usize) 
 }
 
 /// 读取节点自身的跳转目标。
-fn destination(elem: &OutlineElemView, index: &HashMap<String, usize>) -> Option<Destination> {
-    for action in elem.actions()?.actions() {
-        let Some(dest) = action.goto().and_then(|goto| goto.dest()) else {
+fn destination(elem: &OutlineElem, index: &HashMap<String, usize>) -> Option<Destination> {
+    let actions = elem.actions.as_ref()?;
+    for action in &actions.actions {
+        let ActionKind::Goto(goto) = &action.kind else {
             continue;
         };
-        let Some(page) = dest.page_id().and_then(|id| index.get(id).copied()) else {
+        let GotoKind::Dest(dest) = &goto.kind else {
+            continue;
+        };
+        let Some(page) = index.get(&dest.page_id.to_string()).copied() else {
             continue;
         };
         return Some(Destination {
             page,
-            point: Point::new(dest.left().unwrap_or(0.0), dest.top().unwrap_or(0.0)),
+            point: Point::new(dest.left.unwrap_or(0.0), dest.top.unwrap_or(0.0)),
         });
     }
     None

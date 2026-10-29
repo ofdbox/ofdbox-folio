@@ -1,12 +1,25 @@
 //! OFD 页面前端：把 OFD 内容转换为 OFDBox Folio 的 Fixed IR。
+//!
+//! 读取基于 ofdbox 0.0.2 的强类型 `model` 与 `Stored<T>` 会话：
+//! 页面内容、模板页与资源都通过 [`crate::loc`] 按需加载，路径解析兼容
+//! 相对路径、包根路径与大小写差异。
+//!
+//! 真实文件里很多属性缺失时依赖 XSD 默认值（例如 `LineWidth` 缺省为
+//! 0.353、`Visible` 缺省为 true）。强类型模型把「缺失」折叠成默认值，
+//! 因此这里用「与默认值比较」还原旧 `*View` API 的 `Some`/`None` 语义。
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
 
-use ofdbox_core::{
-    ColorView, CompositeGraphicUnitView, DrawParamView, GraphicObjectKind, GraphicObjectView,
-    OfdPackage, PageView, ResView, TemplateView,
+use ofdbox_core::model::definition::{PageArea, StArray, StBox, StId, StLoc, StRefId};
+use ofdbox_core::model::document::{Document, PageZOrder};
+use ofdbox_core::model::page::{
+    Cap, ClipContent, Color, ColorKind, CompositeObject, GraphicObject, GraphicUnit, ImageObject,
+    Join, MapType, Page as PageModel, PageContent, PathObject, PathRule, Pattern, PatternReflect,
+    PatternRelativeTo, ShdSegment, Template, TemplateZOrder, TextObject,
 };
+use ofdbox_core::model::res::{Charset, CompositeGraphicUnit, DrawParam, Res};
 use ofdbox_folio_ir::{
     Clip, Cluster, Diagnostic, DiagnosticCode, Element, FillRule, FontAsset, FontProvider,
     FontRequest, Glyph, GlyphRun, GradientExtend, GradientStop, Group, ImageAsset, ImageElement,
@@ -17,9 +30,15 @@ use ofdbox_folio_ir::{
 };
 
 use crate::OfdError;
+use crate::package::Loaded;
+
+/// OFD 中 `LineWidth` 的默认值（毫米）。
+const DEFAULT_LINE_WIDTH: f64 = 0.353;
+/// OFD 中 `MiterLimit` 的默认值。
+const DEFAULT_MITER_LIMIT: f64 = 4.234;
 
 /// OFD 前端选项。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct OfdReadOptions {
     /// 是否绘制注释。
     pub draw_annotations: bool,
@@ -27,6 +46,12 @@ pub struct OfdReadOptions {
     pub unsupported: UnsupportedPolicy,
     /// 单张图片允许的最大像素数。
     pub max_image_pixels: u64,
+    /// 宽松解析模式。
+    pub lenient: crate::LenientMode,
+    /// 加密文档的口令。
+    pub password: Option<String>,
+    /// 加密文档的证书私钥（32 字节 SM2 标量）。
+    pub certificate_private_key: Option<Vec<u8>>,
 }
 
 impl Default for OfdReadOptions {
@@ -35,6 +60,9 @@ impl Default for OfdReadOptions {
             draw_annotations: true,
             unsupported: UnsupportedPolicy::Skip,
             max_image_pixels: 64 * 1024 * 1024,
+            lenient: crate::LenientMode::OnFailure,
+            password: None,
+            certificate_private_key: None,
         }
     }
 }
@@ -50,14 +78,14 @@ pub enum UnsupportedPolicy {
 
 /// 构建一页 Fixed IR。
 pub fn build_page(
-    package: &mut OfdPackage,
-    page: &PageView,
+    document: &Loaded<Document>,
+    page: &Loaded<PageModel>,
     options: &OfdReadOptions,
     store: &mut ofdbox_folio_ir::ResourceStore,
     font_cache: &mut HashMap<String, Option<ResolvedFont>>,
     font_provider: &mut Option<Box<dyn FontProvider>>,
 ) -> Result<Page, OfdError> {
-    let scene = build_scene(package, options, store, font_cache, font_provider, page)?;
+    let scene = build_scene(document, page, options, store, font_cache, font_provider)?;
     let text = build_text_layer(&scene);
     let size = scene.size;
     let info = PageInfo {
@@ -76,85 +104,60 @@ pub fn build_page(
 }
 
 fn build_scene(
-    package: &mut OfdPackage,
+    document: &Loaded<Document>,
+    page: &Loaded<PageModel>,
     options: &OfdReadOptions,
     store: &mut ofdbox_folio_ir::ResourceStore,
     font_cache: &mut HashMap<String, Option<ResolvedFont>>,
     font_provider: &mut Option<Box<dyn FontProvider>>,
-    page: &PageView,
 ) -> Result<Scene, OfdError> {
-    let document = package.parse_document()?;
-    let document_dir = package
-        .document_entry_name()
-        .map(parent_dir)
-        .unwrap_or("")
-        .to_owned();
-    let page_loc = page
-        .base_loc()
-        .ok_or_else(|| OfdError::InvalidStructure("Page 缺少 BaseLoc".to_owned()))?;
-    let page_entry = resolve_existing(package, &document_dir, page_loc)
-        .ok_or_else(|| OfdError::MissingEntry(page_loc.to_owned()))?;
-    let page_content = package.parse_page(&page_entry)?;
+    let common = &document.data.common_data;
 
+    // 模板页：`CommonData/TemplatePage` 按数字 ID 建立索引；页内 `Template`
+    // 用 `TemplateID` 引用，ZOrder 缺省时沿用模板页自身的声明。
     let mut templates = HashMap::new();
-    if let Some(common) = document.common_data() {
-        for template in common.template_pages() {
-            let Some(id) = template.id().map(str::to_owned) else {
-                continue;
-            };
-            let Some(loc) = template.base_loc() else {
-                continue;
-            };
-            let Some(entry) = resolve_existing(package, &document_dir, loc) else {
-                continue;
-            };
-            let Ok(content) = package.parse_page(&entry) else {
-                continue;
-            };
-            templates.insert(
-                id.clone(),
-                TemplateEntry {
-                    id,
-                    z_order: template.z_order().unwrap_or("Background").to_owned(),
-                    entry,
-                    content,
-                },
-            );
-        }
+    for template in &common.template_pages {
+        let id = template.id.to_string();
+        let Ok(content) = document.context().load_page(&template.base_loc) else {
+            continue;
+        };
+        templates.insert(
+            id.clone(),
+            TemplateEntry {
+                id,
+                z_order: template.z_order.clone().unwrap_or_default(),
+                content: Rc::new(content),
+            },
+        );
     }
 
     let mut resources = ResourceSet::default();
-    resources.collect_document(package, &document);
+    resources.collect_document(document);
     for template in templates.values() {
-        resources.collect_page(package, &template.entry, &template.content);
+        resources.collect_page(&template.content);
     }
-    resources.collect_page(package, &page_entry, &page_content);
+    resources.collect_page(page);
 
-    let physical = page_content
-        .area()
-        .and_then(|area| area.physical_box().and_then(parse_rect))
+    let physical_box = page_area_box(page.data.area.as_ref())
         .or_else(|| {
-            page_content.templates().find_map(|reference| {
-                let id = reference.template_id()?;
-                templates
-                    .get(id)?
-                    .content
-                    .area()
-                    .and_then(|area| area.physical_box().and_then(parse_rect))
+            page.data.templates.iter().find_map(|reference| {
+                let template = templates.get(&reference.template_id.to_string())?;
+                page_area_box(template.content.data.area.as_ref())
             })
         })
-        .or_else(|| {
-            document
-                .common_data()
-                .and_then(|common| common.page_area())
-                .and_then(|area| area.physical_box().and_then(parse_rect))
-        })
-        .unwrap_or_else(|| Rect::new(0.0, 0.0, 210.0, 297.0));
-    let default_color_space = document
-        .common_data()
-        .and_then(|common| common.default_cs().map(str::to_owned));
+        .or_else(|| declared_box(common.page_area.physical_box))
+        .unwrap_or_else(|| StBox::new(0.0, 0.0, 210.0, 297.0));
+    let physical = Rect::new(
+        physical_box.x,
+        physical_box.y,
+        physical_box.width,
+        physical_box.height,
+    );
+    let default_color_space = common.default_cs.map(|id| id.to_string());
+    let page_id = page.id().map(str::to_owned);
     let mut builder = Builder {
-        package,
+        document,
+        page_id: page_id.clone(),
         store,
         resources,
         templates,
@@ -166,51 +169,39 @@ fn build_scene(
         composites: HashSet::new(),
         layer_draw_param: None,
     };
-    let mut children = Vec::new();
-    if page_content.area().is_none()
-        && document
-            .common_data()
-            .and_then(|common| common.page_area())
-            .is_none()
-    {
+    if page.data.area.is_none() && common.page_area.physical_box == StBox::default() {
         builder.diagnostic(
             DiagnosticCode::Geometry,
-            page.id(),
+            page_id.as_deref(),
             "页面未声明尺寸，使用 A4 默认值",
         );
     }
-    let template_refs = page_content.templates().collect::<Vec<_>>();
+    let mut children = Vec::new();
     let mut visited_templates = HashSet::new();
+    let references = page.data.templates.as_slice();
     builder.render_templates(
-        &template_refs,
+        references,
         TemplateOrder::Background,
         &mut children,
         &mut visited_templates,
     );
     builder.render_templates(
-        &template_refs,
+        references,
         TemplateOrder::Body,
         &mut children,
         &mut visited_templates,
     );
-    if let Some(content) = page_content.content() {
-        for layer in content.layers() {
-            let previous = builder.layer_draw_param.clone();
-            builder.layer_draw_param = layer.draw_param().map(str::to_owned);
-            for object in layer.objects() {
-                builder.render_object(&object, &mut children);
-            }
-            builder.layer_draw_param = previous;
-        }
+    if let Some(content) = &page.data.content {
+        builder.render_layers(content, &mut children);
     }
     builder.render_templates(
-        &template_refs,
+        references,
         TemplateOrder::Foreground,
         &mut children,
         &mut visited_templates,
     );
     if options.draw_annotations {
-        builder.render_annotations(&document, page, &mut children);
+        builder.render_annotations(&mut children);
     }
     if options.unsupported == UnsupportedPolicy::Error
         && let Some(diagnostic) = builder.diagnostics.first()
@@ -226,21 +217,29 @@ fn build_scene(
     })
 }
 
+/// `StBox` 全零等价于「没有声明」（模型用默认值表达属性缺失）。
+fn declared_box(value: StBox) -> Option<StBox> {
+    (value != StBox::default()).then_some(value)
+}
+
+/// 页面区域里声明的物理框。
+fn page_area_box(area: Option<&PageArea>) -> Option<StBox> {
+    area.and_then(|area| declared_box(area.physical_box))
+}
+
 #[derive(Default)]
 struct ResourceSet {
     fonts: HashMap<String, FontResource>,
     images: HashMap<String, MediaResource>,
     colors: HashMap<String, ColorSpaceResource>,
     draw_params: HashMap<String, DrawParamResource>,
-    composites: HashMap<String, CompositeGraphicUnitView>,
+    composites: HashMap<String, CompositeGraphicUnit>,
 }
 
 #[derive(Clone)]
 struct FontResource {
     id: String,
-    file: Option<String>,
-    dir: String,
-    base: Option<String>,
+    file: Option<StLoc>,
     name: Option<String>,
     family: Option<String>,
     charset: Option<String>,
@@ -248,6 +247,8 @@ struct FontResource {
     italic: bool,
     serif: bool,
     fixed_width: bool,
+    /// 字体所属的 `Res`，用于读取 `FontFile`。
+    res: Rc<Loaded<Res>>,
 }
 
 fn font_asset(data: Arc<[u8]>, resource: &FontResource) -> FontAsset {
@@ -270,135 +271,125 @@ pub(crate) struct ResolvedFont {
 #[derive(Clone)]
 struct MediaResource {
     format: ImageFormat,
-    file: String,
-    dir: String,
-    base: Option<String>,
+    file: StLoc,
+    /// 媒体资源所属的 `Res`，用于读取 `MediaFile`。
+    res: Rc<Loaded<Res>>,
 }
 
 struct ColorSpaceResource {
     kind: String,
     /// 每分量位数，标准允许 1/2/4/8/16，默认 8。
     bits: u32,
-    palette: Vec<String>,
+    palette: Vec<StArray>,
 }
 
 #[derive(Clone, Default)]
 struct DrawParamResource {
-    relative: Option<String>,
+    relative: Option<StRefId>,
     line_width: Option<f64>,
     join: Option<LineJoin>,
     cap: Option<LineCap>,
     dash_offset: Option<f64>,
     dash: Option<Vec<f64>>,
     miter_limit: Option<f64>,
-    fill_color: Option<ColorView>,
-    stroke_color: Option<ColorView>,
+    fill_color: Option<Color>,
+    stroke_color: Option<Color>,
 }
 
 impl ResourceSet {
-    fn collect_document(&mut self, package: &mut OfdPackage, document: &ofdbox_core::DocumentView) {
-        let Some(common) = document.common_data() else {
-            return;
-        };
-        let document_dir = package
-            .document_entry_name()
-            .map(parent_dir)
-            .unwrap_or("")
-            .to_owned();
-        for loc in common.public_res().chain(common.document_res()) {
-            let loc = loc.to_owned();
-            if let Some(entry) = resolve_existing(package, &document_dir, &loc) {
-                let _ = self.collect_res(package, &entry);
+    fn collect_document(&mut self, document: &Loaded<Document>) {
+        let common = &document.data.common_data;
+        for location in common.public_res.iter().chain(common.document_res.iter()) {
+            if let Ok(res) = document.context().load_res(location) {
+                self.collect_res(res);
             }
         }
     }
 
-    fn collect_page(
-        &mut self,
-        package: &mut OfdPackage,
-        page_entry: &str,
-        page: &ofdbox_core::PageContentView,
-    ) {
-        let page_dir = parent_dir(page_entry).to_owned();
-        for loc in page.page_res() {
-            let loc = loc.to_owned();
-            if let Some(entry) = resolve_existing(package, &page_dir, &loc) {
-                let _ = self.collect_res(package, &entry);
+    fn collect_page(&mut self, page: &Loaded<PageModel>) {
+        for location in &page.data.page_res {
+            if let Ok(res) = page.context().load_res(location) {
+                self.collect_res(res);
             }
         }
     }
 
-    fn collect_res(&mut self, package: &mut OfdPackage, entry: &str) -> Result<(), OfdError> {
-        let res = package.parse_res(entry)?;
-        let dir = parent_dir(entry).to_owned();
-        let base = res.base_loc().map(str::to_owned);
-        self.collect_from_res(&res, dir, base);
-        Ok(())
-    }
-
-    fn collect_from_res(&mut self, res: &ResView, dir: String, base: Option<String>) {
-        for font in res.fonts() {
-            if let Some(id) = font.id() {
+    fn collect_res(&mut self, res: Rc<Loaded<Res>>) {
+        if let Some(fonts) = &res.data.fonts {
+            for font in &fonts.fonts {
                 self.fonts.insert(
-                    id.to_owned(),
+                    font.id.to_string(),
                     FontResource {
-                        id: id.to_owned(),
-                        file: font.font_file().map(str::to_owned),
-                        dir: dir.clone(),
-                        base: base.clone(),
-                        name: font.font_name().map(str::to_owned),
-                        family: font.family_name().map(str::to_owned),
-                        charset: font.charset().map(str::to_owned),
-                        bold: font.bold().unwrap_or(false),
-                        italic: font.italic().unwrap_or(false),
-                        serif: font.serif().unwrap_or(false),
-                        fixed_width: font.fixed_width().unwrap_or(false),
+                        id: font.id.to_string(),
+                        file: font.font_file.clone(),
+                        name: Some(font.font_name.trim().to_owned())
+                            .filter(|name| !name.is_empty()),
+                        family: font
+                            .family_name
+                            .as_ref()
+                            .map(|family| family.trim().to_owned())
+                            .filter(|family| !family.is_empty()),
+                        // 默认字符集是 unicode，按「缺省」处理以保持旧行为。
+                        charset: (font.charset != Charset::Unicode)
+                            .then(|| font.charset.to_string()),
+                        bold: font.bold,
+                        italic: font.italic,
+                        serif: font.serif,
+                        fixed_width: font.fixed_width,
+                        res: Rc::clone(&res),
                     },
                 );
             }
         }
-        for media in res.multi_medias() {
-            let Some(id) = media.id() else { continue };
-            let Some(file) = media.media_file() else {
-                continue;
-            };
-            let format = media
-                .format()
-                .map(image_format_from_media)
-                .unwrap_or_else(|| image_format_from_path(file));
-            self.images.insert(
-                id.to_owned(),
-                MediaResource {
-                    format,
-                    file: file.to_owned(),
-                    dir: dir.clone(),
-                    base: base.clone(),
-                },
-            );
+        if let Some(medias) = &res.data.multi_medias {
+            for media in &medias.multi_medias {
+                if media.media_file.as_str().trim().is_empty() {
+                    continue;
+                }
+                let format = media
+                    .format
+                    .as_deref()
+                    .map(image_format_from_media)
+                    .unwrap_or_else(|| image_format_from_path(media.media_file.as_str()));
+                self.images.insert(
+                    media.id.to_string(),
+                    MediaResource {
+                        format,
+                        file: media.media_file.clone(),
+                        res: Rc::clone(&res),
+                    },
+                );
+            }
         }
-        for color in res.color_spaces() {
-            let Some(id) = color.id() else { continue };
-            let bits = color
-                .bits_per_component()
-                .and_then(|value| u32::try_from(value).ok())
-                .filter(|value| (1..=16).contains(value))
-                .unwrap_or(8);
-            self.colors.insert(
-                id.to_owned(),
-                ColorSpaceResource {
-                    kind: color.color_space_type().unwrap_or_default().to_owned(),
-                    bits,
-                    palette: color.palette().map(str::to_owned).collect(),
-                },
-            );
+        if let Some(spaces) = &res.data.color_spaces {
+            for color in &spaces.color_spaces {
+                let bits = u32::try_from(color.bits_per_component)
+                    .ok()
+                    .filter(|value| (1..=16).contains(value))
+                    .unwrap_or(8);
+                self.colors.insert(
+                    color.id.to_string(),
+                    ColorSpaceResource {
+                        kind: color.color_space_type.to_string(),
+                        bits,
+                        palette: color
+                            .palette
+                            .as_ref()
+                            .map(|palette| palette.values.clone())
+                            .unwrap_or_default(),
+                    },
+                );
+            }
         }
-        for param in res.draw_params() {
-            let Some(id) = param.id() else { continue };
-            self.draw_params.insert(id.to_owned(), draw_param(&param));
+        if let Some(params) = &res.data.draw_params {
+            for param in &params.draw_params {
+                self.draw_params
+                    .insert(param.id.to_string(), draw_param(param));
+            }
         }
-        for unit in res.composite_graphic_units() {
-            if let Some(id) = unit.id() {
-                self.composites.insert(id.to_owned(), unit);
+        if let Some(units) = &res.data.composite_graphic_units {
+            for unit in &units.units {
+                self.composites.insert(unit.id.to_string(), unit.clone());
             }
         }
     }
@@ -425,22 +416,29 @@ fn apply_draw_param(style: &mut StrokeStyle, param: &DrawParamResource) {
     }
 }
 
-fn draw_param(param: &DrawParamView) -> DrawParamResource {
+/// `DrawParam` 的强类型属性始终带 XSD 默认值；与默认值相等时视为「未声明」，
+/// 这样 `Relative` 继承链的行为与旧 `*View` 的属性读取一致。
+fn draw_param(param: &DrawParam) -> DrawParamResource {
     DrawParamResource {
-        relative: param.relative().map(str::to_owned),
-        line_width: param.line_width(),
-        join: param.join().and_then(parse_join),
-        cap: param.cap().and_then(parse_cap),
-        dash_offset: param.dash_offset(),
-        dash: param.dash_pattern().map(parse_floats),
-        miter_limit: param.miter_limit(),
-        fill_color: param.fill_color(),
-        stroke_color: param.stroke_color(),
+        relative: param.relative,
+        line_width: (param.line_width != DEFAULT_LINE_WIDTH).then_some(param.line_width),
+        join: (param.join != "Miter")
+            .then(|| parse_join(&param.join))
+            .flatten(),
+        cap: (param.cap != "Butt")
+            .then(|| parse_cap(&param.cap))
+            .flatten(),
+        dash_offset: (param.dash_offset != 0.0).then_some(param.dash_offset),
+        dash: param.dash_pattern.as_ref().map(|pattern| pattern.0.clone()),
+        miter_limit: (param.miter_limit != DEFAULT_MITER_LIMIT).then_some(param.miter_limit),
+        fill_color: param.fill_color.clone(),
+        stroke_color: param.stroke_color.clone(),
     }
 }
 
 struct Builder<'a> {
-    package: &'a mut OfdPackage,
+    document: &'a Loaded<Document>,
+    page_id: Option<String>,
     store: &'a mut ofdbox_folio_ir::ResourceStore,
     resources: ResourceSet,
     templates: HashMap<String, TemplateEntry>,
@@ -453,40 +451,93 @@ struct Builder<'a> {
     layer_draw_param: Option<String>,
 }
 
+fn object_common(object: &GraphicObject) -> Option<&GraphicUnit> {
+    match object {
+        GraphicObject::Text(object) => Some(&object.content.graphic),
+        GraphicObject::Path(object) => Some(&object.content.graphic),
+        GraphicObject::Image(object) => Some(&object.content.graphic),
+        GraphicObject::Composite(object) => Some(&object.content.graphic),
+        GraphicObject::PageBlock(_) => None,
+    }
+}
+
+/// 图元诊断里的对象标识；ID 缺省（0）时不带 location。
+fn id_label(id: StId) -> Option<String> {
+    (id.0 != 0).then(|| id.to_string())
+}
+
+/// 图元对象的 ID。
+fn object_id(object: &GraphicObject) -> StId {
+    match object {
+        GraphicObject::Text(object) => object.id,
+        GraphicObject::Path(object) => object.id,
+        GraphicObject::Image(object) => object.id,
+        GraphicObject::Composite(object) => object.id,
+        GraphicObject::PageBlock(block) => block.id,
+    }
+}
+
+fn matrix_from_array(values: &StArray) -> Option<Matrix> {
+    let values = &values.0;
+    if values.len() != 6 {
+        return None;
+    }
+    Some(Matrix::new(
+        values[0], values[1], values[2], values[3], values[4], values[5],
+    ))
+}
+
+fn point_from_pos(position: ofdbox_core::model::definition::StPos) -> Point {
+    Point::new(position.x, position.y)
+}
+
 impl Builder<'_> {
-    fn render_object(&mut self, object: &GraphicObjectView, output: &mut Vec<Element>) {
-        if parse_bool(object.attribute("Visible")) == Some(false) {
-            return;
-        }
-        if self.depth > 8 {
-            self.diagnostic(
-                DiagnosticCode::UnsupportedObject,
-                object.id(),
-                "对象嵌套过深",
-            );
-            return;
-        }
-        if object.kind() == GraphicObjectKind::PageBlock {
+    fn render_object(&mut self, object: &GraphicObject, output: &mut Vec<Element>) {
+        if let GraphicObject::PageBlock(block) = object {
+            let label = (block.id.0 != 0).then(|| block.id.to_string());
+            if self.depth > 8 {
+                self.diagnostic(
+                    DiagnosticCode::UnsupportedObject,
+                    label.as_deref(),
+                    "对象嵌套过深",
+                );
+                return;
+            }
             self.depth += 1;
-            for child in object.children() {
-                self.render_object(&child, output);
+            for child in &block.block.objects {
+                self.render_object(child, output);
             }
             self.depth -= 1;
             return;
         }
-        let Some(boundary) = object.boundary().and_then(parse_rect) else {
-            self.diagnostic(DiagnosticCode::Geometry, object.id(), "缺少有效 Boundary");
+        let Some(common) = object_common(object) else {
             return;
         };
-        if boundary.width <= 0.0 || boundary.height <= 0.0 {
-            self.diagnostic(DiagnosticCode::Geometry, object.id(), "Boundary 尺寸无效");
+        if !common.visible {
             return;
         }
-        let ctm = match object.attribute("CTM") {
-            Some(value) => match parse_matrix(value) {
+        let label = id_label(object_id(object));
+        let id = label.as_deref();
+        if self.depth > 8 {
+            self.diagnostic(DiagnosticCode::UnsupportedObject, id, "对象嵌套过深");
+            return;
+        }
+        let boxed = common.boundary;
+        if boxed.width <= 0.0 || boxed.height <= 0.0 {
+            let message = if boxed == StBox::default() {
+                "缺少有效 Boundary"
+            } else {
+                "Boundary 尺寸无效"
+            };
+            self.diagnostic(DiagnosticCode::Geometry, id, message);
+            return;
+        }
+        let boundary = Rect::new(boxed.x, boxed.y, boxed.width, boxed.height);
+        let ctm = match &common.ctm {
+            Some(values) => match matrix_from_array(values) {
                 Some(matrix) => matrix,
                 None => {
-                    self.diagnostic(DiagnosticCode::Geometry, object.id(), "CTM 无效");
+                    self.diagnostic(DiagnosticCode::Geometry, id, "CTM 无效");
                     return;
                 }
             },
@@ -494,33 +545,24 @@ impl Builder<'_> {
         };
 
         let mut elements = Vec::new();
-        let kind = object.kind();
-        let is_image = matches!(&kind, GraphicObjectKind::Image);
-        match kind {
-            GraphicObjectKind::Path => {
-                if let Some(element) = self.build_path(object) {
+        match object {
+            GraphicObject::Path(path) => {
+                if let Some(element) = self.build_path(path, &boundary) {
                     elements.push(element);
                 }
             }
-            GraphicObjectKind::Text => {
-                elements.extend(self.build_text(object));
+            GraphicObject::Text(text) => {
+                elements.extend(self.build_text(text));
             }
-            GraphicObjectKind::Image => {
-                if let Some(element) = self.build_image(object) {
+            GraphicObject::Image(image) => {
+                if let Some(element) = self.build_image(image) {
                     elements.push(element);
                 }
             }
-            GraphicObjectKind::Composite => {
-                elements.extend(self.build_composite(object, &boundary));
+            GraphicObject::Composite(composite) => {
+                elements.extend(self.build_composite(composite, &boundary));
             }
-            GraphicObjectKind::PageBlock => {}
-            GraphicObjectKind::Other(ref kind) => {
-                self.diagnostic(
-                    DiagnosticCode::UnsupportedObject,
-                    object.id(),
-                    format!("未知图元: {kind}"),
-                );
-            }
+            GraphicObject::PageBlock(_) => {}
         }
         if elements.is_empty() {
             return;
@@ -536,12 +578,7 @@ impl Builder<'_> {
         }
         // Boundary 左上角把对象空间映射到父空间。
         let mut object_group = Group::new(Matrix::translate(boundary.x, boundary.y));
-        if let Some(alpha) = object
-            .attribute("Alpha")
-            .and_then(|value| value.parse::<i32>().ok())
-        {
-            object_group.opacity = (alpha.clamp(0, 255) as f32) / 255.0;
-        }
+        object_group.opacity = (common.alpha.clamp(0, 255) as f32) / 255.0;
         object_group.children = clipped;
 
         // Boundary 是父空间中的外接矩形，超出部分裁剪。
@@ -552,32 +589,48 @@ impl Builder<'_> {
         }));
         wrapper.children.push(Element::Group(object_group));
         output.push(Element::Group(wrapper));
-        if is_image && let Some(border) = self.build_image_border(object, &boundary) {
+        if let GraphicObject::Image(image) = object
+            && let Some(border) = self.build_image_border(image, &boundary)
+        {
             output.push(border);
         }
     }
 
-    fn build_image_border(
-        &mut self,
-        object: &GraphicObjectView,
-        boundary: &Rect,
-    ) -> Option<Element> {
-        let border = object.border()?;
-        let line_width = border.line_width().unwrap_or(0.353);
+    fn render_layers(&mut self, content: &PageContent, output: &mut Vec<Element>) {
+        for layer in &content.layers {
+            let previous = self.layer_draw_param.clone();
+            self.layer_draw_param = layer.draw_param.map(|id| id.to_string());
+            for object in &layer.objects {
+                self.render_object(object, output);
+            }
+            self.layer_draw_param = previous;
+        }
+    }
+
+    fn build_image_border(&mut self, object: &ImageObject, boundary: &Rect) -> Option<Element> {
+        let border = object.content.border.as_ref()?;
+        // `Border.LineWidth` 缺省为 0.353；显式给 0 表示不画边框。
+        let line_width = border.line_width;
         if line_width <= 0.0 {
             return None;
         }
+        let label = id_label(object.id);
         let paint = border
-            .border_color()
-            .and_then(|color| self.paint(&color, object.id()))
+            .color
+            .as_ref()
+            .and_then(|color| self.paint(color, label.as_deref()))
             .unwrap_or(Paint::Color(Rgba::BLACK));
-        let horizontal = border.horizontal_corner_radius().unwrap_or(0.0);
-        let vertical = border.vertical_corner_radius().unwrap_or(0.0);
+        let horizontal = border.horizontal_corner_radius;
+        let vertical = border.vertical_corner_radius;
         let path = rounded_rect_path(*boundary, horizontal, vertical);
         let style = StrokeStyle {
             width: line_width,
-            dash_offset: border.dash_offset().unwrap_or(0.0),
-            dash: border.dash_pattern().map(parse_floats).unwrap_or_default(),
+            dash_offset: border.dash_offset,
+            dash: border
+                .dash_pattern
+                .as_ref()
+                .map(|pattern| pattern.0.clone())
+                .unwrap_or_default(),
             ..StrokeStyle::default()
         };
         Some(Element::Path(PathElement {
@@ -589,51 +642,50 @@ impl Builder<'_> {
         }))
     }
 
-    fn object_clips(&mut self, object: &GraphicObjectView) -> Vec<Arc<Path>> {
-        let Some(clips) = object.clips() else {
+    fn object_clips(&mut self, object: &GraphicObject) -> Vec<Arc<Path>> {
+        let Some(common) = object_common(object) else {
             return Vec::new();
         };
+        let Some(clips) = &common.clips else {
+            return Vec::new();
+        };
+        let label = id_label(object_id(object));
+        let id = label.as_deref();
         let mut paths = Vec::new();
-        for clip in clips.clips() {
+        for clip in &clips.clips {
             // 同一 Clip 下的多个 Area 是并集，合并为一条路径；多个 Clip 之间再取交集。
             let mut union = Path::new();
             let mut has_area = false;
-            for area in clip.areas() {
+            for area in &clip.areas {
                 let ctm = area
-                    .ctm()
-                    .and_then(parse_matrix)
+                    .ctm
+                    .as_ref()
+                    .and_then(matrix_from_array)
                     .unwrap_or(Matrix::IDENTITY);
-                let Some(content) = area.content() else {
-                    continue;
-                };
-                match content.kind() {
-                    GraphicObjectKind::Path => {
-                        if let Some(data) = content.abbreviated_data()
-                            && let Some(path) = parse_path_data(data)
+                match &area.content {
+                    ClipContent::Path(content) => {
+                        if !content.content.abbreviated_data.is_empty()
+                            && let Some(path) = parse_path_data(&content.content.abbreviated_data)
                         {
                             append_transformed_path(&mut union, &path, ctm);
                             has_area = true;
                         }
                     }
-                    GraphicObjectKind::Text => {
+                    ClipContent::Text(content) => {
                         // 标准允许文字轮廓作为裁剪区；当前按外接矩形近似。
-                        if let Some(boundary) = content.attribute("Boundary").and_then(parse_rect) {
+                        let boxed = content.content.graphic.boundary;
+                        if boxed != StBox::default() {
+                            let boundary = Rect::new(boxed.x, boxed.y, boxed.width, boxed.height);
                             append_transformed_path(&mut union, &boundary.to_path(), ctm);
                             has_area = true;
                             self.diagnostic(
                                 DiagnosticCode::UnsupportedObject,
-                                object.id(),
+                                id,
                                 "文本裁剪按外接矩形近似",
                             );
                         }
                     }
-                    other => {
-                        self.diagnostic(
-                            DiagnosticCode::UnsupportedObject,
-                            object.id(),
-                            format!("暂不支持的裁剪内容: {other:?}"),
-                        );
-                    }
+                    ClipContent::Empty => {}
                 }
             }
             if has_area {
@@ -643,63 +695,62 @@ impl Builder<'_> {
         paths
     }
 
-    fn build_path(&mut self, object: &GraphicObjectView) -> Option<Element> {
-        let payload = object.payload();
-        let data = object
-            .attribute("AbbreviatedData")
-            .or_else(|| payload.abbreviated_data())?;
+    fn build_path(&mut self, object: &PathObject, boundary: &Rect) -> Option<Element> {
+        let data = object.content.abbreviated_data.as_str();
+        if data.trim().is_empty() {
+            return None;
+        }
+        let label = id_label(object.id);
+        let id = label.as_deref();
         let path = match parse_path_data(data) {
             Some(path) => path,
             None => {
-                self.diagnostic(DiagnosticCode::Geometry, object.id(), "路径数据无效");
+                self.diagnostic(DiagnosticCode::Geometry, id, "路径数据无效");
                 return None;
             }
         };
-        let fill = parse_bool(object.attribute("Fill")).unwrap_or(false);
-        let stroke = parse_bool(object.attribute("Stroke")).unwrap_or(true);
-        let fill_color = if fill { self.fill_color(object) } else { None };
-        let pattern = fill_color
-            .as_ref()
-            .filter(|color| color.kind() == ofdbox_core::ColorKind::Pattern);
-        let mesh = fill_color.as_ref().filter(|color| {
-            matches!(
-                color.kind(),
-                ofdbox_core::ColorKind::GouraudShd | ofdbox_core::ColorKind::LaGouraudShd
-            )
-        });
+        let fill = object.content.fill;
+        let stroke = object.content.stroke;
+        let fill_color = if fill {
+            self.fill_color(&object.content.graphic, object.content.fill_color.as_ref())
+        } else {
+            None
+        };
+        let pattern = match fill_color.as_ref().map(|color| &color.kind) {
+            Some(ColorKind::Pattern(pattern)) => Some(pattern),
+            _ => None,
+        };
+        let mesh = match fill_color.as_ref().map(|color| &color.kind) {
+            Some(ColorKind::GouraudShd(_) | ColorKind::LaGouraudShd(_)) => fill_color.as_ref(),
+            _ => None,
+        };
         let fill_paint = if pattern.is_none() && mesh.is_none() {
-            fill_color
-                .as_ref()
-                .and_then(|color| self.paint(color, object.id()))
+            fill_color.as_ref().and_then(|color| self.paint(color, id))
         } else {
             None
         };
         let stroke_paint = if stroke {
             let paint = self
-                .stroke_color(object)
-                .and_then(|color| self.paint(&color, object.id()))
+                .stroke_color(
+                    &object.content.graphic,
+                    object.content.stroke_color.as_ref(),
+                )
+                .and_then(|color| self.paint(&color, id))
                 .or(Some(Paint::Color(Rgba::BLACK)));
             paint.map(|paint| StrokePaint {
                 paint,
-                style: self.stroke_style(object),
+                style: self.stroke_style(&object.content.graphic),
             })
         } else {
             None
         };
-        let rule = match object.attribute("Rule") {
-            Some(value)
-                if value.eq_ignore_ascii_case("Even-Odd")
-                    || value.eq_ignore_ascii_case("EvenOdd") =>
-            {
-                FillRule::EvenOdd
-            }
-            _ => FillRule::NonZero,
-        };
+        let rule = path_rule(&object.content.rule);
         if pattern.is_some() || mesh.is_some() {
-            let fill_element = if let Some(color) = pattern {
-                self.build_pattern_fill(object, &path, color, rule)
+            let fill_element = if let Some(pattern) = pattern {
+                let alpha = fill_color.as_ref().map_or(255, |color| color.alpha);
+                self.build_pattern_fill(boundary, &path, pattern, alpha, rule, id)
             } else if let Some(color) = mesh {
-                self.build_mesh_fill(object, &path, color, rule)
+                self.build_mesh_fill(&path, color, rule, id)
             } else {
                 None
             };
@@ -766,24 +817,23 @@ impl Builder<'_> {
     /// 把底纹展开为按 XStep/YStep 排列的单元，再按填充路径裁剪。
     fn build_pattern_fill(
         &mut self,
-        object: &GraphicObjectView,
+        boundary: &Rect,
         path: &Path,
-        color: &ColorView,
+        pattern: &Pattern,
+        alpha: i32,
         rule: FillRule,
+        object_id: Option<&str>,
     ) -> Option<Element> {
-        let pattern = color.pattern()?;
-        let width = pattern.width()?;
-        let height = pattern.height()?;
+        let width = pattern.width;
+        let height = pattern.height;
         if !(width > 0.0 && height > 0.0) {
-            self.diagnostic(DiagnosticCode::Paint, object.id(), "底纹尺寸无效");
+            self.diagnostic(DiagnosticCode::Paint, object_id, "底纹尺寸无效");
             return None;
         }
-        let boundary = object.boundary().and_then(parse_rect)?;
-        let x_step = pattern.x_step().unwrap_or(width).max(width);
-        let y_step = pattern.y_step().unwrap_or(height).max(height);
-        let relative_to_page = pattern
-            .relative_to()
-            .is_some_and(|value| value.eq_ignore_ascii_case("Page"));
+        let x_step = pattern.x_step.unwrap_or(width).max(width);
+        let y_step = pattern.y_step.unwrap_or(height).max(height);
+        let relative_to_page = matches!(&pattern.relative_to, PatternRelativeTo::Page)
+            || matches!(&pattern.relative_to, PatternRelativeTo::Other(value) if value.eq_ignore_ascii_case("Page"));
         let origin_x = if relative_to_page { -boundary.x } else { 0.0 };
         let origin_y = if relative_to_page { -boundary.y } else { 0.0 };
         let start_col = ((0.0 - origin_x) / x_step).floor() as i64;
@@ -797,25 +847,30 @@ impl Builder<'_> {
         }
         let count = i128::from(columns) * i128::from(rows);
         if count > 4096 {
-            self.diagnostic(DiagnosticCode::Paint, object.id(), "底纹单元过多");
+            self.diagnostic(DiagnosticCode::Paint, object_id, "底纹单元过多");
             return None;
         }
 
         let mut tile = Vec::new();
         self.depth += 1;
-        for child in pattern.objects() {
-            self.render_object(&child, &mut tile);
+        for child in &pattern.cell_content.objects {
+            self.render_object(child, &mut tile);
         }
         self.depth -= 1;
         if tile.is_empty() {
             return None;
         }
 
-        let reflect = pattern.reflect_method().unwrap_or("Normal");
-        let mirror_columns =
-            reflect.eq_ignore_ascii_case("Column") || reflect.eq_ignore_ascii_case("RowAndColumn");
-        let mirror_rows =
-            reflect.eq_ignore_ascii_case("Row") || reflect.eq_ignore_ascii_case("RowAndColumn");
+        let mirror_columns = matches!(
+            &pattern.reflect_method,
+            PatternReflect::Column | PatternReflect::RowAndColumn
+        ) || matches!(&pattern.reflect_method, PatternReflect::Other(value)
+                if value.eq_ignore_ascii_case("Column") || value.eq_ignore_ascii_case("RowAndColumn"));
+        let mirror_rows = matches!(
+            &pattern.reflect_method,
+            PatternReflect::Row | PatternReflect::RowAndColumn
+        ) || matches!(&pattern.reflect_method, PatternReflect::Other(value)
+                if value.eq_ignore_ascii_case("Row") || value.eq_ignore_ascii_case("RowAndColumn"));
         // 相邻单元在公共边各自抗锯齿会留下白缝，放大单元并向外扩一点制造重叠。
         const PATTERN_OVERLAP: f64 = 0.25;
         let factor_x = (width + PATTERN_OVERLAP * 2.0) / width;
@@ -860,8 +915,9 @@ impl Builder<'_> {
 
         let mut arrangement = Group::new(
             pattern
-                .ctm()
-                .and_then(parse_matrix)
+                .ctm
+                .as_ref()
+                .and_then(matrix_from_array)
                 .unwrap_or(Matrix::IDENTITY),
         );
         arrangement.children = cells;
@@ -870,10 +926,7 @@ impl Builder<'_> {
             path: Arc::new(path.clone()),
             rule,
         }));
-        fill.opacity = color
-            .alpha()
-            .map(|alpha| (alpha.clamp(0, 255) as f32) / 255.0)
-            .unwrap_or(1.0);
+        fill.opacity = (alpha.clamp(0, 255) as f32) / 255.0;
         fill.children.push(Element::Group(arrangement));
         Some(Element::Group(fill))
     }
@@ -884,44 +937,49 @@ impl Builder<'_> {
     /// 用每个子三角形的平均色近似渐变；网格高洛德按 `VerticesPerRow` 切分四边形。
     fn build_mesh_fill(
         &mut self,
-        object: &GraphicObjectView,
         path: &Path,
-        color: &ColorView,
+        color: &Color,
         rule: FillRule,
+        object_id: Option<&str>,
     ) -> Option<Element> {
-        let alpha = color
-            .alpha()
-            .map(|value| (value.clamp(0, 255) as f32) / 255.0)
-            .unwrap_or(1.0);
-        let (points, vertices_per_row, back_color, extend) = match color.kind() {
-            ofdbox_core::ColorKind::GouraudShd => {
-                let shd = color.gouraud_shd()?;
+        let alpha = (color.alpha.clamp(0, 255) as f32) / 255.0;
+        let (points, vertices_per_row, back_color, extend) = match &color.kind {
+            ColorKind::GouraudShd(shd) => {
                 let points = shd
-                    .points()
-                    .filter_map(|point| self.mesh_point(&point, alpha))
+                    .points
+                    .iter()
+                    .filter_map(|point| {
+                        self.mesh_point(Point::new(point.x, point.y), &point.color, alpha)
+                    })
                     .collect::<Vec<_>>();
-                let back = shd.back_color();
-                let back_color = back.as_ref().and_then(|back| match self.solid_paint(back) {
-                    Some(Paint::Color(value)) => Some(scale_alpha(value, alpha)),
-                    _ => None,
-                });
-                (points, None, back_color, shd.extend().unwrap_or(0) != 0)
+                let back_color =
+                    shd.back_color
+                        .as_deref()
+                        .and_then(|back| match self.solid_paint(back) {
+                            Some(Paint::Color(value)) => Some(scale_alpha(value, alpha)),
+                            _ => None,
+                        });
+                (points, None, back_color, shd.extend.unwrap_or(0) != 0)
             }
-            ofdbox_core::ColorKind::LaGouraudShd => {
-                let shd = color.la_gouraud_shd()?;
+            ColorKind::LaGouraudShd(shd) => {
                 let points = shd
-                    .points()
-                    .filter_map(|point| self.mesh_point(&point, alpha))
+                    .points
+                    .iter()
+                    .filter_map(|point| {
+                        self.mesh_point(Point::new(point.x?, point.y?), &point.color, alpha)
+                    })
                     .collect::<Vec<_>>();
-                let back = shd.back_color();
-                let back_color = back.as_ref().and_then(|back| match self.solid_paint(back) {
-                    Some(Paint::Color(value)) => Some(scale_alpha(value, alpha)),
-                    _ => None,
-                });
-                let per_row = shd
-                    .vertices_per_row()
-                    .and_then(|value| usize::try_from(value).ok());
-                (points, per_row, back_color, shd.extend().unwrap_or(0) != 0)
+                let back_color =
+                    shd.back_color
+                        .as_deref()
+                        .and_then(|back| match self.solid_paint(back) {
+                            Some(Paint::Color(value)) => Some(scale_alpha(value, alpha)),
+                            _ => None,
+                        });
+                let per_row = (shd.vertices_per_row > 0)
+                    .then(|| usize::try_from(shd.vertices_per_row).ok())
+                    .flatten();
+                (points, per_row, back_color, shd.extend.unwrap_or(0) != 0)
             }
             _ => return None,
         };
@@ -944,7 +1002,7 @@ impl Builder<'_> {
             }
             _ => {
                 if points.len() < 3 {
-                    self.diagnostic(DiagnosticCode::Paint, object.id(), "网格渐变控制点不足");
+                    self.diagnostic(DiagnosticCode::Paint, object_id, "网格渐变控制点不足");
                     return None;
                 }
                 for index in 1..points.len() - 1 {
@@ -957,7 +1015,7 @@ impl Builder<'_> {
         }
         const MAX_TRIANGLES: usize = 8192;
         if triangles.len() > MAX_TRIANGLES {
-            self.diagnostic(DiagnosticCode::Paint, object.id(), "网格渐变单元过多");
+            self.diagnostic(DiagnosticCode::Paint, object_id, "网格渐变单元过多");
             triangles.truncate(MAX_TRIANGLES);
         }
         let mut depth = 3u8;
@@ -1007,10 +1065,8 @@ impl Builder<'_> {
         Some(Element::Group(fill))
     }
 
-    fn mesh_point(&self, point: &ofdbox_core::PointView, alpha: f32) -> Option<MeshPoint> {
-        let position = Point::new(point.x()?, point.y()?);
-        let color = point.color()?;
-        let value = match self.solid_paint(&color)? {
+    fn mesh_point(&self, position: Point, color: &Color, alpha: f32) -> Option<MeshPoint> {
+        let value = match self.solid_paint(color)? {
             Paint::Color(value) => value,
             _ => return None,
         };
@@ -1020,42 +1076,37 @@ impl Builder<'_> {
         })
     }
 
-    fn build_text(&mut self, object: &GraphicObjectView) -> Vec<Element> {
-        let Some(font_id) = object.attribute("Font") else {
-            self.diagnostic(DiagnosticCode::Font, object.id(), "文字缺少 Font");
-            return Vec::new();
-        };
-        let Some(size) = object
-            .attribute("Size")
-            .and_then(|value| value.parse::<f64>().ok())
-        else {
-            self.diagnostic(DiagnosticCode::Geometry, object.id(), "文字缺少有效 Size");
-            return Vec::new();
-        };
-        if size <= 0.0 {
-            self.diagnostic(DiagnosticCode::Geometry, object.id(), "字号必须为正");
+    fn build_text(&mut self, object: &TextObject) -> Vec<Element> {
+        let label = id_label(object.id);
+        let id = label.as_deref();
+        if object.content.font.0 == 0 {
+            self.diagnostic(DiagnosticCode::Font, id, "文字缺少 Font");
             return Vec::new();
         }
-        let mut read_direction = object
-            .attribute("ReadDirection")
-            .and_then(|value| value.parse::<i32>().ok())
-            .unwrap_or(0);
+        let font_id = object.content.font.to_string();
+        let size = object.content.size;
+        if size == 0.0 {
+            self.diagnostic(DiagnosticCode::Geometry, id, "文字缺少有效 Size");
+            return Vec::new();
+        }
+        if size < 0.0 {
+            self.diagnostic(DiagnosticCode::Geometry, id, "字号必须为正");
+            return Vec::new();
+        }
+        let mut read_direction = object.content.read_direction;
         if !matches!(read_direction, 0 | 90 | 180 | 270) {
             self.diagnostic(
                 DiagnosticCode::UnsupportedObject,
-                object.id(),
+                id,
                 format!("不支持的 ReadDirection: {read_direction}"),
             );
             read_direction = 0;
         }
-        let mut char_direction = object
-            .attribute("CharDirection")
-            .and_then(|value| value.parse::<i32>().ok())
-            .unwrap_or(0);
+        let mut char_direction = object.content.char_direction;
         if !matches!(char_direction, 0 | 90 | 180 | 270) {
             self.diagnostic(
                 DiagnosticCode::UnsupportedObject,
-                object.id(),
+                id,
                 format!("不支持的 CharDirection: {char_direction}"),
             );
             char_direction = 0;
@@ -1068,20 +1119,16 @@ impl Builder<'_> {
         if all_chars.is_empty() {
             return Vec::new();
         }
-        let (font, used_fallback) = match self.font(font_id) {
+        let (font, used_fallback) = match self.font(&font_id) {
             Some(resolved) => (resolved.asset, resolved.fallback),
             None => {
-                self.diagnostic(
-                    DiagnosticCode::Font,
-                    object.id(),
-                    "字体资源缺失，文本层使用估算布局",
-                );
-                let asset = match self.resources.fonts.get(font_id) {
+                self.diagnostic(DiagnosticCode::Font, id, "字体资源缺失，文本层使用估算布局");
+                let asset = match self.resources.fonts.get(&font_id) {
                     Some(resource) => font_asset(Arc::from(&b""[..]), resource),
                     None => FontAsset::new(Arc::from(&b""[..]), 0),
                 };
-                let id = self.store.add_font_asset(asset);
-                match self.store.font(id).cloned() {
+                let asset_id = self.store.add_font_asset(asset);
+                match self.store.font(asset_id).cloned() {
                     Some(font) => (font, true),
                     None => return Vec::new(),
                 }
@@ -1089,32 +1136,32 @@ impl Builder<'_> {
         };
         let face = ttf_parser::Face::parse(font.data(), font.face_index()).ok();
         let has_face = face.is_some();
-        let h_scale = object
-            .attribute("HScale")
-            .and_then(|value| value.parse::<f64>().ok())
-            .unwrap_or(1.0);
-        let weight = object
-            .attribute("Weight")
-            .and_then(|value| value.parse::<i32>().ok())
-            .filter(|value| (100..=900).contains(value))
-            .unwrap_or(400);
-        let italic = parse_bool(object.attribute("Italic")).unwrap_or(false);
-        let fill = parse_bool(object.attribute("Fill")).unwrap_or(true);
-        let stroke = parse_bool(object.attribute("Stroke")).unwrap_or(false);
+        let h_scale = object.content.h_scale;
+        let weight = if (100..=900).contains(&object.content.weight) {
+            object.content.weight
+        } else {
+            400
+        };
+        let italic = object.content.italic;
+        let fill = object.content.fill;
+        let stroke = object.content.stroke;
         let fill_paint = if fill {
-            self.fill_color(object)
-                .map(|color| self.paint(&color, object.id()))
+            self.fill_color(&object.content.graphic, object.content.fill_color.as_ref())
+                .map(|color| self.paint(&color, id))
                 .unwrap_or(Some(Paint::Color(Rgba::BLACK)))
         } else {
             None
         };
         let stroke_paint = if stroke {
-            self.stroke_color(object)
-                .and_then(|color| self.paint(&color, object.id()))
-                .map(|paint| StrokePaint {
-                    paint,
-                    style: self.stroke_style(object),
-                })
+            self.stroke_color(
+                &object.content.graphic,
+                object.content.stroke_color.as_ref(),
+            )
+            .and_then(|color| self.paint(&color, id))
+            .map(|paint| StrokePaint {
+                paint,
+                style: self.stroke_style(&object.content.graphic),
+            })
         } else {
             None
         };
@@ -1263,45 +1310,51 @@ impl Builder<'_> {
         elements
     }
 
-    fn build_image(&mut self, object: &GraphicObjectView) -> Option<Element> {
-        let resource_id = object
-            .attribute("ResourceID")
-            .or_else(|| object.attribute("ResouceID"))?;
+    fn build_image(&mut self, object: &ImageObject) -> Option<Element> {
+        let label = id_label(object.id);
+        let id = label.as_deref();
+        if object.content.resource_id.0 == 0 {
+            return None;
+        }
+        let resource_id = object.content.resource_id.to_string();
         let mut candidates = Vec::new();
         if let Some(substitution) = object
-            .attribute("Substitution")
-            .and_then(|id| self.resources.images.get(id).cloned())
+            .content
+            .substitution
+            .and_then(|id| self.resources.images.get(&id.to_string()).cloned())
         {
             candidates.push(substitution);
         }
-        if let Some(primary) = self.resources.images.get(resource_id).cloned() {
+        if let Some(primary) = self.resources.images.get(&resource_id).cloned() {
             candidates.push(primary);
         }
         if candidates.is_empty() {
             return None;
         }
         let mask = object
-            .attribute("ImageMask")
-            .and_then(|id| self.resources.images.get(id).cloned())
+            .content
+            .image_mask
+            .and_then(|id| self.resources.images.get(&id.to_string()).cloned())
             .and_then(|mask| {
-                let bytes =
-                    read_resource(self.package, &mask.dir, mask.base.as_deref(), &mask.file)
-                        .ok()?;
+                let bytes = mask
+                    .res
+                    .context()
+                    .read_res_file(&mask.res, &mask.file)
+                    .ok()?;
                 let format = detect_image_format(&bytes).unwrap_or(mask.format);
-                Some((format, bytes))
+                Some((format, Arc::<[u8]>::from(bytes)))
             });
 
         let mut loaded = None;
         let mut last_error = None;
         for media in candidates {
-            let bytes =
-                match read_resource(self.package, &media.dir, media.base.as_deref(), &media.file) {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        last_error = Some(format!("读取图片失败: {error}"));
-                        continue;
-                    }
-                };
+            let bytes = match media.res.context().read_res_file(&media.res, &media.file) {
+                Ok(bytes) => Arc::<[u8]>::from(bytes),
+                Err(error) => {
+                    last_error = Some(format!("读取图片失败: {error}"));
+                    continue;
+                }
+            };
             let format = detect_image_format(&bytes).unwrap_or(media.format);
             let Some((width, height)) = image_dimensions(&bytes) else {
                 last_error = Some("无法识别图片尺寸".to_owned());
@@ -1328,18 +1381,14 @@ impl Builder<'_> {
         let Some((image, width, height)) = loaded else {
             self.diagnostic(
                 DiagnosticCode::Image,
-                object.id(),
+                id,
                 last_error.unwrap_or_else(|| "图片资源缺失".to_owned()),
             );
             return None;
         };
         let scale_x = 1.0 / f64::from(width.max(1));
         let scale_y = 1.0 / f64::from(height.max(1));
-        let alpha = object
-            .attribute("Alpha")
-            .and_then(|value| value.parse::<i32>().ok())
-            .map(|value| (value.clamp(0, 255) as f32) / 255.0)
-            .unwrap_or(1.0);
+        let alpha = (object.content.graphic.alpha.clamp(0, 255) as f32) / 255.0;
         Some(Element::Image(ImageElement {
             image,
             rect: Rect::default(),
@@ -1348,44 +1397,34 @@ impl Builder<'_> {
         }))
     }
 
-    fn build_composite(&mut self, object: &GraphicObjectView, boundary: &Rect) -> Vec<Element> {
-        let Some(resource_id) = object
-            .attribute("ResourceID")
-            .or_else(|| object.attribute("ResouceID"))
-        else {
-            self.diagnostic(
-                DiagnosticCode::Geometry,
-                object.id(),
-                "复合对象缺少 ResourceID",
-            );
+    fn build_composite(&mut self, object: &CompositeObject, boundary: &Rect) -> Vec<Element> {
+        let label = id_label(object.id);
+        let id = label.as_deref();
+        if object.content.resource_id.0 == 0 {
+            self.diagnostic(DiagnosticCode::Geometry, id, "复合对象缺少 ResourceID");
+            return Vec::new();
+        }
+        let resource_id = object.content.resource_id.to_string();
+        let Some(unit) = self.resources.composites.get(&resource_id).cloned() else {
+            self.diagnostic(DiagnosticCode::UnsupportedObject, id, "复合对象资源缺失");
             return Vec::new();
         };
-        let Some(unit) = self.resources.composites.get(resource_id).cloned() else {
+        if !self.composites.insert(resource_id.clone()) {
             self.diagnostic(
                 DiagnosticCode::UnsupportedObject,
-                object.id(),
-                "复合对象资源缺失",
-            );
-            return Vec::new();
-        };
-        if !self.composites.insert(resource_id.to_owned()) {
-            self.diagnostic(
-                DiagnosticCode::UnsupportedObject,
-                object.id(),
+                id,
                 "复合对象存在循环引用",
             );
             return Vec::new();
         }
-        let unit_width = unit.width().unwrap_or(0.0);
-        let unit_height = unit.height().unwrap_or(0.0);
+        let unit_width = unit.width;
+        let unit_height = unit.height;
         let mut elements = Vec::new();
         if unit_width > 0.0 && unit_height > 0.0 {
             let mut nested = Vec::new();
             self.depth += 1;
-            if let Some(content) = unit.content() {
-                for child in content.objects() {
-                    self.render_object(&child, &mut nested);
-                }
+            for child in &unit.content.objects {
+                self.render_object(child, &mut nested);
             }
             self.depth -= 1;
             let mut group = Group::new(Matrix::scale(
@@ -1395,49 +1434,39 @@ impl Builder<'_> {
             group.children = nested;
             elements.push(Element::Group(group));
         }
-        self.composites.remove(resource_id);
+        self.composites.remove(&resource_id);
         elements
     }
 
-    fn render_annotations(
-        &mut self,
-        document: &ofdbox_core::DocumentView,
-        page: &PageView,
-        output: &mut Vec<Element>,
-    ) {
-        if document.annotations().is_none() {
+    fn render_annotations(&mut self, output: &mut Vec<Element>) {
+        let Some(loc) = self.document.data.annotations.as_ref() else {
             return;
-        }
-        let index = match self.package.parse_annotations() {
-            Ok(index) => index,
-            Err(error) => {
-                self.diagnostic(
-                    DiagnosticCode::UnsupportedObject,
-                    page.id(),
-                    format!("注释索引读取失败: {error}"),
-                );
-                return;
-            }
         };
-        for entry in index.pages() {
-            if entry.page_id() != page.id() {
+        let Ok(index) = self.document.context().load_annotations(loc) else {
+            let page_id = self.page_id.clone();
+            self.diagnostic(
+                DiagnosticCode::UnsupportedObject,
+                page_id.as_deref(),
+                "注释索引读取失败".to_owned(),
+            );
+            return;
+        };
+        let Some(page_id) = self.page_id.clone() else {
+            return;
+        };
+        for entry in &index.data.pages {
+            if entry.page_id != page_id {
                 continue;
             }
-            let Some(loc) = entry.file_loc().map(str::to_owned) else {
+            let Ok(page_annot) = index.context().load_page_annot(&entry.file_loc) else {
                 continue;
             };
-            let Ok(page_annot) = self.package.parse_page_annot(&loc) else {
-                continue;
-            };
-            for annot in page_annot.annots() {
-                if annot.visible() == Some(false) || annot.print() == Some(false) {
+            for annot in &page_annot.annots {
+                if !annot.visible || !annot.print {
                     continue;
                 }
-                let Some(appearance) = annot.appearance() else {
-                    continue;
-                };
-                for object in appearance.objects() {
-                    self.render_object(&object, output);
+                for object in &annot.appearance.page_block.objects {
+                    self.render_object(object, output);
                 }
             }
         }
@@ -1445,25 +1474,30 @@ impl Builder<'_> {
 
     fn render_templates(
         &mut self,
-        references: &[TemplateView],
+        references: &[Template],
         order: TemplateOrder,
         output: &mut Vec<Element>,
         visited: &mut HashSet<String>,
     ) {
         for reference in references {
-            let Some(id) = reference.template_id() else {
+            if reference.template_id.0 == 0 {
                 continue;
-            };
-            let Some(template) = self.templates.get(id).cloned() else {
+            }
+            let id = reference.template_id.to_string();
+            let Some(template) = self.templates.get(&id).cloned() else {
                 self.diagnostic(
                     DiagnosticCode::UnsupportedObject,
-                    reference.template_id(),
+                    Some(&id),
                     format!("模板页缺失: {id}"),
                 );
                 continue;
             };
-            let z_order = reference.z_order().unwrap_or(&template.z_order);
-            if template_order(z_order) == order {
+            // 页内 `Template` 的 ZOrder 缺省（Background）时沿用模板页声明。
+            let reference_order = match &reference.z_order {
+                TemplateZOrder::Background => template_page_order(&template.z_order),
+                other => template_ref_order(other),
+            };
+            if reference_order == order {
                 self.render_template(&template, output, visited);
             }
         }
@@ -1483,34 +1517,32 @@ impl Builder<'_> {
             );
             return;
         }
-        let references = template.content.templates().collect::<Vec<_>>();
-        self.render_templates(&references, TemplateOrder::Background, output, visited);
-        self.render_templates(&references, TemplateOrder::Body, output, visited);
-        if let Some(content) = template.content.content() {
-            for layer in content.layers() {
-                let previous = self.layer_draw_param.clone();
-                self.layer_draw_param = layer.draw_param().map(str::to_owned);
-                for object in layer.objects() {
-                    self.render_object(&object, output);
-                }
-                self.layer_draw_param = previous;
-            }
+        let content = &template.content;
+        let references = content.data.templates.as_slice();
+        self.render_templates(references, TemplateOrder::Background, output, visited);
+        self.render_templates(references, TemplateOrder::Body, output, visited);
+        if let Some(page_content) = &content.data.content {
+            self.render_layers(page_content, output);
         }
-        self.render_templates(&references, TemplateOrder::Foreground, output, visited);
+        self.render_templates(references, TemplateOrder::Foreground, output, visited);
         visited.remove(&template.id);
     }
 
     fn font(&mut self, id: &str) -> Option<ResolvedFont> {
         let resource = self.resources.fonts.get(id).cloned()?;
-        let key = format!("{}/{id}", resource.dir);
+        let key = format!("{}/{id}", resource.res.location().as_str());
         if let Some(Some(cached)) = self.font_cache.get(&key) {
             return Some(cached.clone());
         }
-        let embedded = resource.file.as_deref().and_then(|file| {
-            read_resource(self.package, &resource.dir, resource.base.as_deref(), file).ok()
+        let embedded = resource.file.as_ref().and_then(|file| {
+            resource
+                .res
+                .context()
+                .read_res_file(&resource.res, file)
+                .ok()
         });
         let (data, fallback) = if let Some(bytes) = embedded.filter(|bytes| !bytes.is_empty()) {
-            (bytes, false)
+            (Arc::<[u8]>::from(bytes), false)
         } else {
             let provider = self.font_provider.as_mut()?;
             let request = FontRequest {
@@ -1522,7 +1554,7 @@ impl Builder<'_> {
                 italic: resource.italic,
                 serif: resource.serif,
                 fixed_width: resource.fixed_width,
-                font_file: resource.file.as_deref(),
+                font_file: resource.file.as_ref().map(|file| file.as_str()),
             };
             (provider.load(&request).ok()??, true)
         };
@@ -1547,7 +1579,7 @@ impl Builder<'_> {
             let Some(resource) = self.resources.draw_params.get(&id) else {
                 break;
             };
-            current = resource.relative.clone();
+            current = resource.relative.map(|relative| relative.to_string());
             chain.push(resource.clone());
         }
         if chain.is_empty() {
@@ -1583,10 +1615,10 @@ impl Builder<'_> {
         Some(merged)
     }
 
-    fn object_draw_param(&self, object: &GraphicObjectView) -> Option<DrawParamResource> {
-        object
-            .attribute("DrawParam")
-            .and_then(|id| self.resolved_draw_param(id))
+    fn object_draw_param(&self, common: &GraphicUnit) -> Option<DrawParamResource> {
+        common
+            .draw_param
+            .and_then(|id| self.resolved_draw_param(&id.to_string()))
     }
 
     fn layer_draw_param_resource(&self) -> Option<DrawParamResource> {
@@ -1595,11 +1627,11 @@ impl Builder<'_> {
             .and_then(|id| self.resolved_draw_param(id))
     }
 
-    fn fill_color(&self, object: &GraphicObjectView) -> Option<ColorView> {
-        object
-            .fill_color()
+    fn fill_color(&self, common: &GraphicUnit, color: Option<&Color>) -> Option<Color> {
+        color
+            .cloned()
             .or_else(|| {
-                self.object_draw_param(object)
+                self.object_draw_param(common)
                     .and_then(|param| param.fill_color)
             })
             .or_else(|| {
@@ -1608,11 +1640,11 @@ impl Builder<'_> {
             })
     }
 
-    fn stroke_color(&self, object: &GraphicObjectView) -> Option<ColorView> {
-        object
-            .stroke_color()
+    fn stroke_color(&self, common: &GraphicUnit, color: Option<&Color>) -> Option<Color> {
+        color
+            .cloned()
             .or_else(|| {
-                self.object_draw_param(object)
+                self.object_draw_param(common)
                     .and_then(|param| param.stroke_color)
             })
             .or_else(|| {
@@ -1621,96 +1653,84 @@ impl Builder<'_> {
             })
     }
 
-    fn stroke_style(&mut self, object: &GraphicObjectView) -> StrokeStyle {
+    fn stroke_style(&mut self, common: &GraphicUnit) -> StrokeStyle {
         let mut style = StrokeStyle::default();
         if let Some(param) = self.layer_draw_param_resource() {
             apply_draw_param(&mut style, &param);
         }
-        if let Some(param) = self.object_draw_param(object) {
+        if let Some(param) = self.object_draw_param(common) {
             apply_draw_param(&mut style, &param);
         }
-        if let Some(width) = object
-            .attribute("LineWidth")
-            .and_then(|value| value.parse::<f64>().ok())
-        {
-            style.width = width;
+        // 与 XSD 默认值相等视为「未声明」，保持旧行为（默认宽度 1.0）。
+        if common.line_width != DEFAULT_LINE_WIDTH {
+            style.width = common.line_width;
         }
-        if let Some(miter) = object
-            .attribute("MiterLimit")
-            .and_then(|value| value.parse::<f64>().ok())
-        {
-            style.miter_limit = miter;
+        if common.miter_limit != DEFAULT_MITER_LIMIT {
+            style.miter_limit = common.miter_limit;
         }
-        if let Some(offset) = object
-            .attribute("DashOffset")
-            .and_then(|value| value.parse::<f64>().ok())
-        {
-            style.dash_offset = offset;
+        if common.dash_offset != 0.0 {
+            style.dash_offset = common.dash_offset;
         }
-        if let Some(pattern) = object.attribute("DashPattern") {
-            style.dash = parse_floats(pattern);
+        if let Some(pattern) = &common.dash_pattern {
+            style.dash = pattern.0.clone();
         }
-        if let Some(cap) = object.attribute("Cap").and_then(parse_cap) {
+        if let Some(cap) = cap_from(&common.cap) {
             style.cap = cap;
         }
-        if let Some(join) = object.attribute("Join").and_then(parse_join) {
+        if let Some(join) = join_from(&common.join) {
             style.join = join;
         }
         style.width = style.width.max(0.0);
         style
     }
 
-    fn paint(&mut self, color: &ColorView, object_id: Option<&str>) -> Option<Paint> {
-        match color.kind() {
-            ofdbox_core::ColorKind::Solid => self.solid_paint(color),
-            ofdbox_core::ColorKind::AxialShd => {
-                let shd = color.axial_shd()?;
-                let start = shd.start_point().and_then(parse_point)?;
-                let end = shd.end_point().and_then(parse_point)?;
-                let (start, end) = gradient_axis(start, end, shd.map_type(), shd.map_unit());
+    fn paint(&mut self, color: &Color, object_id: Option<&str>) -> Option<Paint> {
+        match &color.kind {
+            ColorKind::None => self.solid_paint(color),
+            ColorKind::AxialShd(shd) => {
+                let start = point_from_pos(shd.start_point);
+                let end = point_from_pos(shd.end_point);
+                let (start, end) = gradient_axis(start, end, &shd.map_type, shd.map_unit);
                 Some(Paint::LinearGradient(LinearGradient {
                     start,
                     end,
-                    stops: self.gradient_stops(shd.segments(), color.alpha()),
-                    extend: gradient_extend(shd.map_type()),
+                    stops: self.gradient_stops(&shd.segments, color.alpha),
+                    extend: gradient_extend(&shd.map_type),
                 }))
             }
-            ofdbox_core::ColorKind::RadialShd => {
-                let shd = color.radial_shd()?;
-                let start_center = shd.start_point().and_then(parse_point)?;
-                let end_center = shd.end_point().and_then(parse_point)?;
-                let start_radius = shd.start_radius().unwrap_or(0.0);
-                let end_radius = shd
-                    .end_radius()
-                    .unwrap_or_else(|| distance(start_center, end_center));
+            ColorKind::RadialShd(shd) => {
+                let start_center = point_from_pos(shd.start_point);
+                let end_center = point_from_pos(shd.end_point);
+                let start_radius = shd.start_radius;
+                let end_radius = shd.end_radius;
                 let (start_center, end_center) =
-                    gradient_axis(start_center, end_center, shd.map_type(), shd.map_unit());
+                    gradient_axis(start_center, end_center, &shd.map_type, shd.map_unit);
                 Some(Paint::RadialGradient(RadialGradient {
                     start_center,
                     start_radius,
                     end_center,
                     end_radius,
-                    stops: self.gradient_stops(shd.segments(), color.alpha()),
-                    extend: gradient_extend(shd.map_type()),
-                    eccentricity: shd.eccentricity().unwrap_or(0.0),
-                    angle: shd.angle().unwrap_or(0.0),
+                    stops: self.gradient_stops(&shd.segments, color.alpha),
+                    extend: gradient_extend(&shd.map_type),
+                    eccentricity: shd.eccentricity,
+                    angle: shd.angle,
                 }))
             }
             other => {
                 self.diagnostic(
                     DiagnosticCode::Paint,
                     object_id,
-                    format!("暂不支持的颜色形态: {other:?}"),
+                    format!("暂不支持的颜色形态: {}", color_kind_name(other)),
                 );
                 None
             }
         }
     }
 
-    fn solid_paint(&self, color: &ColorView) -> Option<Paint> {
+    fn solid_paint(&self, color: &Color) -> Option<Paint> {
         let space = color
-            .color_space()
-            .and_then(|id| self.resources.colors.get(id))
+            .color_space
+            .and_then(|id| self.resources.colors.get(&id.to_string()))
             .or_else(|| {
                 self.default_color_space
                     .as_deref()
@@ -1725,37 +1745,32 @@ impl Builder<'_> {
             Some("CMYK") => "0 0 0 0",
             _ => "0 0 0",
         };
-        let value = if let Some(index) = color.index() {
+        let value = if let Some(index) = color.index {
             if index < 0 {
                 return None;
             }
-            space?.palette.get(index as usize)?.clone()
+            space?.palette.get(index as usize)?.to_string()
         } else {
-            color.value().unwrap_or(default_value).to_owned()
+            color
+                .value
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| default_value.to_owned())
         };
         let components = parse_color_components(&value, bits);
         let kind = space.map_or("", |space| space.kind.as_str());
-        let alpha = color
-            .alpha()
-            .map(|value| (value.clamp(0, 255) as f32) / 255.0)
-            .unwrap_or(1.0);
+        let alpha = (color.alpha.clamp(0, 255) as f32) / 255.0;
         Some(Paint::Color(components_to_rgba(&components, kind, alpha)?))
     }
 
-    fn gradient_stops(
-        &mut self,
-        segments: impl Iterator<Item = ofdbox_core::SegmentView>,
-        alpha: Option<i32>,
-    ) -> Vec<GradientStop> {
-        let alpha = alpha
-            .map(|value| (value.clamp(0, 255) as f32) / 255.0)
-            .unwrap_or(1.0);
+    fn gradient_stops(&mut self, segments: &[ShdSegment], alpha: i32) -> Vec<GradientStop> {
+        let alpha = (alpha.clamp(0, 255) as f32) / 255.0;
         let collected = segments
+            .iter()
             .filter_map(|segment| {
-                let color = segment.color()?;
-                let mut stop = match self.solid_paint(&color)? {
+                let mut stop = match self.solid_paint(&segment.color)? {
                     Paint::Color(color) => GradientStop {
-                        offset: segment.position().unwrap_or(f64::NAN),
+                        offset: segment.position.unwrap_or(f64::NAN),
                         color,
                     },
                     _ => return None,
@@ -1791,6 +1806,18 @@ fn clip_group(path: Arc<Path>, transform: Matrix, children: Vec<Element>) -> Gro
     group
 }
 
+/// 颜色形态的短名，用于诊断文本。
+fn color_kind_name(kind: &ColorKind) -> &'static str {
+    match kind {
+        ColorKind::Pattern(_) => "Pattern",
+        ColorKind::AxialShd(_) => "AxialShd",
+        ColorKind::RadialShd(_) => "RadialShd",
+        ColorKind::GouraudShd(_) => "GouraudShd",
+        ColorKind::LaGouraudShd(_) => "LaGouraudShd",
+        ColorKind::None => "None",
+    }
+}
+
 struct CodeRun {
     chars: Vec<char>,
     x: f64,
@@ -1799,21 +1826,29 @@ struct CodeRun {
     delta_y: Vec<f64>,
 }
 
-fn collect_code_runs(object: &GraphicObjectView) -> Vec<CodeRun> {
+fn collect_code_runs(object: &TextObject) -> Vec<CodeRun> {
     let mut runs = Vec::new();
     let mut last_x = 0.0;
     let mut last_y = 0.0;
-    for code in object.text_codes() {
-        let x = code.x().unwrap_or(last_x);
-        let y = code.y().unwrap_or(last_y);
+    for code in &object.content.text_codes {
+        let x = code.x.unwrap_or(last_x);
+        let y = code.y.unwrap_or(last_y);
         last_x = x;
         last_y = y;
         runs.push(CodeRun {
-            chars: decode_text(code.text()),
+            chars: decode_text(&code.text),
             x,
             y,
-            delta_x: code.delta_x().map(parse_delta_floats).unwrap_or_default(),
-            delta_y: code.delta_y().map(parse_delta_floats).unwrap_or_default(),
+            delta_x: code
+                .delta_x
+                .as_ref()
+                .map(|values| values.0.clone())
+                .unwrap_or_default(),
+            delta_y: code
+                .delta_y
+                .as_ref()
+                .map(|values| values.0.clone())
+                .unwrap_or_default(),
         });
     }
     runs
@@ -1824,25 +1859,23 @@ fn collect_code_runs(object: &GraphicObjectView) -> Vec<CodeRun> {
 /// - `None`：没有 CGTransform，按字符 CMAP 取字形；
 /// - `Some(vec![])`：被簇覆盖但不产生字形（多对一的后续字符）；
 /// - `Some(glyphs)`：一个或多个字形，整个簇锚定在该编码位置。
-fn glyph_slots(object: &GraphicObjectView, count: usize) -> Vec<Option<Vec<u32>>> {
+fn glyph_slots(object: &TextObject, count: usize) -> Vec<Option<Vec<u32>>> {
     let mut slots = vec![None; count];
-    for transform in object.cg_transforms() {
-        let glyphs = transform.glyphs().map(parse_u32s).unwrap_or_default();
+    for transform in &object.content.cg_transforms {
+        let glyphs = transform
+            .glyphs
+            .as_deref()
+            .map(parse_u32s)
+            .unwrap_or_default();
         if glyphs.is_empty() {
             continue;
         }
-        let position = transform.code_position().unwrap_or(0).max(0) as usize;
+        let position = transform.code_position.max(0) as usize;
         if position >= count {
             continue;
         }
-        let code_count = transform
-            .code_count()
-            .map(|value| value.max(1) as usize)
-            .unwrap_or(1);
-        let glyph_count = transform
-            .glyph_count()
-            .map(|value| value.max(1) as usize)
-            .unwrap_or(1);
+        let code_count = transform.code_count.max(1) as usize;
+        let glyph_count = transform.glyph_count.max(1) as usize;
         if code_count == glyph_count && glyphs.len() == code_count {
             for (index, glyph) in glyphs.into_iter().enumerate() {
                 if let Some(slot) = slots.get_mut(position + index) {
@@ -2158,84 +2191,16 @@ fn parse_u32s(text: &str) -> Vec<u32> {
         .collect()
 }
 
-/// `DeltaX`/`DeltaY` 的数值数列。
-///
-/// 部分厂商用 `g <次数> <值>` 压缩重复偏移，例如 `g 5 2.0285`
-/// 展开为 5 个 2.0285；标准示例仍使用纯数字，两种写法都接受。
-fn parse_delta_floats(text: &str) -> Vec<f64> {
-    let tokens = text
-        .split(|character: char| character.is_whitespace() || character == ',')
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
-    let mut values = Vec::new();
-    let mut index = 0;
-    while index < tokens.len() {
-        if tokens[index].eq_ignore_ascii_case("g") {
-            let Some(count) = tokens
-                .get(index + 1)
-                .and_then(|value| value.parse::<usize>().ok())
-            else {
-                index += 1;
-                continue;
-            };
-            let Some(value) = tokens
-                .get(index + 2)
-                .and_then(|value| value.parse::<f64>().ok())
-            else {
-                index += 1;
-                continue;
-            };
-            let count = count.min(1_000_000);
-            values.extend(std::iter::repeat_n(value, count));
-            index += 3;
-        } else if let Ok(value) = tokens[index].parse::<f64>() {
-            values.push(value);
-            index += 1;
-        } else {
-            index += 1;
+fn path_rule(rule: &PathRule) -> FillRule {
+    match rule {
+        PathRule::EvenOdd => FillRule::EvenOdd,
+        PathRule::NonZero => FillRule::NonZero,
+        PathRule::Other(value)
+            if value.eq_ignore_ascii_case("Even-Odd") || value.eq_ignore_ascii_case("EvenOdd") =>
+        {
+            FillRule::EvenOdd
         }
-    }
-    values
-}
-
-fn parse_floats(text: &str) -> Vec<f64> {
-    text.split(|character: char| character.is_whitespace() || character == ',')
-        .filter(|value| !value.is_empty())
-        .filter_map(|value| value.parse().ok())
-        .collect()
-}
-
-fn parse_rect(text: &str) -> Option<Rect> {
-    let values = parse_floats(text);
-    if values.len() < 4 {
-        return None;
-    }
-    Some(Rect::new(values[0], values[1], values[2], values[3]))
-}
-
-fn parse_point(text: &str) -> Option<Point> {
-    let values = parse_floats(text);
-    if values.len() < 2 {
-        return None;
-    }
-    Some(Point::new(values[0], values[1]))
-}
-
-fn parse_matrix(text: &str) -> Option<Matrix> {
-    let values = parse_floats(text);
-    if values.len() != 6 {
-        return None;
-    }
-    Some(Matrix::new(
-        values[0], values[1], values[2], values[3], values[4], values[5],
-    ))
-}
-
-fn parse_bool(text: Option<&str>) -> Option<bool> {
-    match text? {
-        "true" | "1" => Some(true),
-        "false" | "0" => Some(false),
-        _ => None,
+        PathRule::Other(_) => FillRule::NonZero,
     }
 }
 
@@ -2254,6 +2219,24 @@ fn parse_join(text: &str) -> Option<LineJoin> {
         "Round" | "round" => Some(LineJoin::Round),
         "Bevel" | "bevel" => Some(LineJoin::Bevel),
         _ => None,
+    }
+}
+
+fn cap_from(cap: &Cap) -> Option<LineCap> {
+    match cap {
+        Cap::Butt => None,
+        Cap::Round => Some(LineCap::Round),
+        Cap::Square => Some(LineCap::Square),
+        Cap::Other(value) => parse_cap(value),
+    }
+}
+
+fn join_from(join: &Join) -> Option<LineJoin> {
+    match join {
+        Join::Miter => None,
+        Join::Round => Some(LineJoin::Round),
+        Join::Bevel => Some(LineJoin::Bevel),
+        Join::Other(value) => parse_join(value),
     }
 }
 
@@ -2338,12 +2321,20 @@ fn scale_alpha(color: Rgba, alpha: f32) -> Rgba {
 
 /// `MapType` 决定渐变区间内如何重复；`Extend` 的 0/1/2/3 是端点延伸，
 /// 后端只有 Pad/Repeat/Reflect 三种模式，这里对 Direct 统一用 Pad 近似。
-fn gradient_extend(map_type: Option<&str>) -> GradientExtend {
-    match map_type {
-        Some(value) if value.eq_ignore_ascii_case("Repeat") => GradientExtend::Repeat,
-        Some(value) if value.eq_ignore_ascii_case("Reflect") => GradientExtend::Reflect,
-        _ => GradientExtend::Pad,
-    }
+fn gradient_extend(map_type: &MapType) -> GradientExtend {
+    let repeating = match map_type {
+        MapType::Repeat => Some(GradientExtend::Repeat),
+        MapType::Reflect => Some(GradientExtend::Reflect),
+        MapType::Direct => None,
+        MapType::Other(value) if value.eq_ignore_ascii_case("Repeat") => {
+            Some(GradientExtend::Repeat)
+        }
+        MapType::Other(value) if value.eq_ignore_ascii_case("Reflect") => {
+            Some(GradientExtend::Reflect)
+        }
+        MapType::Other(_) => None,
+    };
+    repeating.unwrap_or(GradientExtend::Pad)
 }
 
 /// 非 Direct 时，一个渐变区间的长度由 `MapUnit` 决定（默认轴线长度），
@@ -2351,13 +2342,10 @@ fn gradient_extend(map_type: Option<&str>) -> GradientExtend {
 fn gradient_axis(
     start: Point,
     end: Point,
-    map_type: Option<&str>,
+    map_type: &MapType,
     map_unit: Option<f64>,
 ) -> (Point, Point) {
-    let repeating = map_type.is_some_and(|value| {
-        value.eq_ignore_ascii_case("Repeat") || value.eq_ignore_ascii_case("Reflect")
-    });
-    if !repeating {
+    if is_direct(map_type) {
         return (start, end);
     }
     let length = distance(start, end);
@@ -2374,45 +2362,47 @@ fn gradient_axis(
 
 /// Direct 渐变在 `Extend` 不允许延伸的方向上不应继续绘制。
 /// 返回一个裁剪路径，用于把填充限制在渐变实际覆盖的区域内。
-fn gradient_fill_clip(color: &ColorView) -> Option<Path> {
-    match color.kind() {
-        ofdbox_core::ColorKind::AxialShd => {
-            let shd = color.axial_shd()?;
-            if !is_direct(shd.map_type()) {
+fn gradient_fill_clip(color: &Color) -> Option<Path> {
+    match &color.kind {
+        ColorKind::AxialShd(shd) => {
+            if !is_direct(&shd.map_type) {
                 return None;
             }
-            let extend = shd.extend().unwrap_or(0);
+            let extend = shd.extend;
             if extend == 3 {
                 return None;
             }
-            let start = shd.start_point().and_then(parse_point)?;
-            let end = shd.end_point().and_then(parse_point)?;
+            let start = point_from_pos(shd.start_point);
+            let end = point_from_pos(shd.end_point);
             axial_clip_path(start, end, extend)
         }
-        ofdbox_core::ColorKind::RadialShd => {
-            let shd = color.radial_shd()?;
-            if !is_direct(shd.map_type()) {
+        ColorKind::RadialShd(shd) => {
+            if !is_direct(&shd.map_type) {
                 return None;
             }
-            let extend = shd.extend().unwrap_or(0);
+            let extend = shd.extend;
             if extend == 3 {
                 return None;
             }
-            let start = shd.start_point().and_then(parse_point)?;
-            let end = shd.end_point().and_then(parse_point)?;
-            let start_radius = shd.start_radius().unwrap_or(0.0);
-            let end_radius = shd.end_radius().unwrap_or_else(|| distance(start, end));
-            let eccentricity = shd.eccentricity().unwrap_or(0.0).clamp(0.0, 0.999);
+            let start = point_from_pos(shd.start_point);
+            let end = point_from_pos(shd.end_point);
+            let start_radius = shd.start_radius;
+            let end_radius = shd.end_radius;
+            let eccentricity = shd.eccentricity.clamp(0.0, 0.999);
             let ratio = (1.0 - eccentricity * eccentricity).max(1e-4).sqrt();
-            let angle = shd.angle().unwrap_or(0.0);
+            let angle = shd.angle;
             radial_clip_path(start, start_radius, end, end_radius, ratio, angle, extend)
         }
         _ => None,
     }
 }
 
-fn is_direct(map_type: Option<&str>) -> bool {
-    map_type.is_none_or(|value| value.eq_ignore_ascii_case("Direct"))
+fn is_direct(map_type: &MapType) -> bool {
+    match map_type {
+        MapType::Direct => true,
+        MapType::Other(value) => value.eq_ignore_ascii_case("Direct"),
+        _ => false,
+    }
 }
 
 fn axial_clip_path(start: Point, end: Point, extend: i32) -> Option<Path> {
@@ -2656,70 +2646,11 @@ fn average_color(triangle: &[MeshPoint; 3]) -> Rgba {
     )
 }
 
-fn parent_dir(path: &str) -> &str {
-    path.rfind('/').map(|index| &path[..index]).unwrap_or("")
-}
-
-/// 真实文件既有相对 Document.xml 的路径，也有已经包含 `Doc_0/` 的根相对路径。
-fn resolve_existing(package: &OfdPackage, base: &str, loc: &str) -> Option<String> {
-    let primary = package.resolve_entry(base, loc).ok()?;
-    if package.contains(&primary) {
-        return Some(primary);
-    }
-    let root = package.resolve_entry("", loc).ok()?;
-    if package.contains(&root) {
-        return Some(root);
-    }
-    None
-}
-
-pub(crate) fn read_resource(
-    package: &mut OfdPackage,
-    dir: &str,
-    base: Option<&str>,
-    file: &str,
-) -> Result<Arc<[u8]>, OfdError> {
-    let mut candidates = Vec::new();
-    if let Some(base) = base {
-        let base = base.trim_end_matches('/');
-        if let Ok(entry) = package.resolve_entry(dir, &format!("{base}/{file}")) {
-            candidates.push(entry);
-        }
-        if let Ok(entry) = package.resolve_entry("", &format!("{base}/{file}")) {
-            candidates.push(entry);
-        }
-    }
-    if let Ok(entry) = package.resolve_entry(dir, file) {
-        candidates.push(entry);
-    }
-    if let Ok(entry) = package.resolve_entry("", file) {
-        candidates.push(entry);
-    }
-    for entry in &candidates {
-        if package.contains(entry) {
-            return Ok(package.read_entry(entry)?);
-        }
-    }
-    // 真实文件里资源引用和 ZIP 条目大小写经常不一致。
-    if let Ok(names) = package.entry_names() {
-        for candidate in &candidates {
-            if let Some(name) = names
-                .iter()
-                .find(|name| name.eq_ignore_ascii_case(candidate))
-            {
-                return Ok(package.read_entry(name)?);
-            }
-        }
-    }
-    Err(OfdError::MissingEntry(file.to_owned()))
-}
-
 #[derive(Clone)]
 struct TemplateEntry {
     id: String,
-    z_order: String,
-    entry: String,
-    content: ofdbox_core::PageContentView,
+    z_order: PageZOrder,
+    content: Rc<Loaded<PageModel>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2729,7 +2660,23 @@ enum TemplateOrder {
     Foreground,
 }
 
-fn template_order(value: &str) -> TemplateOrder {
+fn template_page_order(value: &PageZOrder) -> TemplateOrder {
+    match value {
+        PageZOrder::Foreground => TemplateOrder::Foreground,
+        PageZOrder::Background => TemplateOrder::Background,
+        PageZOrder::Other(value) => template_order_text(value),
+    }
+}
+
+fn template_ref_order(value: &TemplateZOrder) -> TemplateOrder {
+    match value {
+        TemplateZOrder::Foreground => TemplateOrder::Foreground,
+        TemplateZOrder::Background => TemplateOrder::Background,
+        TemplateZOrder::Other(value) => template_order_text(value),
+    }
+}
+
+fn template_order_text(value: &str) -> TemplateOrder {
     if value.eq_ignore_ascii_case("Foreground") {
         TemplateOrder::Foreground
     } else if value.eq_ignore_ascii_case("Body") {
@@ -2827,10 +2774,13 @@ fn image_format_from_path(path: &str) -> ImageFormat {
 #[cfg(test)]
 mod tests {
     use super::{
-        components_to_rgba, distribute_stops, parse_color_components, parse_delta_floats,
-        parse_path_data,
+        components_to_rgba, distribute_stops, gradient_axis, gradient_extend, matrix_from_array,
+        parse_color_components, parse_path_data,
     };
-    use ofdbox_folio_ir::{GradientExtend, GradientStop, PathSegment, Point, Rgba};
+    use ofdbox_core::model::definition::{DeltaArray, StArray};
+    use ofdbox_core::model::page::MapType;
+    use ofdbox_folio_ir::{GradientExtend, GradientStop, Matrix, PathSegment, Point, Rgba};
+    use std::str::FromStr;
 
     #[test]
     fn parses_spaced_path() {
@@ -2908,17 +2858,18 @@ mod tests {
 
     #[test]
     fn maps_gradient_extend_and_map_unit() {
-        use super::{gradient_axis, gradient_extend};
-
-        assert_eq!(gradient_extend(Some("Repeat")), GradientExtend::Repeat);
-        assert_eq!(gradient_extend(Some("Reflect")), GradientExtend::Reflect);
-        assert_eq!(gradient_extend(Some("Direct")), GradientExtend::Pad);
-        assert_eq!(gradient_extend(None), GradientExtend::Pad);
+        assert_eq!(gradient_extend(&MapType::Repeat), GradientExtend::Repeat);
+        assert_eq!(gradient_extend(&MapType::Reflect), GradientExtend::Reflect);
+        assert_eq!(gradient_extend(&MapType::Direct), GradientExtend::Pad);
+        assert_eq!(
+            gradient_extend(&MapType::Other("Direct".to_owned())),
+            GradientExtend::Pad
+        );
 
         let (_, end) = gradient_axis(
             Point::new(0.0, 0.0),
             Point::new(100.0, 0.0),
-            Some("Repeat"),
+            &MapType::Repeat,
             Some(25.0),
         );
         assert_eq!(end, Point::new(25.0, 0.0));
@@ -2927,21 +2878,37 @@ mod tests {
         let (_, end) = gradient_axis(
             Point::new(0.0, 0.0),
             Point::new(0.0, 100.0),
-            None,
+            &MapType::Direct,
             Some(25.0),
         );
         assert_eq!(end, Point::new(0.0, 100.0));
     }
 
+    /// `DeltaX`/`DeltaY` 的 `g <次数> <值>` 压缩写法由 `DeltaArray` 解析。
     #[test]
-    fn expands_delta_groups() {
+    fn expands_grouped_deltas() {
         assert_eq!(
-            parse_delta_floats("1 2 3 g 2 4 5"),
+            DeltaArray::from_str("1 2 3 g 2 4 5").expect("array").0,
             vec![1.0, 2.0, 3.0, 4.0, 4.0, 5.0]
         );
-        assert_eq!(parse_delta_floats("G 3 1.5"), vec![1.5, 1.5, 1.5]);
-        assert_eq!(parse_delta_floats("g 0 9"), Vec::<f64>::new());
-        assert_eq!(parse_delta_floats("g 2 1 g 2 2"), vec![1.0, 1.0, 2.0, 2.0]);
+        assert_eq!(
+            DeltaArray::from_str("G 3 1.5").expect("array").0,
+            vec![1.5, 1.5, 1.5]
+        );
+        assert_eq!(
+            DeltaArray::from_str("g 0 9").expect("array").0,
+            Vec::<f64>::new()
+        );
+    }
+
+    #[test]
+    fn converts_ctm_arrays() {
+        assert_eq!(
+            matrix_from_array(&StArray::new(vec![1.0, 0.0, 0.0, 1.0, 10.0, 20.0])),
+            Some(Matrix::new(1.0, 0.0, 0.0, 1.0, 10.0, 20.0))
+        );
+        assert_eq!(matrix_from_array(&StArray::new(vec![1.0])), None);
+        assert_eq!(matrix_from_array(&StArray::default()), None);
     }
 
     #[test]
