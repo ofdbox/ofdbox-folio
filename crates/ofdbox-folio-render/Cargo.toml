@@ -7,7 +7,7 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 license.workspace = true
-description = "OFDBox Folio 的 Fixed IR 渲染与缓存。"
+description = "Fixed IR rendering and caching for OFDBox Folio."
 keywords = ["rendering", "raster", "document", "scene"]
 categories = ["graphics"]
 

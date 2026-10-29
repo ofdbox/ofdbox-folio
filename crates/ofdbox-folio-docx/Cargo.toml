@@ -7,7 +7,7 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 license.workspace = true
-description = "OFDBox Folio 的 DOCX 与 Flow IR 读写适配。"
+description = "DOCX and Flow IR read/write adapter for OFDBox Folio."
 keywords = ["docx", "ooxml", "document", "reader", "writer"]
 categories = ["parser-implementations", "text-processing"]
 

@@ -1,57 +1,59 @@
-//! 字体提供者契约与 TrueType 子集化。
+//! Font provider contract and TrueType subsetting.
 //!
-//! 格式适配器和布局引擎通过本 trait 获取缺失的字体字节。库本身不扫描
-//! 系统字体，调用方可以注入系统字体、目录索引或远程字体服务。
+//! Format adapters and the layout engine obtain missing font bytes through this
+//! trait. The library itself does not scan system fonts; callers may inject system
+//! fonts, directory indexes, or remote font services.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// 字体加载请求。
+/// A font loading request.
 #[derive(Clone, Debug, Default)]
 pub struct FontRequest<'a> {
-    /// 源格式中的字体资源 ID。
+    /// Font resource ID in the source format.
     pub font_id: Option<&'a str>,
-    /// 字体名称。
+    /// Font name.
     pub font_name: Option<&'a str>,
-    /// 字体家族名。
+    /// Font family name.
     pub family_name: Option<&'a str>,
-    /// 字符集。
+    /// Charset.
     pub charset: Option<&'a str>,
-    /// 是否粗体。
+    /// Whether bold.
     pub bold: bool,
-    /// 是否斜体。
+    /// Whether italic.
     pub italic: bool,
-    /// 是否衬线体。
+    /// Whether serif.
     pub serif: bool,
-    /// 是否等宽体。
+    /// Whether fixed width.
     pub fixed_width: bool,
-    /// 源文件声明的字体文件路径。
+    /// Font file path declared by the source file.
     pub font_file: Option<&'a str>,
 }
 
-/// 字体提供者。
+/// A font provider.
 pub trait FontProvider {
-    /// 返回字体文件字节；找不到时返回 `None`。
+    /// Return the font file bytes; returns `None` if not found.
     fn load(&mut self, request: &FontRequest<'_>) -> Result<Option<Arc<[u8]>>, FontError>;
 }
 
-/// 字体提供者错误。
+/// A font provider error.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("字体加载失败: {0}")]
+#[error("font load failed: {0}")]
 pub struct FontError(pub String);
 
 impl FontError {
-    /// 创建错误。
+    /// Create an error.
     pub fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
 }
 
-/// 把 TrueType 集合（`.ttc`）里的某个 face 拆成独立字体。
+/// Split a single face out of a TrueType collection (`.ttc`) into a standalone font.
 ///
-/// Windows 的宋体、微软雅黑都是集合：OFD 的 `FontFile` 只能放单份字体，按
-/// `face_index` 提取后才能内嵌与子集化。普通 TTF 或 `face_index` 越界时返回
-/// `None`，调用方继续用原字节。
+/// The SimSun and Microsoft YaHei fonts on Windows are collections: OFD's `FontFile`
+/// can only hold a single font, so extraction by `face_index` is required before
+/// embedding and subsetting. For a plain TTF or an out-of-range `face_index` this
+/// returns `None`, and the caller continues with the original bytes.
 pub fn extract_truetype_face(data: &[u8], face_index: u32) -> Option<Vec<u8>> {
     if !data.starts_with(b"ttcf") || data.len() < 12 {
         return None;
@@ -97,14 +99,17 @@ pub fn extract_truetype_face(data: &[u8], face_index: u32) -> Option<Vec<u8>> {
     Some(output)
 }
 
-/// 按用到的字形裁剪 TrueType 字体。
+/// Trim a TrueType font down to the glyphs actually used.
 ///
-/// 保留字形 ID 与 `cmap`/`hmtx` 等表，只把未引用的轮廓清空，因此引用原始 GID
-/// 的文本（PDF 的 Identity-H、OFD 的 `CGTransform`）仍然有效；复合字形引用的
-/// 子字形会一并保留。
+/// Glyph IDs and tables such as `cmap`/`hmtx` are preserved and only unreferenced
+/// outlines are cleared, so text that references the original GIDs (PDF Identity-H,
+/// OFD `CGTransform`) remains valid; subglyphs referenced by composite glyphs are
+/// kept as well.
 ///
-/// 集合字体先按 `face_index` 拆出单个 face；不是 glyf 轮廓的 TrueType（真身
-/// CFF/OTF）或结构不完整时返回 `None`，调用方应回退到原始字节。
+/// Collection fonts are first split into a single face by `face_index`; for
+/// TrueType fonts that do not use glyf outlines (really CFF/OTF) or for
+/// structurally incomplete data, this returns `None` and the caller should fall
+/// back to the original bytes.
 pub fn subset_truetype(data: &[u8], face_index: u32, used: &HashSet<u16>) -> Option<Vec<u8>> {
     if data.starts_with(b"ttcf") {
         let face = extract_truetype_face(data, face_index)?;
@@ -173,7 +178,7 @@ pub fn subset_truetype(data: &[u8], face_index: u32, used: &HashSet<u16>) -> Opt
         if end <= start {
             continue;
         }
-        // 单个字形的结构异常不该让整份字体放弃子集化，跳过即可。
+        // A malformed single glyph should not force the whole font to skip subsetting; just skip it.
         let Some(body) = glyf.get(start..end) else {
             continue;
         };
@@ -234,7 +239,7 @@ pub fn subset_truetype(data: &[u8], face_index: u32, used: &HashSet<u16>) -> Opt
             b"glyf" => *body = new_glyf.clone(),
             b"loca" => *body = new_loca.clone(),
             b"head" => *body = new_head.clone(),
-            // 字形名对渲染无用，选集里改成 version 3 可以省下几百 KB 到几 MB。
+            // Glyph names are useless for rendering; switching to version 3 can save from a few hundred KB to several MB.
             b"post" if body.len() >= 32 => {
                 let mut post = body[..32].to_vec();
                 post[0..4].copy_from_slice(&0x0003_0000_u32.to_be_bytes());
@@ -243,7 +248,7 @@ pub fn subset_truetype(data: &[u8], face_index: u32, used: &HashSet<u16>) -> Opt
             _ => {}
         }
     }
-    // 位图、彩色字形与数字签名等表对矢量渲染无用，直接丢掉。
+    // Tables for bitmaps, color glyphs, and digital signatures are useless for vector rendering; drop them.
     output_tables.retain(|(tag, _)| !is_dropped_table(tag));
     output_tables.sort_by_key(|table| table.0);
 
@@ -267,10 +272,11 @@ pub fn subset_truetype(data: &[u8], face_index: u32, used: &HashSet<u16>) -> Opt
     Some(output)
 }
 
-/// 子集化时丢弃的表：位图字形、彩色字形、数字签名与调优数据。
+/// Tables dropped when subsetting: bitmap glyphs, color glyphs, digital signatures, and hinting data.
 ///
-/// 保留 `cmap`/`hmtx`/`name` 等文本必需的表；丢掉 `EBDT`/`EBLC` 这类内嵌点阵
-/// （SimSun 有几 MB）后，子集体积才真正跟着用字量走。
+/// Tables required for text such as `cmap`/`hmtx`/`name` are kept; dropping embedded
+/// bitmaps such as `EBDT`/`EBLC` (several MB in SimSun) is what makes the subset size
+/// actually track the number of characters used.
 fn is_dropped_table(tag: &[u8; 4]) -> bool {
     matches!(
         tag,
@@ -324,9 +330,10 @@ mod tests {
     use super::{extract_truetype_face, subset_truetype};
     use std::collections::HashSet;
 
-    /// 造一份只含 head/maxp/loca/glyf 的最小 TrueType。
+    /// Build a minimal TrueType containing only head/maxp/loca/glyf.
     ///
-    /// 字形 0 为空，字形 1/2 各 16 字节空轮廓数据（长度足够定位，不要求可渲染）。
+    /// Glyph 0 is empty, and glyphs 1/2 each hold 16 bytes of empty outline data
+    /// (long enough to locate, not required to be renderable).
     fn tiny_font(glyphs: usize) -> Vec<u8> {
         let mut glyf = Vec::new();
         for _ in 0..glyphs {
@@ -337,7 +344,7 @@ mod tests {
             loca.extend_from_slice(&(u16::try_from(index * 8).unwrap()).to_be_bytes());
         }
         let mut head = vec![0_u8; 54];
-        // indexToLocFormat = 0（短偏移）。
+        // indexToLocFormat = 0 (short offsets).
         head[50..52].copy_from_slice(&0_i16.to_be_bytes());
         let mut maxp = vec![0_u8; 6];
         maxp[4..6].copy_from_slice(&(u16::try_from(glyphs).unwrap()).to_be_bytes());
@@ -374,8 +381,8 @@ mod tests {
         let font = tiny_font(4);
         let used = HashSet::from([1_u16]);
         let subset = subset_truetype(&font, 0, &used).expect("subset");
-        assert!(subset.len() < font.len(), "子集应更小");
-        // 结构仍可解析：前 12 字节表头保留，表数量一致。
+        assert!(subset.len() < font.len(), "subset should be smaller");
+        // The structure is still parseable: the first 12 header bytes are kept and the table count matches.
         assert_eq!(&subset[0..4], &font[0..4]);
         assert_eq!(u16::from_be_bytes([subset[4], subset[5]]), 4);
     }
@@ -386,7 +393,7 @@ mod tests {
         assert!(subset_truetype(b"", 0, &used).is_none());
         assert!(subset_truetype(b"ttcf\x00\x01\x00\x00", 0, &used).is_none());
         let font = tiny_font(4);
-        // 集合字体的第 2 个 face 无法安全裁剪。
+        // Face 2 of a collection font cannot be safely trimmed.
         assert!(subset_truetype(&font, 1, &used).is_none());
     }
 
@@ -402,22 +409,22 @@ mod tests {
         };
         let used = HashSet::from([10_u16, 20, 30]);
         if data.starts_with(b"ttcf") {
-            let face = extract_truetype_face(&data, 0).expect("拆 face");
+            let face = extract_truetype_face(&data, 0).expect("extract face");
             assert!(
                 face.len() < data.len(),
                 "face {} >= ttc {}",
                 face.len(),
                 data.len()
             );
-            let subset = subset_truetype(&data, 0, &used).expect("集合字体子集化");
+            let subset = subset_truetype(&data, 0, &used).expect("subset collection font");
             assert!(
                 subset.len() < face.len(),
-                "子集 {} >= face {}",
+                "subset {} >= face {}",
                 subset.len(),
                 face.len()
             );
         } else {
-            let subset = subset_truetype(&data, 0, &used).expect("子集化");
+            let subset = subset_truetype(&data, 0, &used).expect("subset");
             assert!(subset.len() < data.len());
         }
     }

@@ -1,4 +1,4 @@
-//! PDF 读写集成测试。
+//! PDF read/write integration tests.
 
 use std::io::Read as _;
 use std::sync::Arc;
@@ -83,7 +83,7 @@ fn writes_empty_page() {
 
 #[test]
 fn writes_mask_as_soft_mask() {
-    // 2×2 图像配 4×4 全黑蒙版：尺寸不同也要重采样后写成 SMask。
+    // A 2×2 image with a 4×4 fully black mask: even with mismatched sizes it must be resampled and written as an SMask.
     let image = masked_image(
         ImageAsset::new(
             ImageFormat::Png,
@@ -105,12 +105,12 @@ fn writes_mask_as_soft_mask() {
         .push(Element::Image(image_element(image)));
     let pdf = write_fixed(&fixed(scene), &PdfOptions::default()).expect("pdf");
     let text = pdf_text(&pdf);
-    assert!(text.contains("/SMask"), "缺少 SMask");
+    assert!(text.contains("/SMask"), "missing SMask");
     assert!(text.contains("/DeviceGray"));
     let mut document = PdfDocument::open_bytes(pdf, PdfReadOptions::default()).expect("open");
     let page = document.load_page(0).expect("page");
     let image = first_image(&page).expect("image");
-    // 蒙版全黑，读回后 alpha 全为 0。
+    // The mask is fully black, so every alpha reads back as 0.
     assert!(png_alphas(&image.encoded).iter().all(|alpha| *alpha == 0));
 }
 
@@ -137,8 +137,11 @@ fn masked_jpeg_is_not_passed_through() {
         .children
         .push(Element::Image(image_element(image)));
     let text = pdf_text(&write_fixed(&fixed(content), &PdfOptions::default()).expect("pdf"));
-    assert!(text.contains("/SMask"), "带蒙版的 JPEG 必须写 SMask");
-    assert!(!text.contains("/DCTDecode"), "带蒙版的 JPEG 不能直通");
+    assert!(text.contains("/SMask"), "a masked JPEG must write an SMask");
+    assert!(
+        !text.contains("/DCTDecode"),
+        "a masked JPEG must not be passed through"
+    );
 
     let image = plain_image(ImageAsset::new(ImageFormat::Jpeg, Arc::from(jpeg), 8, 8));
     let mut content = scene();
@@ -147,7 +150,10 @@ fn masked_jpeg_is_not_passed_through() {
         .children
         .push(Element::Image(image_element(image)));
     let text = pdf_text(&write_fixed(&fixed(content), &PdfOptions::default()).expect("pdf"));
-    assert!(text.contains("/DCTDecode"), "无蒙版 JPEG 仍应直通");
+    assert!(
+        text.contains("/DCTDecode"),
+        "a JPEG without a mask should still be passed through"
+    );
     assert!(!text.contains("/SMask"));
 }
 
@@ -212,7 +218,11 @@ fn png_alphas(bytes: &[u8]) -> Vec<u8> {
     let mut reader = decoder.read_info().expect("png info");
     let mut buffer = vec![0; reader.output_buffer_size().expect("png size")];
     let info = reader.next_frame(&mut buffer).expect("png frame");
-    assert_eq!(info.color_type, png::ColorType::Rgba, "读回的图片应为 RGBA");
+    assert_eq!(
+        info.color_type,
+        png::ColorType::Rgba,
+        "the read-back image should be RGBA"
+    );
     buffer[..info.buffer_size()]
         .as_chunks::<4>()
         .0
@@ -391,13 +401,13 @@ fn keeps_nested_outline_with_coordinates() {
     let pdf = write_fixed(&document, &PdfOptions::default()).expect("pdf");
     let reader = PdfDocument::open_bytes(pdf, PdfReadOptions::default()).expect("read");
     let outline = &reader.info().outline;
-    assert_eq!(outline.len(), 1, "大纲: {outline:?}");
+    assert_eq!(outline.len(), 1, "outline: {outline:?}");
     assert_eq!(outline[0].title, "第一章");
     assert_eq!(outline[0].children.len(), 1);
     let child = &outline[0].children[0];
     assert_eq!(child.title, "1.1 节");
     assert_eq!(child.destination.page, 2);
-    // PDF 坐标以点为单位，往返后按 0.01 毫米精度比较。
+    // PDF coordinates are in points, so the round trip is compared at 0.01 mm precision.
     assert!(
         (child.destination.point.x - 12.5).abs() < 0.01,
         "x = {}",

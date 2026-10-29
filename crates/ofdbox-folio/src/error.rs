@@ -1,33 +1,33 @@
-//! 门面统一错误。
+//! Unified facade error.
 
 use ofdbox_folio_ir::{DocumentError, PageError};
 
-/// 门面错误。
+/// Facade error.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// 文档打开或页面读取错误。
+    /// Document open or page read error.
     #[error(transparent)]
     Document(#[from] DocumentError),
-    /// 页面级错误。
+    /// Page-level error.
     #[error(transparent)]
     Page(#[from] PageError),
-    /// OFD 适配层错误。
+    /// OFD adapter error.
     #[cfg(feature = "ofd")]
     #[error(transparent)]
     Ofd(#[from] ofdbox_folio_ofd::OfdError),
-    /// PDF 适配层错误。
+    /// PDF adapter error.
     #[cfg(feature = "pdf")]
     #[error(transparent)]
     Pdf(#[from] ofdbox_folio_pdf::PdfError),
-    /// 渲染错误。
+    /// Render error.
     #[cfg(any(feature = "cpu", feature = "gpu"))]
     #[error(transparent)]
     Render(#[from] ofdbox_folio_render::RenderError),
-    /// 尚未接入的格式。
-    #[error("尚未实现的格式: {0}")]
+    /// A format that is not wired up yet.
+    #[error("format not implemented yet: {0}")]
     UnsupportedFormat(String),
-    /// I/O 错误。
-    #[error("I/O 错误: {0}")]
+    /// I/O error.
+    #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

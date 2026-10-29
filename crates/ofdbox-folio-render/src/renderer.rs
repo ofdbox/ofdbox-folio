@@ -1,7 +1,8 @@
-//! 基于 `vello_cpu` 的 CPU 位图渲染器。
+//! CPU bitmap renderer built on `vello_cpu`.
 //!
-//! 渲染器只消费 Fixed IR，不感知源文档格式。页面几何通过设备缩放映射到
-//! 像素坐标；字体和图片按资源 ID 缓存。
+//! The renderer consumes only Fixed IR and is unaware of the source document
+//! format. Page geometry is mapped to pixel coordinates via the device scale;
+//! fonts and images are cached by resource ID.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -25,7 +26,7 @@ use crate::error::RenderError;
 use crate::image::decode_image;
 use crate::options::RenderOptions;
 
-/// RGBA8 像素目标。
+/// An RGBA8 pixel target.
 #[derive(Clone, Debug)]
 pub struct RasterTarget {
     width: u16,
@@ -34,42 +35,46 @@ pub struct RasterTarget {
     data: Vec<u8>,
 }
 
-/// 页内区域光栅参数。
+/// Raster parameters for a region within a page.
 ///
-/// 显示核心把一页切成 tile 后，逐块调用 [`CpuRenderer::render_scene_region`]：
-/// `origin_px` 是这块 tile 左上角在“整页设备像素坐标”中的位置，`dpi` 是当前
-/// 渲染分辨率（通常为 96 × zoom × 设备像素比）。
+/// After the display core splits a page into tiles it calls
+/// [`CpuRenderer::render_scene_region`] tile by tile: `origin_px` is the
+/// position of this tile's top-left corner in "whole-page device pixel
+/// coordinates" and `dpi` is the current render resolution (usually
+/// 96 × zoom × device pixel ratio).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RenderRegion {
-    /// 区域左上角在整页设备像素坐标中的位置。
+    /// Position of the region's top-left corner in whole-page device pixel coordinates.
     pub origin_px: (f64, f64),
-    /// 渲染 DPI。
+    /// Render DPI.
     pub dpi: f64,
 }
 
 impl RenderRegion {
-    /// 创建区域参数。
+    /// Creates region parameters.
     pub fn new(origin_px: (f64, f64), dpi: f64) -> Self {
         Self { origin_px, dpi }
     }
 }
 
 impl RasterTarget {
-    /// 按设备像素尺寸创建目标。
+    /// Creates a target from a device pixel size.
     ///
-    /// 用于显示核心的 tile 光栅：尺寸由 tile 大小决定（通常 512×512），
-    /// 因此不会再乘 DPI。
+    /// Used for the display core's tile raster: the size is dictated by the tile
+    /// size (usually 512×512), so DPI is not applied again.
     pub fn from_pixels(width: u32, height: u32, dpi: f64) -> Result<Self, RenderError> {
         if width == 0 || height == 0 {
             return Err(RenderError::InvalidPage);
         }
         if width > u32::from(u16::MAX) || height > u32::from(u16::MAX) {
-            return Err(RenderError::Backend("目标尺寸超出 u16 范围".to_owned()));
+            return Err(RenderError::Backend(
+                "target size exceeds the u16 range".to_owned(),
+            ));
         }
         Ok(Self::new(width as u16, height as u16, dpi))
     }
 
-    /// 创建指定像素尺寸的目标。
+    /// Creates a target with the given pixel size.
     pub fn new(width: u16, height: u16, dpi: f64) -> Self {
         Self {
             width,
@@ -79,7 +84,7 @@ impl RasterTarget {
         }
     }
 
-    /// 按毫米尺寸和 DPI 创建目标。
+    /// Creates a target from a millimeter size and a DPI.
     pub fn from_size(size: Size, dpi: f64) -> Result<Self, RenderError> {
         if !(dpi.is_finite() && dpi > 0.0)
             || !(size.width.is_finite() && size.width > 0.0)
@@ -90,38 +95,40 @@ impl RasterTarget {
         let width = (size.width * dpi / 25.4).ceil();
         let height = (size.height * dpi / 25.4).ceil();
         if width > f64::from(u16::MAX) || height > f64::from(u16::MAX) {
-            return Err(RenderError::Backend("目标尺寸超出 u16 范围".to_owned()));
+            return Err(RenderError::Backend(
+                "target size exceeds the u16 range".to_owned(),
+            ));
         }
         Ok(Self::new(width as u16, height as u16, dpi))
     }
 
-    /// 宽度，像素。
+    /// Width in pixels.
     pub fn width(&self) -> u16 {
         self.width
     }
 
-    /// 高度，像素。
+    /// Height in pixels.
     pub fn height(&self) -> u16 {
         self.height
     }
 
-    /// 分辨率。
+    /// Resolution.
     pub fn dpi(&self) -> f64 {
         self.dpi
     }
 
-    /// 非预乘 RGBA8 数据。
+    /// Non-premultiplied RGBA8 data.
     pub fn data(&self) -> &[u8] {
         &self.data
     }
 
-    /// 取出像素数据。
+    /// Takes out the pixel data.
     pub fn into_data(self) -> Vec<u8> {
         self.data
     }
 }
 
-/// 基于 `vello_cpu` 的 CPU 渲染器。
+/// CPU renderer built on `vello_cpu`.
 pub struct CpuRenderer {
     options: RenderOptions,
     resources: Resources,
@@ -130,7 +137,7 @@ pub struct CpuRenderer {
     report: Report,
 }
 
-/// 已解码图片缓存：按字节预算淘汰，预算为 0 时完全不缓存。
+/// Decoded image cache: evicted against a byte budget; a budget of 0 disables caching entirely.
 struct PixmapCache {
     entries: HashMap<u64, Arc<Pixmap>>,
     order: VecDeque<u64>,
@@ -185,7 +192,7 @@ fn pixmap_bytes(pixmap: &Pixmap) -> u64 {
 }
 
 impl CpuRenderer {
-    /// 创建渲染器。
+    /// Creates a renderer.
     pub fn new(options: RenderOptions) -> Self {
         Self {
             options,
@@ -196,36 +203,36 @@ impl CpuRenderer {
         }
     }
 
-    /// 使用默认选项创建。
+    /// Creates a renderer with default options.
     pub fn with_defaults() -> Self {
         Self::new(RenderOptions::default())
     }
 
-    /// 清空字体、图片和渲染资源缓存。
+    /// Clears the font, image and rendering resource caches.
     pub fn clear_caches(&mut self) {
         self.fonts.clear();
         self.pixmaps.clear();
         self.resources = Resources::new();
     }
 
-    /// 渲染期间产生的诊断；单张图片失败只记诊断，不中断整页。
+    /// Diagnostics produced while rendering; a single failed image only records a diagnostic and does not abort the page.
     pub fn report(&self) -> &Report {
         &self.report
     }
 
-    /// 取走渲染期间产生的诊断。
+    /// Takes the diagnostics produced while rendering.
     pub fn take_report(&mut self) -> Report {
         std::mem::take(&mut self.report)
     }
 
-    /// 记录一条图片诊断。
+    /// Records an image diagnostic.
     fn warn(&mut self, message: impl Into<String>) {
         self.report
             .diagnostics
             .push(Diagnostic::warning(DiagnosticCode::Image, message));
     }
 
-    /// 把一页渲染到目标。
+    /// Renders a page into the target.
     pub fn render_page(
         &mut self,
         page: &Page,
@@ -234,7 +241,7 @@ impl CpuRenderer {
         self.render_scene(&page.content, target)
     }
 
-    /// 把一个场景渲染到目标。
+    /// Renders a scene into the target.
     pub fn render_scene(
         &mut self,
         scene: &Scene,
@@ -244,10 +251,11 @@ impl CpuRenderer {
         self.render_scene_with(scene, target, device)
     }
 
-    /// 把场景的指定区域渲染到目标。
+    /// Renders the given region of a scene into the target.
     ///
-    /// 目标只需要覆盖 `region` 这块区域；`origin_px` 用“整页设备像素坐标”表示，
-    /// 便于显示核心按 tile 局部刷新。
+    /// The target only needs to cover the `region` area; `origin_px` is expressed
+    /// in "whole-page device pixel coordinates" so the display core can refresh
+    /// individual tiles.
     pub fn render_scene_region(
         &mut self,
         scene: &Scene,
@@ -428,7 +436,7 @@ impl CpuRenderer {
         let pixmap = match self.pixmap(element) {
             Ok(pixmap) => pixmap,
             Err(error) => {
-                self.warn(format!("图片无法绘制，已跳过该图: {error}"));
+                self.warn(format!("image could not be drawn, skipping it: {error}"));
                 return Ok(());
             }
         };
@@ -486,11 +494,15 @@ impl CpuRenderer {
             match decode_image(mask.format, &mask.encoded, self.options.max_image_pixels) {
                 Ok(mask) => {
                     if let Err(error) = decoded.apply_mask(&mask) {
-                        self.warn(format!("图像蒙版无法应用，已按无蒙版绘制: {error}"));
+                        self.warn(format!(
+                            "image mask could not be applied, drawing without it: {error}"
+                        ));
                     }
                 }
                 Err(error) => {
-                    self.warn(format!("图像蒙版无法解码，已按无蒙版绘制: {error}"));
+                    self.warn(format!(
+                        "image mask could not be decoded, drawing without it: {error}"
+                    ));
                 }
             }
         }
@@ -503,7 +515,9 @@ impl CpuRenderer {
 
 fn create_pixmap(decoded: &crate::image::DecodedImage) -> Result<Pixmap, RenderError> {
     if decoded.width > u32::from(u16::MAX) || decoded.height > u32::from(u16::MAX) {
-        return Err(RenderError::Image("图片尺寸超出 u16 范围".to_owned()));
+        return Err(RenderError::Image(
+            "image size exceeds the u16 range".to_owned(),
+        ));
     }
     Ok(Pixmap::from_parts(
         decoded.rgba.clone(),
@@ -585,7 +599,7 @@ fn gradient_radial_transformed(radial: &RadialGradient, transform: Matrix) -> Gr
     value
 }
 
-/// 圆到椭圆的变换：按长轴倾角旋转，并把短轴按 `sqrt(1 - e²)` 压缩。
+/// Circle-to-ellipse transform: rotate by the major-axis angle and compress the minor axis by `sqrt(1 - e²)`.
 fn ellipse_transform(radial: &RadialGradient) -> Option<Matrix> {
     let eccentricity = radial.eccentricity;
     if !(eccentricity.is_finite() && eccentricity > 1e-6) {
@@ -692,7 +706,7 @@ mod tests {
     use std::sync::Arc;
     use vello_cpu::Pixmap;
 
-    /// 生成一张纯色 PNG。
+    /// Generates a solid-color PNG.
     fn png_bytes(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
         let mut bytes = Vec::new();
         {
@@ -727,7 +741,7 @@ mod tests {
 
     #[test]
     fn renders_mask_of_different_size() {
-        // 25×25 的图片配 75×75 的蒙版：重采样后照常绘制，不产生诊断。
+        // A 25×25 image with a 75×75 mask: after resampling it still renders normally and produces no diagnostic.
         let image = ImageAsset::new(
             ImageFormat::Png,
             Arc::from(png_bytes(4, 4, [200, 30, 30, 255])),
@@ -745,7 +759,7 @@ mod tests {
         let mut renderer = CpuRenderer::new(RenderOptions::default());
         renderer.render_scene(&scene, &mut target).expect("render");
         assert!(renderer.report().is_empty());
-        // 蒙版全黑，图片被完全遮住，只剩白色页面背景。
+        // The mask is fully black, so the image is completely hidden and only the white page background remains.
         assert_eq!(&target.data()[..4], [255, 255, 255, 255]);
     }
 
@@ -764,7 +778,7 @@ mod tests {
         renderer.render_scene(&scene, &mut target).expect("render");
         assert_eq!(renderer.report().diagnostics.len(), 1);
         assert_eq!(renderer.report().diagnostics[0].code, DiagnosticCode::Image);
-        // 蒙版缺失只是降级，图片本身仍然绘制。
+        // A missing mask is only a degradation, the image itself is still drawn.
         assert_eq!(&target.data()[..4], [200, 30, 30, 255]);
     }
 
@@ -776,19 +790,22 @@ mod tests {
         let mut renderer = CpuRenderer::new(RenderOptions::default());
         renderer.render_scene(&scene, &mut target).expect("render");
         assert_eq!(renderer.report().diagnostics.len(), 1);
-        // 整页仍是白底，没有因为单图失败而报错。
+        // The whole page is still white; a single failed image does not raise an error.
         assert_eq!(&target.data()[..4], [255, 255, 255, 255]);
     }
 
     #[test]
     fn evicts_pixmaps_over_budget() {
-        // 两张 2×2 的 RGBA 图片正好占满预算，第三张会淘汰最早插入的一张。
+        // Two 2×2 RGBA images exactly fill the budget, so a third evicts the earliest inserted entry.
         let mut cache = PixmapCache::new(2 * 2 * 4 * 2);
         cache.insert(1, Arc::new(Pixmap::new(2, 2)));
         cache.insert(2, Arc::new(Pixmap::new(2, 2)));
         assert!(cache.get(1).is_some());
         cache.insert(3, Arc::new(Pixmap::new(2, 2)));
-        assert!(cache.get(1).is_none(), "最早的缓存应被淘汰");
+        assert!(
+            cache.get(1).is_none(),
+            "the earliest cache entry should be evicted"
+        );
         assert!(cache.get(2).is_some());
         assert!(cache.get(3).is_some());
         assert!(cache.bytes <= cache.budget);
@@ -828,7 +845,7 @@ mod tests {
     fn renders_region_at_origin_offset() {
         use super::RenderRegion;
 
-        // 整页 96 DPI 渲染（10mm → 38px），与区域（origin 8,8，10×10）逐像素一致。
+        // A full-page 96 DPI render (10mm → 38px) matches the region (origin 8,8, 10×10) pixel for pixel.
         let scene = solid_rect_scene();
         let mut renderer = CpuRenderer::new(RenderOptions::default());
         let mut full = RasterTarget::from_size(scene.size, 96.0).expect("full target");
@@ -847,7 +864,7 @@ mod tests {
                 assert_eq!(
                     &full.data()[fi..fi + 4],
                     &tile.data()[ti..ti + 4],
-                    "像素 ({x},{y}) 不一致"
+                    "pixel ({x},{y}) mismatch"
                 );
             }
         }
@@ -859,7 +876,7 @@ mod tests {
 
         let scene = solid_rect_scene();
         let mut renderer = CpuRenderer::new(RenderOptions::default());
-        // 页面右侧之外的区域只有白底。
+        // The region outside the page's right edge contains only the white background.
         let mut tile = RasterTarget::from_pixels(8, 8, 96.0).expect("tile");
         renderer
             .render_scene_region(&scene, &mut tile, RenderRegion::new((60.0, 60.0), 96.0))

@@ -1,4 +1,4 @@
-//! DOCX → Flow IR → DOCX 的往返示例，用来检查写出结果。
+//! DOCX → Flow IR → DOCX round-trip example, used to check the written result.
 //!
 //! ```text
 //! cargo run -p ofdbox-folio --example docx_roundtrip -- in.docx out.docx
@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
     let input = args
         .next()
-        .ok_or("用法: docx_roundtrip <in.docx> [out.docx]")?;
+        .ok_or("usage: docx_roundtrip <in.docx> [out.docx]")?;
     let output = args
         .next()
         .unwrap_or_else(|| input.replace(".docx", "_roundtrip.docx"));
@@ -25,7 +25,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|section| section.blocks.len())
         .sum();
     println!(
-        "读入: {} 节 {} 块 图片 {} 张 注释 {} 条 样式 {} 段/{} 字",
+        "read: {} sections, {} blocks, {} images, {} notes, {} paragraph styles / {} character styles",
         flow.sections.len(),
         blocks,
         flow.resources.image_count(),
@@ -36,9 +36,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let bytes = write_flow(&flow, &DocxWriteOptions::default())?;
     fs::write(&output, &bytes)?;
-    println!("写出: {output} ({} 字节)", bytes.len());
+    println!("wrote: {output} ({} bytes)", bytes.len());
 
-    // 立刻读回一遍，确认包结构自洽。
+    // Read it back right away to confirm the package structure is self-consistent.
     let back = read_flow_path(&output, &DocxReadOptions::default())?;
     let back_blocks: usize = back
         .sections
@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|section| section.blocks.len())
         .sum();
     println!(
-        "回读: {} 节 {} 块 图片 {} 张 注释 {} 条",
+        "read back: {} sections, {} blocks, {} images, {} notes",
         back.sections.len(),
         back_blocks,
         back.resources.image_count(),

@@ -1,18 +1,23 @@
-//! OFDBox Folio 的 DOCX 适配层。
+//! DOCX adaptation layer for OFDBox Folio.
 //!
-//! 负责 DOCX ↔ Flow IR 的双向适配：`read_flow` 把 DOCX 解析成 Flow IR，
-//! `write_flow` 把 Flow IR 写成 DOCX 包。本 crate 不接触 Fixed IR，也不做排版
-//! 与渲染；DOCX 的版式接近 Word 但不承诺逐行一致。
+//! Handles bidirectional DOCX ↔ Flow IR adaptation: `read_flow` parses DOCX into
+//! Flow IR, while `write_flow` writes Flow IR into a DOCX package. This crate does not
+//! touch Fixed IR and does no layout or rendering; DOCX layout approximates Word but
+//! does not promise line-by-line fidelity.
 //!
-//! 实现约定：
+//! Implementation notes:
 //!
-//! - 样式按 OOXML 的层叠（文档默认 → 段落样式链 → 字符样式链 → 直接格式）
-//!   逐字段解析，再**拍平**成直接格式写进 Flow IR。这样「显式写回默认值」也能
-//!   生效；IR 的命名样式链只保留给代码构造的文档使用。
-//! - 列表编号来自 `numbering.xml`，作为段落首个文本 run 的标记加悬挂缩进写出。
-//! - 浮动图片降级为行内图片、合并单元格按普通单元格处理，都会在
-//!   `FlowDocument.report` 里留诊断，不静默丢内容。
-//! - 库保持静默：不打印、不写日志。
+//! - Styles are resolved field by field following the OOXML cascade (document
+//!   defaults → paragraph style chain → character style chain → direct formatting) and
+//!   then **flattened** into direct formatting in the Flow IR. This also makes an
+//!   "explicitly written back default" take effect; the IR named style chain is kept
+//!   only for documents constructed in code.
+//! - List numbering comes from `numbering.xml` and is written out as a marker on the
+//!   paragraph's first text run, together with a hanging indent.
+//! - Floating images downgraded to inline images and merged cells treated as ordinary
+//!   cells both leave a diagnostic in `FlowDocument.report`; content is never dropped
+//!   silently.
+//! - The library stays quiet: no printing, no logging.
 
 mod body;
 mod image;
@@ -28,10 +33,10 @@ use std::path::Path;
 
 use ofdbox_folio_ir::FlowDocument;
 
-/// DOCX 读取选项。
+/// DOCX read options.
 #[derive(Clone, Debug)]
 pub struct DocxReadOptions {
-    /// 单个包部件解压后的字节上限。
+    /// Byte limit for a single decompressed package part.
     pub max_part_bytes: usize,
 }
 
@@ -43,28 +48,28 @@ impl Default for DocxReadOptions {
     }
 }
 
-/// DOCX 读取错误。
+/// DOCX read error.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum DocxError {
-    /// ZIP 容器不可读。
-    #[error("DOCX 包无效：{0}")]
+    /// The ZIP container is unreadable.
+    #[error("invalid DOCX package: {0}")]
     Package(String),
-    /// 缺少必需部件或结构不符合 OOXML。
-    #[error("DOCX 结构无效：{0}")]
+    /// A required part is missing or the structure does not match OOXML.
+    #[error("invalid DOCX structure: {0}")]
     Structure(String),
-    /// 超过资源上限。
-    #[error("DOCX 超出限制：{0}")]
+    /// A resource limit was exceeded.
+    #[error("DOCX limit exceeded: {0}")]
     Limit(String),
-    /// XML 语法错误。
-    #[error("DOCX XML 解析失败：{0}")]
+    /// XML syntax error.
+    #[error("DOCX XML parse failed: {0}")]
     Xml(String),
-    /// 文件读写失败。
-    #[error("DOCX 读写失败：{0}")]
+    /// File I/O failed.
+    #[error("DOCX I/O failed: {0}")]
     Io(String),
 }
 
-/// 字节是否像一个 DOCX（ZIP 且含 `word/document.xml`）。
+/// Whether the bytes look like a DOCX (a ZIP containing `word/document.xml`).
 pub fn probe(bytes: &[u8]) -> bool {
     let Ok(archive) = zip::ZipArchive::new(Cursor::new(bytes)) else {
         return false;
@@ -72,15 +77,15 @@ pub fn probe(bytes: &[u8]) -> bool {
     archive.index_for_name("word/document.xml").is_some()
 }
 
-/// 从内存写出 DOCX 包。
+/// Write a DOCX package to memory.
 pub use writer::{DocxWriteOptions, write_flow, write_flow_path, write_flow_with_report};
 
-/// 从内存读取 DOCX，产出 Flow IR。
+/// Read a DOCX from memory and produce Flow IR.
 pub fn read_flow(bytes: &[u8], options: &DocxReadOptions) -> Result<FlowDocument, DocxError> {
     body::read(bytes, options)
 }
 
-/// 从文件读取 DOCX，产出 Flow IR。
+/// Read a DOCX from a file and produce Flow IR.
 pub fn read_flow_path(
     path: impl AsRef<Path>,
     options: &DocxReadOptions,

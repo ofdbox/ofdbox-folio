@@ -1,6 +1,7 @@
-//! 单栏布局的端到端测试。
+//! End-to-end tests for single-column layout.
 //!
-//! 用系统里的 Arial 做度量；拿不到字体时跳过，保持跨机器可跑。
+//! Metrics come from the system's Arial; when the font is unavailable the tests
+//! are skipped so they stay runnable across machines.
 
 use std::sync::Arc;
 
@@ -11,7 +12,7 @@ use ofdbox_folio_ir::{
 };
 use ofdbox_folio_layout::{LayoutOptions, layout, layout_with};
 
-/// 固定返回同一份字体字节的提供者。
+/// Provider that always returns the same font bytes.
 struct SystemFonts {
     bytes: Arc<[u8]>,
 }
@@ -79,29 +80,33 @@ fn lays_out_headings_paragraphs_and_text_layer() {
     flow.push(Block::Paragraph(section));
 
     let fixed = layout(&flow, &mut fonts).expect("layout");
-    assert_eq!(fixed.pages.len(), 1, "短文档应该只有一页");
+    assert_eq!(
+        fixed.pages.len(),
+        1,
+        "a short document should fit on one page"
+    );
     let page = &fixed.pages[0];
     assert!((page.display_size().width - 210.0).abs() < 0.5);
     assert!((page.display_size().height - 297.0).abs() < 0.5);
-    assert!(!page.text.items.is_empty(), "应有文本项");
-    assert!(!page.text.lines.is_empty(), "应有行");
+    assert!(!page.text.items.is_empty(), "there should be text items");
+    assert!(!page.text.lines.is_empty(), "there should be lines");
     assert!(
         page.text.plain_text().contains("quick brown"),
-        "文本层内容: {}",
+        "text layer content: {}",
         page.text.plain_text()
     );
 
-    // 标题生成大纲：一级标题带一个二级子项。
-    assert_eq!(fixed.outline.len(), 1, "大纲: {:?}", fixed.outline);
+    // Headings build the outline: a level-1 heading with one level-2 child.
+    assert_eq!(fixed.outline.len(), 1, "outline: {:?}", fixed.outline);
     assert_eq!(fixed.outline[0].title, "Document Title");
     assert_eq!(fixed.outline[0].children.len(), 1);
     assert_eq!(fixed.outline[0].children[0].title, "Section One");
 
-    // 所有文本项都在页边距内。
+    // All text items are inside the page margins.
     for item in &page.text.items {
         assert!(
             item.bbox.x >= 20.0 && item.bbox.right() <= 190.0,
-            "文本越界: {:?}",
+            "text out of bounds: {:?}",
             item.bbox
         );
     }
@@ -119,14 +124,17 @@ fn paginates_long_text() {
         ))));
     }
     let fixed = layout(&flow, &mut fonts).expect("layout");
-    assert!(fixed.pages.len() > 2, "页数: {}", fixed.pages.len());
+    assert!(fixed.pages.len() > 2, "pages: {}", fixed.pages.len());
     for page in &fixed.pages {
-        assert!(!page.text.items.is_empty(), "每页都应有文本");
+        assert!(!page.text.items.is_empty(), "every page should have text");
     }
-    // 行不重叠。
+    // Lines do not overlap.
     for page in &fixed.pages {
         for pair in page.text.lines.windows(2) {
-            assert!(pair[1].baseline > pair[0].baseline, "基线应递增");
+            assert!(
+                pair[1].baseline > pair[0].baseline,
+                "baselines should increase"
+            );
         }
     }
 }
@@ -161,7 +169,7 @@ fn renders_page_number_and_total_pages() {
     let text = last.text.plain_text();
     assert!(
         text.contains(&format!("Page {total} of {total}")),
-        "末页文本: {text}"
+        "last page text: {text}"
     );
 }
 
@@ -190,14 +198,14 @@ fn honours_justification() {
     let page = &fixed.pages[0];
     assert!(
         page.text.lines.len() >= 2,
-        "行数: {}",
+        "line count: {}",
         page.text.lines.len()
     );
     let content_right = 210.0 - 25.4;
     let first = &page.text.lines[0];
     assert!(
         (first.bbox.right() - content_right).abs() < 1.0,
-        "首行右边界 {:.2}，期望 {:.2}",
+        "first line right edge {:.2}, expected {:.2}",
         first.bbox.right(),
         content_right
     );
@@ -209,7 +217,7 @@ fn lays_out_block_image_with_intrinsic_size() {
         return;
     };
     let mut flow = doc();
-    // 32×16 像素、96 DPI → 8.47×4.23 毫米。
+    // 32×16 pixels at 96 DPI → 8.47×4.23 millimeters.
     let id = flow.resources.add_image(ImageAsset::new(
         ImageFormat::Png,
         Arc::from(&b"png"[..]),
@@ -229,13 +237,13 @@ fn lays_out_block_image_with_intrinsic_size() {
             ofdbox_folio_ir::Element::Image(image) => Some(image),
             _ => None,
         })
-        .expect("图片元素");
+        .expect("image element");
     let size = Size::new(
         image.transform.a * f64::from(image.image.pixel_width),
         image.transform.d * f64::from(image.image.pixel_height),
     );
-    assert!((size.width - 8.47).abs() < 0.1, "宽度: {}", size.width);
-    assert!((size.height - 4.23).abs() < 0.1, "高度: {}", size.height);
+    assert!((size.width - 8.47).abs() < 0.1, "width: {}", size.width);
+    assert!((size.height - 4.23).abs() < 0.1, "height: {}", size.height);
 }
 
 #[test]
@@ -253,8 +261,12 @@ fn page_setup_margins_are_respected() {
     let fixed = layout(&flow, &mut fonts).expect("layout");
     let page = &fixed.pages[0];
     let item = page.text.items.first().expect("text item");
-    assert!((item.bbox.x - 30.0).abs() < 0.5, "左边距: {}", item.bbox.x);
-    assert!(item.bbox.y >= 39.0, "上边距: {}", item.bbox.y);
+    assert!(
+        (item.bbox.x - 30.0).abs() < 0.5,
+        "left margin: {}",
+        item.bbox.x
+    );
+    assert!(item.bbox.y >= 39.0, "top margin: {}", item.bbox.y);
 }
 
 #[test]
@@ -299,11 +311,11 @@ fn inherits_named_paragraph_style_through_based_on() {
 
     let fixed = layout(&flow, &mut fonts).expect("layout");
     let item = fixed.pages[0].text.items.first().expect("text item");
-    // 左边距 25.4 + 左缩进 10 + 继承来的首行缩进 24pt。
+    // Left margin 25.4 + left indent 10 + inherited first-line indent of 24pt.
     let expected = 25.4 + 10.0 + 24.0 * 25.4 / 72.0;
     assert!(
         (item.bbox.x - expected).abs() < 0.5,
-        "首行起点 {:.2}，期望 {:.2}",
+        "first line starts at {:.2}, expected {:.2}",
         item.bbox.x,
         expected
     );

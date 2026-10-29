@@ -1,4 +1,4 @@
-//! 多栏分节的端到端测试。
+//! End-to-end tests for multi-column sections.
 
 use std::sync::Arc;
 
@@ -8,7 +8,7 @@ use ofdbox_folio_ir::{
 };
 use ofdbox_folio_layout::layout;
 
-/// 固定返回同一份字体字节的提供者。
+/// Provider that always returns the same font bytes.
 struct SystemFonts {
     bytes: Arc<[u8]>,
 }
@@ -42,7 +42,7 @@ fn paragraph(text: &str) -> Paragraph {
     Paragraph::plain(text, body_style())
 }
 
-/// 每行文字与起始 x。
+/// The text and starting x of every line.
 fn lines(page: &ofdbox_folio_ir::Page) -> Vec<(String, f64)> {
     page.text
         .lines
@@ -79,18 +79,20 @@ fn two_columns_fill_left_column_before_right() {
         return;
     };
     let fixed = layout(&document(2), &mut fonts).expect("layout");
-    assert!(fixed.pages.len() >= 2, "页数: {}", fixed.pages.len());
+    assert!(fixed.pages.len() >= 2, "pages: {}", fixed.pages.len());
 
     let first_page = lines(&fixed.pages[0]);
     let left_edge = 25.4;
-    // 左栏顶部的第一段与右栏顶部的某一段应同时出现在第一页。
+    // The first paragraph at the top of the left column and some paragraph at the
+    // top of the right column should both appear on the first page.
     let xs: Vec<f64> = first_page.iter().map(|(_, x)| *x).collect();
     let left = xs.iter().filter(|x| (**x - left_edge).abs() < 1.0).count();
     let right = xs.iter().filter(|x| **x > left_edge + 80.0).count();
-    assert!(left > 0, "左栏没有内容: {xs:?}");
-    assert!(right > 0, "右栏没有内容: {xs:?}");
+    assert!(left > 0, "the left column is empty: {xs:?}");
+    assert!(right > 0, "the right column is empty: {xs:?}");
 
-    // 左栏顶部的段落序号应小于右栏顶部的段落序号。
+    // The paragraph index at the top of the left column should be smaller than the
+    // one at the top of the right column.
     let index_of = |page: &ofdbox_folio_ir::Page| -> Vec<(usize, f64)> {
         lines(page)
             .into_iter()
@@ -110,16 +112,16 @@ fn two_columns_fill_left_column_before_right() {
         .filter(|(_, x)| (*x - left_edge).abs() < 1.0)
         .map(|(index, _)| *index)
         .min()
-        .expect("左栏首个段落");
+        .expect("first paragraph of the left column");
     let right_first = entries
         .iter()
         .filter(|(_, x)| *x > left_edge + 80.0)
         .map(|(index, _)| *index)
         .min()
-        .expect("右栏首个段落");
+        .expect("first paragraph of the right column");
     assert!(
         right_first > left_first,
-        "右栏应从更靠后的段落开始: {right_first} vs {left_first}"
+        "the right column should start at a later paragraph: {right_first} vs {left_first}"
     );
 }
 
@@ -138,7 +140,8 @@ fn columns_share_the_same_tops_and_bottoms() {
             .collect()
     };
     let _ = rows(0.0, 100.0);
-    // 两栏的行数应该接近（内容总量相同时）。用文本行的 y 范围来验证：
+    // The two columns should have a similar number of lines (for the same total
+    // content). Verify with the y range of the text lines:
     let left: Vec<f64> = fixed.pages[0]
         .text
         .lines
@@ -159,11 +162,11 @@ fn columns_share_the_same_tops_and_bottoms() {
     let right_bottom = right.iter().cloned().fold(f64::MIN, f64::max);
     assert!(
         (left_top - right_top).abs() < 0.5,
-        "两栏应从同一高度开始: {left_top} vs {right_top}"
+        "both columns should start at the same height: {left_top} vs {right_top}"
     );
     assert!(
         (left_bottom - right_bottom).abs() < 20.0,
-        "两栏应在大致相同的底部结束: {left_bottom} vs {right_bottom}"
+        "both columns should end at roughly the same bottom: {left_bottom} vs {right_bottom}"
     );
 }
 
@@ -174,10 +177,10 @@ fn single_column_keeps_full_width_lines() {
     };
     let fixed = layout(&document(1), &mut fonts).expect("layout");
     let first_page = lines(&fixed.pages[0]);
-    // 单栏时所有行都从左边距开始。
+    // In a single column every line starts at the left margin.
     assert!(
         first_page.iter().all(|(_, x)| (*x - 25.4).abs() < 1.0),
-        "单栏行起点: {:?}",
+        "single-column line starts: {:?}",
         first_page.iter().map(|(_, x)| *x).collect::<Vec<_>>()
     );
 }
@@ -191,7 +194,7 @@ fn page_count_drops_with_columns() {
     let double = layout(&document(2), &mut fonts).expect("double");
     assert!(
         double.pages.len() < single.pages.len(),
-        "两栏应更省页: {} vs {}",
+        "two columns should use fewer pages: {} vs {}",
         double.pages.len(),
         single.pages.len()
     );

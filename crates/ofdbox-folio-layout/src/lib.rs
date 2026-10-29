@@ -1,12 +1,14 @@
-//! OFDBox Folio 的单向排版引擎。
+//! The one-way typesetting engine of OFDBox Folio.
 //!
-//! 输入 [`ofdbox_folio_ir::FlowDocument`] 与字体提供者，输出
-//! [`ofdbox_folio_ir::FixedDocument`]。布局是 Flow 到 Fixed 的唯一通路，不提供
-//! 反向转换，也不做渲染或文件 IO。
+//! It takes [`ofdbox_folio_ir::FlowDocument`] and a font provider as input and
+//! outputs [`ofdbox_folio_ir::FixedDocument`]. Layout is the only path from Flow
+//! to Fixed; no reverse conversion is provided, and no rendering or file IO is
+//! performed.
 //!
-//! A1 里程碑实现单栏排版：段落（缩进、行距、对齐与两端对齐）、行内图片、块级
-//! 图片、分页符、页码字段与标题大纲。表格与自动目录留给 A2，规则见
-//! `docs/layout-contract.md`。
+//! The A1 milestone implements single-column layout: paragraphs (indent, line
+//! spacing, alignment and justification), inline images, block images, page
+//! breaks, page number fields and heading outlines. Tables and automatic tables
+//! of contents are left to A2; see the rules in `docs/layout-contract.md`.
 
 mod font;
 mod linebreak;
@@ -27,42 +29,44 @@ use ofdbox_folio_ir::{
 use font::{FontKey, FontStore};
 use linebreak::{LineSpan, Piece};
 
-/// 布局引擎版本，写进 `EngineInfo`。
+/// Layout engine version, written into `EngineInfo`.
 pub const LAYOUT_VERSION: &str = "layout-0.1";
 
-/// 没有显式制表位时，制表符默认前进的步长（毫米）。
+/// Default step (millimeters) a tab advances by when no explicit tab stop is
+/// declared.
 const DEFAULT_TAB_STEP: f64 = 12.5;
 
-/// 注释区的左缩进（毫米）。
+/// Left indent of the note area (millimeters).
 const NOTE_INDENT: f64 = 8.0;
 
-/// 注释之间的间距（毫米）。
+/// Gap between notes (millimeters).
 const NOTE_GAP: f64 = 1.6;
 
-/// 四周型绕排的排除区（页面坐标，毫米）。
+/// Exclusion area of square wrapping (page coordinates, millimeters).
 #[derive(Clone, Copy, Debug)]
 struct FloatExclusion {
-    /// 上边界。
+    /// Top boundary.
     top: f64,
-    /// 下边界。
+    /// Bottom boundary.
     bottom: f64,
-    /// 左边界。
+    /// Left boundary.
     left: f64,
-    /// 右边界。
+    /// Right boundary.
     right: f64,
 }
 
-/// 一条待排的注释。
+/// A note waiting to be typeset.
 struct PendingNote {
-    /// 引用本身。
+    /// The reference itself.
     note: NoteRef,
-    /// 已加上序号的正文块。
+    /// Body blocks with the number already prepended.
     blocks: Vec<Block>,
-    /// 排版高度，毫米。
+    /// Typeset height, millimeters.
     height: f64,
 }
 
-/// 给注释正文的第一段加序号；脚注用 1)，尾注用 (1)。
+/// Prepend the number to the first paragraph of the note body; footnotes use
+/// `1)`, endnotes use `(1)`.
 fn with_note_number(kind: NoteKind, blocks: &[Block], number: usize) -> Vec<Block> {
     let marker = match kind {
         NoteKind::Footnote => format!("{number}) "),
@@ -97,19 +101,19 @@ fn with_note_number(kind: NoteKind, blocks: &[Block], number: usize) -> Vec<Bloc
     blocks
 }
 
-/// 布局错误。
+/// Layout error.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LayoutError {
-    /// 文档没有分节。
-    #[error("文档没有分节，无法排版")]
+    /// The document has no sections.
+    #[error("the document has no sections and cannot be laid out")]
     NoSection,
 }
 
-/// 布局选项。
+/// Layout options.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LayoutOptions {
-    /// 图片没有声明 DPI 时使用的分辨率。
+    /// Resolution used when an image declares no DPI.
     pub default_image_dpi: f64,
 }
 
@@ -121,7 +125,7 @@ impl Default for LayoutOptions {
     }
 }
 
-/// 把流式文档排版为分页文档。
+/// Typeset a flow document into a paginated document.
 pub fn layout(
     document: &FlowDocument,
     fonts: &mut dyn FontProvider,
@@ -129,10 +133,12 @@ pub fn layout(
     layout_with(document, fonts, LayoutOptions::default())
 }
 
-/// 带选项的排版入口。
+/// Typesetting entry point with options.
 ///
-/// 引用「总页数」字段时先排一遍拿页数；含自动目录时先排一遍拿标题页码，再代入
-/// 重排，直到目录页码稳定（最多 4 遍）。
+/// When the total-pages field is referenced, one pass is made first to obtain
+/// the page count; when an automatic table of contents is present, one pass is
+/// made first to obtain heading page numbers, which are then fed back into a
+/// re-layout until the TOC page numbers stabilize (at most 4 passes).
 pub fn layout_with(
     document: &FlowDocument,
     fonts: &mut dyn FontProvider,
@@ -148,7 +154,8 @@ pub fn layout_with(
         return Ok(fixed);
     }
 
-    // 第一遍：目录内容为空，只用来拿标题页码与总页数。
+    // First pass: the TOC content is empty; this pass only provides heading
+    // page numbers and the total page count.
     let mut total_pages = None;
     let mut toc_entries: Option<Vec<TocEntry>> = None;
     let mut last = None;
@@ -170,10 +177,10 @@ pub fn layout_with(
             break;
         }
     }
-    Ok(last.expect("至少排过一遍"))
+    Ok(last.expect("laid out at least once"))
 }
 
-/// 文档是否含自动目录。
+/// Whether the document contains an automatic table of contents.
 fn uses_toc(document: &FlowDocument) -> bool {
     fn blocks_use_toc(blocks: &[Block]) -> bool {
         blocks.iter().any(|block| match block {
@@ -191,7 +198,7 @@ fn uses_toc(document: &FlowDocument) -> bool {
         .any(|section| blocks_use_toc(&section.blocks))
 }
 
-/// 文档是否引用总页数字段。
+/// Whether the document references the total-pages field.
 fn uses_total_pages(document: &FlowDocument) -> bool {
     document.sections.iter().any(|section| {
         let areas = [&section.headers, &section.footers]
@@ -225,7 +232,7 @@ fn inline_uses_total_pages(inline: &Inline) -> bool {
     }
 }
 
-/// 毫米为单位的四边边距。
+/// Four-sided margins in millimeters.
 #[derive(Clone, Copy, Debug)]
 struct MarginsMm {
     top: f64,
@@ -234,7 +241,7 @@ struct MarginsMm {
     left: f64,
 }
 
-/// 当前页累积的内容。
+/// Content accumulated for the current page.
 struct PageBuffer {
     scene: Group,
     items: Vec<TextItem>,
@@ -259,25 +266,26 @@ impl Default for PageBuffer {
     }
 }
 
-/// 一个已测量的行内图片。
+/// A measured inline image.
 #[derive(Clone, Copy, Debug)]
 struct MeasuredImage {
-    /// Flow 资源表中的图片 ID。
+    /// Image ID in the Flow resource table.
     asset: ofdbox_folio_ir::AssetId,
-    /// 显示宽度，毫米。
+    /// Display width, millimeters.
     width: f64,
-    /// 显示高度，毫米。
+    /// Display height, millimeters.
     height: f64,
 }
 
-/// 段落测量结果：断行单元、链接区间、行内图片。
+/// Paragraph measurement result: line breaking pieces, link ranges, inline
+/// images.
 type Measured = (
     Vec<Piece>,
     Vec<(usize, usize, LinkTarget)>,
     Vec<MeasuredImage>,
 );
 
-/// 文本样式的去重键。
+/// Deduplication key for text styles.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct StyleKey {
     family: String,
@@ -307,7 +315,7 @@ impl StyleKey {
     }
 }
 
-/// 一次布局过程。
+/// One layout run.
 struct Engine<'a> {
     document: &'a FlowDocument,
     options: LayoutOptions,
@@ -321,50 +329,54 @@ struct Engine<'a> {
     margins: MarginsMm,
     page: PageBuffer,
     cursor: f64,
-    /// 当前排版框；正文是版心，表格单元格与页眉页脚会临时换框。
+    /// Current layout frame; body text uses the text area, while table cells and
+    /// headers/footers temporarily switch it.
     frame: Frame,
-    /// 是否在框内排版：框内不自动分页。
+    /// Whether layout is inside a frame: no automatic pagination inside a frame.
     in_frame: bool,
-    /// 当前页是否有正文内容（只有页眉的页不产出）。
+    /// Whether the current page has body content (pages with only a header are
+    /// not emitted).
     page_body: bool,
-    /// 当前页是否已经开始排正文。
+    /// Whether the current page has started laying out body text.
     page_started: bool,
-    /// 当前分节的页序，用于「首页不同」。
+    /// Page ordinal within the current section, used for "different first page".
     section_page: usize,
-    /// 分栏数。
+    /// Number of columns.
     column_count: u16,
-    /// 栏间距（毫米）。
+    /// Gap between columns (millimeters).
     column_gap: f64,
-    /// 当前栏下标。
+    /// Current column index.
     column_index: usize,
-    /// 页眉距顶边。
+    /// Distance from the header to the top edge.
     header_distance: f64,
-    /// 页脚距底边。
+    /// Distance from the footer to the bottom edge.
     footer_distance: f64,
-    /// 当前分节的页眉。
+    /// Header of the current section.
     headers: HeaderFooterSet,
-    /// 当前分节的页脚。
+    /// Footer of the current section.
     footers: HeaderFooterSet,
-    /// 两遍布局时已知的总页数。
+    /// Total page count already known during multi-pass layout.
     total_pages: Option<usize>,
-    /// 上一遍排版收集到的目录条目。
+    /// TOC entries collected during the previous layout pass.
     toc_entries: Option<Vec<TocEntry>>,
-    /// 注释编号：(类型, ID) → 序号。
+    /// Note numbering: (kind, ID) → ordinal.
     note_numbers: HashMap<(NoteKind, u32), usize>,
-    /// 脚注计数器。
+    /// Footnote counter.
     next_footnote: usize,
-    /// 尾注计数器。
+    /// Endnote counter.
     next_endnote: usize,
-    /// 本页待排的脚注。
+    /// Footnotes pending for this page.
     page_notes: Vec<PendingNote>,
-    /// 页底注释区占用的高度，正文的下边界要相应上移。
+    /// Height occupied by the bottom note area; the body bottom boundary must
+    /// move up accordingly.
     bottom_inset: f64,
-    /// 待排在文档末尾的尾注。
+    /// Endnotes waiting to be laid out at the end of the document.
     endnotes: Vec<PendingNote>,
-    /// 本页的四周型绕排排除区。
+    /// Square wrapping exclusion areas on this page.
     float_exclusions: Vec<FloatExclusion>,
     headings: Vec<(u8, String, usize, f64)>,
-    /// 字体缺字形的字符计数，最后汇总成一条诊断。
+    /// Count of characters missing glyphs in their font, summarized into one
+    /// diagnostic at the end.
     missing_chars: usize,
 }
 
@@ -450,7 +462,10 @@ impl<'a> Engine<'a> {
         if self.missing_chars > 0 {
             self.diagnostic(
                 DiagnosticCode::MissingFont,
-                format!("有 {} 个字符在当前字体中缺少字形", self.missing_chars),
+                format!(
+                    "{} characters are missing glyphs in the current font",
+                    self.missing_chars
+                ),
             );
         }
 
@@ -459,13 +474,16 @@ impl<'a> Engine<'a> {
         (self.fixed, self.headings)
     }
 
-    // ---- 字体 ----
+    // ---- Fonts ----
 
-    /// 收集字符集并逐个字体解析一次度量。
+    /// Collect the character set and parse the metrics of each font once.
     ///
-    /// 表格单元格与页眉页脚里的文字同样要预解析；自动目录与字段用的样式不在 IR
-    /// 的 run 里（排版时才生成文字），因此把这些样式的字体按全文字符集预解析，
-    /// 否则目录条目会因为「字体没准备」而画成空框。
+    /// Text in table cells and headers/footers must be pre-resolved as well;
+    /// the styles used by the automatic TOC and fields do not appear in the IR
+    /// runs (their text is generated at layout time), so the fonts of those
+    /// styles are pre-resolved against the document-wide character set.
+    /// Otherwise TOC entries would be drawn as empty boxes because "the font was
+    /// not prepared".
     fn prepare_fonts(&mut self, provider: &mut dyn FontProvider) {
         let mut wanted: HashMap<FontKey, HashSet<char>> = HashMap::new();
         let mut fallbacks: HashMap<String, Vec<String>> = HashMap::new();
@@ -477,13 +495,16 @@ impl<'a> Engine<'a> {
                 }
             }
         }
-        // 脚注尾注的正文在页底/文末才排，也要先准备好字体，否则子集里没有这些字形。
+        // Footnote and endnote bodies are only laid out at the page bottom /
+        // document end, so their fonts must be prepared as well; otherwise the
+        // subset would not contain those glyphs.
         for note in &self.document.notes {
             collect_block_chars(&note.blocks, self, &mut wanted, &mut fallbacks);
         }
 
-        // 全文用到的字符，供「排版时才生成文字」的样式兜底；目录标题与页码是
-        // 排版时生成的，也要算进去。
+        // Characters used document-wide, as a fallback for styles whose text is
+        // "generated at layout time"; the TOC title and page numbers are
+        // generated at layout time, so they count too.
         let mut generated: HashSet<char> = "0123456789".chars().collect();
         for section in &self.document.sections {
             collect_toc_text(&section.blocks, &mut generated);
@@ -514,7 +535,8 @@ impl<'a> Engine<'a> {
             let chain = fallbacks.get(&key.family).cloned().unwrap_or_default();
             self.fonts.prepare(provider, key, &chain, chars);
         }
-        // 逐字形兜底：主字体缺字时换到通用字体，避免中文整段变空白。
+        // Per-glyph fallback: switch to a generic font when the primary font
+        // lacks a glyph, so that whole runs of CJK text do not turn blank.
         self.fonts.prepare_fallback(provider, &all_chars);
     }
 
@@ -554,7 +576,7 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// 取（必要时登记）Fixed IR 里的字体资源。
+    /// Fetch (registering if necessary) the font resource in the Fixed IR.
     fn font_asset(&mut self, key: &FontKey) -> Option<Arc<FontAsset>> {
         if let Some(asset) = self.font_assets.get(key) {
             return Some(Arc::clone(asset));
@@ -566,7 +588,8 @@ impl<'a> Engine<'a> {
         Some(stored)
     }
 
-    /// 兜底字体的资源（逐字形回退用），按固定 key 缓存。
+    /// Resource of the fallback font (used for per-glyph fallback), cached under
+    /// a fixed key.
     fn fallback_asset(&mut self) -> Option<Arc<FontAsset>> {
         let key = FontKey::new("", false, false);
         if let Some(asset) = self.font_assets.get(&key) {
@@ -579,9 +602,10 @@ impl<'a> Engine<'a> {
         Some(stored)
     }
 
-    // ---- 样式 ----
+    // ---- Styles ----
 
-    /// 解析段落样式：命名样式为底，直接格式覆盖非默认值。
+    /// Resolve a paragraph style: the named style is the base and direct
+    /// formatting overrides non-default values.
     fn resolve_paragraph_style(&self, style: &ParaStyle) -> ParaStyle {
         let mut resolved = self
             .named_paragraph_style(style.style_id.as_deref())
@@ -614,7 +638,9 @@ impl<'a> Engine<'a> {
             }
             current = next;
         }
-        // 从默认样式出发，按「父 → 子」顺序叠非默认值，子样式缺省字段继承父样式。
+        // Start from the default style, then layer non-default values in
+        // parent → child order; fields left unset by a child inherit from its
+        // parent.
         let mut resolved = self.document.styles.default_paragraph.clone();
         for named in chain.into_iter().rev() {
             apply_paragraph_direct(&mut resolved, &named.props);
@@ -622,7 +648,8 @@ impl<'a> Engine<'a> {
         Some(resolved)
     }
 
-    /// 解析字符样式：命名字符样式为底，直接格式覆盖非默认值。
+    /// Resolve a character style: the named character style is the base and
+    /// direct formatting overrides non-default values.
     fn resolve_char_style(&self, style: &TextStyle, style_id: Option<&str>) -> TextStyle {
         let mut resolved = self
             .named_char_style(style_id)
@@ -666,7 +693,7 @@ impl<'a> Engine<'a> {
         Some(resolved)
     }
 
-    /// 登记并去重文本样式，返回样式下标。
+    /// Register and deduplicate a text style, returning the style index.
     fn intern_style(&mut self, style: &TextStyle) -> usize {
         let key = StyleKey::of(style);
         if let Some(index) = self.style_index.get(&key) {
@@ -678,7 +705,7 @@ impl<'a> Engine<'a> {
         index
     }
 
-    // ---- 页面 ----
+    // ---- Pages ----
 
     fn begin_section(
         &mut self,
@@ -698,7 +725,7 @@ impl<'a> Engine<'a> {
         if self.page_width <= 0.0 || self.page_height <= 0.0 {
             self.page_width = 210.0;
             self.page_height = 297.0;
-            self.warn("页面尺寸无效，按 A4 处理");
+            self.warn("invalid page size; falling back to A4");
         }
         self.column_count = setup.columns.max(1);
         self.column_gap = setup.column_gap.to_mm().max(0.0);
@@ -715,8 +742,9 @@ impl<'a> Engine<'a> {
         self.cursor = self.frame.top;
     }
 
-    /// 版心框。
-    /// 整页版心框（页眉页脚用，横跨所有栏）。
+    /// Text area frame.
+    /// Full-page text area frame (used by headers and footers, spanning all
+    /// columns).
     fn page_frame(&self) -> Frame {
         Frame {
             left: self.margins.left,
@@ -726,7 +754,7 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// 第 index 栏的框。
+    /// Frame of column `index`.
     fn column_frame(&self, index: usize) -> Frame {
         let page = self.page_frame();
         let count = f64::from(self.column_count.max(1));
@@ -740,7 +768,7 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// 切到下一栏；没有下一栏时返回 false。
+    /// Advance to the next column; returns false when there is none.
     fn next_column(&mut self) -> bool {
         let count = usize::from(self.column_count.max(1));
         if self.column_index + 1 >= count {
@@ -752,7 +780,8 @@ impl<'a> Engine<'a> {
         true
     }
 
-    /// 正文流换下一段容器：先换栏，最后一栏再换页。
+    /// Move the body flow to the next container: first the next column, and on
+    /// the last column a new page.
     fn new_flow(&mut self) {
         if self.next_column() {
             return;
@@ -785,7 +814,7 @@ impl<'a> Engine<'a> {
         self.section_page += 1;
     }
 
-    /// 结束当前页；没有正文的页不产出。
+    /// End the current page; pages without body content are not emitted.
     fn finish_page(&mut self) {
         if !self.page_body {
             return;
@@ -818,7 +847,7 @@ impl<'a> Engine<'a> {
         self.fixed.pages.push(page);
     }
 
-    /// 快照当前页，用于回滚一次失败的放置。
+    /// Snapshot the current page, used to roll back a failed placement.
     fn snapshot(&self) -> Snapshot {
         Snapshot {
             children: self.page.scene.children.len(),
@@ -847,10 +876,11 @@ impl<'a> Engine<'a> {
         self.fixed.report.push(Diagnostic::warning(code, message));
     }
 
-    // ---- 块 ----
+    // ---- Blocks ----
 
     fn place_block(&mut self, block: &Block) {
-        // 一页的第一块正文之前才排页眉，避免空页也带页眉。
+        // Lay out the header only before the first body block of a page, so that
+        // empty pages do not get a header either.
         if !self.page_body && !self.in_frame && !matches!(block, Block::PageBreak) {
             self.start_page_body();
         }
@@ -861,11 +891,12 @@ impl<'a> Engine<'a> {
             Block::Table(table) => self.place_table(table),
             Block::Toc(toc) => self.place_toc(toc),
             Block::Floating(floating) => self.place_floating(floating),
-            _ => self.warn("未知块类型，已跳过"),
+            _ => self.warn("unknown block type; skipped"),
         }
     }
 
-    /// 顺序排一组块，处理 `keep_with_next`：标题不能孤零零留在页尾。
+    /// Lay out a group of blocks in order, handling `keep_with_next`: a heading
+    /// must not be left alone at the bottom of a page.
     fn place_blocks(&mut self, blocks: &[Block]) {
         let width = self.content_width();
         for (index, block) in blocks.iter().enumerate() {
@@ -874,7 +905,9 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// 当前块带 `keep_with_next`（可连成链）且和下一块开头放不进本页时提前换栏/换页。
+    /// Break to the next column / page early when the current block carries
+    /// `keep_with_next` (possibly forming a chain) and it plus the start of the
+    /// next block do not fit on this page.
     fn break_for_keep_with_next(&mut self, blocks: &[Block], index: usize, width: f64) {
         if self.in_frame || !self.page_body {
             return;
@@ -903,7 +936,8 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// 一个块「开头」需要的高度：段落取首行，表格取表头加首行，其它取整块。
+    /// Height needed for the "start" of a block: the first line for a paragraph,
+    /// the header plus first row for a table, the whole block otherwise.
     fn block_leading_height(&mut self, block: &Block, width: f64) -> f64 {
         match block {
             Block::Paragraph(paragraph) => {
@@ -924,13 +958,13 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// 本页开始排正文：标记并排页眉。
+    /// The page body starts here: mark it and lay out the header.
     fn start_page_body(&mut self) {
         self.page_body = true;
         self.begin_body();
     }
 
-    /// 正文开始时排页眉。
+    /// Lay out the header when the body starts.
     fn begin_body(&mut self) {
         if self.page_started {
             return;
@@ -939,7 +973,8 @@ impl<'a> Engine<'a> {
         self.layout_header();
     }
 
-    /// 当前页该用哪一套页眉页脚：首页不同 → 默认；偶数页 → 偶数页。
+    /// Which header/footer set this page uses: different first page → default;
+    /// even page → even-page set.
     fn pick_footer(
         set: &HeaderFooterSet,
         first_page: bool,
@@ -977,14 +1012,15 @@ impl<'a> Engine<'a> {
             self.place_block(block);
         }
         if self.cursor > self.margins.top + 0.5 {
-            self.warn("页眉超出上边距，可能与正文重叠");
+            self.warn("header exceeds the top margin and may overlap the body");
         }
         self.frame = saved.0;
         self.cursor = saved.1;
         self.in_frame = saved.2;
     }
 
-    /// 排页脚，返回页脚占用的顶部 y（没有页脚时返回正文底边）。
+    /// Lay out the footer and return the top y it occupies (the body bottom edge
+    /// when there is no footer).
     fn layout_footer(&mut self) -> f64 {
         let body_bottom = self.page_height - self.margins.bottom;
         let first_page = self.section_page == 0;
@@ -996,7 +1032,8 @@ impl<'a> Engine<'a> {
             return body_bottom;
         }
         let width = self.page_frame().width;
-        // 先量高度，再贴着「底边 - 页脚距离」的上方落版。
+        // Measure the height first, then place it right above "bottom edge -
+        // footer distance".
         let height = self.measure_blocks(&blocks, width);
         let bottom = (self.page_height - self.footer_distance).max(self.margins.bottom);
         let top = (bottom - height).max(0.0);
@@ -1018,14 +1055,16 @@ impl<'a> Engine<'a> {
         top
     }
 
-    // ---- 浮动对象 ----
+    // ---- Floating objects ----
 
-    /// 排一个浮动对象：按页面坐标绝对定位，再按绕排方式影响正文游标。
+    /// Lay out a floating object: position it absolutely in page coordinates,
+    /// then affect the body cursor according to its wrap mode.
     ///
-    /// 不参与正文流，不产生分页；所在页由「当前游标所在的页」决定。
+    /// It does not participate in the body flow and does not cause pagination;
+    /// the page it lands on is "the page containing the current cursor".
     fn place_floating(&mut self, floating: &ofdbox_folio_ir::FloatingObject) {
         if self.in_frame {
-            self.warn("浮动对象嵌在表格/页眉里，已按普通内容处理");
+            self.warn("floating object nested in a table/header; treated as normal content");
             self.place_block(&floating.block);
             return;
         }
@@ -1035,8 +1074,10 @@ impl<'a> Engine<'a> {
             .map(|width| width.to_mm())
             .unwrap_or(page.width)
             .clamp(1.0, page.width);
-        // 按参考基准换算左上角：page 相对页面原点，margin/column 相对版心，
-        // paragraph 暂按版心处理（已知近似）。
+        // Convert the top-left corner according to the reference base: `page` is
+        // relative to the page origin, `margin`/`column` relative to the text
+        // area, and `paragraph` is currently treated as the text area (a known
+        // approximation).
         let (from_h, from_v) = floating.position_from;
         let origin_x = match from_h {
             ofdbox_folio_ir::PositionFrom::Page => 0.0,
@@ -1065,16 +1106,17 @@ impl<'a> Engine<'a> {
 
         match floating.wrap {
             ofdbox_folio_ir::WrapMode::None => {
-                // 浮在上面，正文不受影响。
+                // Floating on top; the body is unaffected.
             }
             ofdbox_folio_ir::WrapMode::TopBottom => {
-                // 正文从对象下方继续。
+                // The body continues below the object.
                 if bottom > self.cursor {
                     self.cursor = bottom;
                 }
             }
             ofdbox_folio_ir::WrapMode::Square => {
-                // 记录一块排除区域：与它垂直重叠的段落让到对象另一侧。
+                // Record an exclusion area: paragraphs that vertically overlap it
+                // move to the other side of the object.
                 self.float_exclusions.push(FloatExclusion {
                     top: y,
                     bottom,
@@ -1086,9 +1128,11 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// 当前段落要避开的浮动区域（四周型绕排）。
+    /// Floating areas the current paragraph must avoid (square wrapping).
     ///
-    /// 只按段落整体让开：对象在左半页就整段右移，在右半页就缩右边距。
+    /// The whole paragraph yields as one unit: if the object is on the left half
+    /// of the page the paragraph shifts right, if it is on the right half the
+    /// right margin shrinks.
     fn floating_insets(&self, top: f64, bottom: f64) -> (f64, f64) {
         let page = self.page_frame();
         let mut left = 0.0_f64;
@@ -1107,9 +1151,9 @@ impl<'a> Engine<'a> {
         (left, right)
     }
 
-    // ---- 脚注与尾注 ----
+    // ---- Footnotes and endnotes ----
 
-    /// 取（必要时分配）注释序号，从 1 开始。
+    /// Get (allocating if necessary) the note number, starting at 1.
     fn note_number(&mut self, note: NoteRef) -> usize {
         if let Some(number) = self.note_numbers.get(&(note.kind, note.id)) {
             return *number;
@@ -1128,7 +1172,7 @@ impl<'a> Engine<'a> {
         number
     }
 
-    /// 找到注释正文。
+    /// Find the note body.
     fn note_blocks(&self, note: NoteRef) -> Option<Vec<Block>> {
         self.document
             .notes
@@ -1137,7 +1181,8 @@ impl<'a> Engine<'a> {
             .map(|item| item.blocks.clone())
     }
 
-    /// 收集一行里的注释引用，并为它们预留页底空间。
+    /// Collect the note references on a line and reserve page-bottom space for
+    /// them.
     fn reserve_notes_in_line(&mut self, pieces: &[Piece], line: &LineSpan) {
         for piece in &pieces[line.start..line.end] {
             let Some(note) = piece.note else {
@@ -1151,7 +1196,7 @@ impl<'a> Engine<'a> {
             let Some(blocks) = self.note_blocks(note) else {
                 self.diagnostic(
                     DiagnosticCode::Unsupported,
-                    format!("注释 {} 缺少正文，已跳过", note.id),
+                    format!("note {} has no body; skipped", note.id),
                 );
                 continue;
             };
@@ -1178,10 +1223,12 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// 注释区变大后，重新计算当前框的下边界。
+    /// Recompute the current frame's bottom boundary after the note area grows.
     ///
-    /// 正文已经被注释挤到页底之外时不再回调 cursor：那一行已经排下了，
-    /// 后续行会因为 cursor + 行高 > bottom 自动换栏/换页。
+    /// When the body has already been pushed past the page bottom by the notes,
+    /// `cursor` is not pulled back: that line is already placed, and later lines
+    /// will move to the next column / page automatically because
+    /// cursor + line height > bottom.
     fn refresh_frame_bottom(&mut self) {
         if self.in_frame {
             return;
@@ -1189,7 +1236,7 @@ impl<'a> Engine<'a> {
         self.frame.bottom = self.column_frame(self.column_index).bottom;
     }
 
-    /// 在页面底部排本页的脚注。
+    /// Lay out this page's footnotes at the bottom of the page.
     fn emit_page_notes(&mut self, bottom: f64) {
         let notes = std::mem::take(&mut self.page_notes);
         if notes.is_empty() {
@@ -1209,7 +1256,8 @@ impl<'a> Engine<'a> {
         self.in_frame = saved.2;
     }
 
-    /// 排一段注释列表（尾注复用），top 是注释区顶部。
+    /// Lay out a list of notes (reused by endnotes); `top` is the top of the note
+    /// area.
     fn emit_notes(&mut self, mut notes: Vec<PendingNote>, bottom: f64, separator: bool) {
         if notes.is_empty() {
             return;
@@ -1229,7 +1277,7 @@ impl<'a> Engine<'a> {
         self.layout_notes(&notes, top, width);
     }
 
-    /// 注释区上方那条短横线。
+    /// The short rule above the note area.
     fn draw_note_separator(&mut self, y: f64, width: f64) {
         let mut path = Path::new();
         path.move_to(Point::new(self.margins.left, y));
@@ -1253,7 +1301,7 @@ impl<'a> Engine<'a> {
         }));
     }
 
-    /// 从 top 开始往下排注释正文。
+    /// Lay out the note bodies downward starting at `top`.
     fn layout_notes(&mut self, notes: &[PendingNote], top: f64, width: f64) {
         let saved = (self.frame, self.cursor, self.in_frame);
         self.in_frame = true;
@@ -1275,7 +1323,7 @@ impl<'a> Engine<'a> {
         self.in_frame = saved.2;
     }
 
-    /// 在文档末尾排尾注。
+    /// Lay out the endnotes at the end of the document.
     fn flush_endnotes(&mut self) {
         let notes = std::mem::take(&mut self.endnotes);
         if notes.is_empty() {
@@ -1296,20 +1344,23 @@ impl<'a> Engine<'a> {
         self.finish_page();
     }
 
-    // ---- 自动目录 ----
+    // ---- Automatic table of contents ----
 
-    /// 排自动目录：标题 + 每条「条目 ⇥ 页码」的段落，页码落在右制表位上。
+    /// Lay out the automatic TOC: a title plus one paragraph per "entry ⇥ page
+    /// number", with the page number placed on a right tab stop.
     ///
-    /// 页码来自上一遍排版的结果；目录自身占位会让页码整体后移，`layout_with`
-    /// 会反复代入直到稳定。条目文字与页码之间用制表符分开，右制表位放在版心
-    /// 右边界，`TocStyle::dot_leader` 打开时画点线前导符。
+    /// Page numbers come from the previous layout pass; the space the TOC itself
+    /// occupies shifts them all, and `layout_with` keeps feeding them back until
+    /// they stabilize. Entry text and page number are separated by a tab, the
+    /// right tab stop sits at the right boundary of the text area, and a dotted
+    /// leader is drawn when `TocStyle::dot_leader` is enabled.
     fn place_toc(&mut self, toc: &ofdbox_folio_ir::TocBlock) {
         if self.in_frame {
-            self.warn("目录放在表格单元格里，已跳过");
+            self.warn("table of contents inside a table cell; skipped");
             return;
         }
         let Some(entries) = self.toc_entries.clone() else {
-            // 第一遍排版没有条目，等后续遍次。
+            // The first layout pass has no entries; wait for later passes.
             return;
         };
         let entries: Vec<TocEntry> = entries
@@ -1317,7 +1368,7 @@ impl<'a> Engine<'a> {
             .filter(|(level, title, _)| *level <= toc.max_level.max(1) && !title.trim().is_empty())
             .collect();
         if entries.is_empty() {
-            self.warn("自动目录没有可用标题");
+            self.warn("automatic table of contents has no usable headings");
             return;
         }
 
@@ -1359,7 +1410,8 @@ impl<'a> Engine<'a> {
             paragraph
                 .runs
                 .push(Inline::Text(TextRun::new("\t", page_number_style.clone())));
-            // 大纲目标是 0 基页序，目录里写 1 基页码。
+            // Outline targets are 0-based page ordinals; the TOC records 1-based
+            // page numbers.
             paragraph.runs.push(Inline::Text(TextRun::new(
                 (page + 1).to_string(),
                 page_number_style.clone(),
@@ -1368,11 +1420,13 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// 在临时页里量一组块的高度（不产出任何元素）。
+    /// Measure the height of a group of blocks on a temporary page (emitting no
+    /// elements).
     fn measure_blocks(&mut self, blocks: &[Block], width: f64) -> f64 {
         let saved_page = std::mem::take(&mut self.page);
         let saved = (self.frame, self.cursor, self.in_frame);
-        // 测量不能有副作用：大纲、脚注预留、浮动排除区都要还原。
+        // Measurement must not have side effects: the outline, footnote
+        // reservations and float exclusion areas all have to be restored.
         let saved_headings = self.headings.len();
         let saved_notes = self.page_notes.len();
         let saved_inset = self.bottom_inset;
@@ -1400,11 +1454,11 @@ impl<'a> Engine<'a> {
         height
     }
 
-    // ---- 表格 ----
+    // ---- Tables ----
 
     fn place_table(&mut self, table: &Table) {
         if table.rows.is_empty() || table.columns.is_empty() {
-            self.warn("表格没有行或列，已跳过");
+            self.warn("table has no rows or columns; skipped");
             return;
         }
         let widths = self.table_widths(table);
@@ -1413,13 +1467,14 @@ impl<'a> Engine<'a> {
             .min(table.rows.len());
         let page_bottom = self.bottom();
         let mut index = 0_usize;
-        // 行内拆分的续排位置：`Some` 表示这一行还没排完。
+        // Continuation position for in-row splitting: `Some` means this row has
+        // not been fully laid out yet.
         let mut resume: Option<Vec<Option<CellContinuation>>> = None;
         let mut guard = 0_usize;
         while index < table.rows.len() {
             guard += 1;
             if guard > table.rows.len() * 8 + 16 {
-                self.warn("表格分页次数异常，已停止排这张表");
+                self.warn("abnormal table pagination count; stopped laying out this table");
                 break;
             }
             let snapshot = self.snapshot();
@@ -1435,14 +1490,15 @@ impl<'a> Engine<'a> {
             );
             let complete = fragment.continuation.iter().all(Option::is_none);
             if complete && fragment.bottom <= page_bottom + 1e-6 {
-                // 本页放得下整行。
+                // The whole row fits on this page.
                 self.cursor = fragment.bottom;
                 index += 1;
                 resume = None;
                 continue;
             }
             if !fragment.placed_any {
-                // 一行都没有落下：整行挪到下一页，重排表头后再试。
+                // Not a single line was placed: move the whole row to the next
+                // page, repeat the header and try again.
                 self.restore(snapshot);
                 self.new_flow();
                 self.repeat_header_rows(table, &widths, header_rows, page_bottom);
@@ -1451,7 +1507,7 @@ impl<'a> Engine<'a> {
                 if retry.bottom > page_bottom + 1e-6 {
                     self.diagnostic(
                         DiagnosticCode::Geometry,
-                        "表格行高于可用高度，已按行拆分或允许溢出",
+                        "table row is taller than the available height; split by row or allowed to overflow",
                     );
                 }
                 self.cursor = retry.bottom;
@@ -1459,22 +1515,27 @@ impl<'a> Engine<'a> {
                 resume = None;
                 continue;
             }
-            // 行内拆分：本页保留已排的部分，剩余内容续到下一页。
+            // In-row splitting: keep the part laid out on this page and continue
+            // the rest on the next page.
             self.cursor = fragment.bottom;
             self.new_flow();
             self.repeat_header_rows(table, &widths, header_rows, page_bottom);
             if complete {
-                // 只是内边距/固定行高溢出，行本身已经排完。
+                // Only padding / fixed row height overflows; the row itself is
+                // already complete.
                 index += 1;
                 resume = None;
             } else {
-                self.diagnostic(DiagnosticCode::Geometry, "表格行跨页，已按行续排");
+                self.diagnostic(
+                    DiagnosticCode::Geometry,
+                    "table row spans pages; continued by row",
+                );
                 resume = Some(fragment.continuation);
             }
         }
     }
 
-    /// 跨页时重排表头行。
+    /// Repeat the header rows when the table crosses a page.
     fn repeat_header_rows(&mut self, table: &Table, widths: &[f64], count: usize, limit: f64) {
         for header in 0..count {
             let fragment = self.layout_row(table, widths, header, self.cursor, limit, None, true);
@@ -1482,7 +1543,7 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// 表格列宽（毫米）。
+    /// Table column widths (millimeters).
     fn table_widths(&self, table: &Table) -> Vec<f64> {
         let total = self.content_width();
         let mut widths = vec![0.0_f64; table.columns.len()];
@@ -1520,11 +1581,14 @@ impl<'a> Engine<'a> {
         widths
     }
 
-    /// 排一行（可能只排一部分），返回本页占用的底部与每格的续排位置。
+    /// Lay out one row (possibly only part of it) and return the bottom occupied
+    /// on this page plus the continuation position of each cell.
     ///
-    /// `limit` 是本页可用的下边界：单元格内容排到边界就停，剩余部分通过
-    /// `CellContinuation` 交给下一页续排。`resume` 是本行在上一页留下的续排位置，
-    /// `force` 表示即使一行都放不下也要硬排一行（防止死循环）。
+    /// `limit` is the available bottom boundary on this page: cell content stops
+    /// at the boundary and the remainder is handed to the next page through
+    /// `CellContinuation`. `resume` is the continuation position this row left on
+    /// the previous page, and `force` means one line must be laid out even if
+    /// nothing fits (to prevent an infinite loop).
     #[allow(clippy::too_many_arguments)]
     fn layout_row(
         &mut self,
@@ -1550,7 +1614,8 @@ impl<'a> Engine<'a> {
         let mut max_bottom = top;
         let mut placed_any = false;
         let mut continuation = vec![None; row.cells.len()];
-        // 列游标：合并单元格按 span 占多列。
+        // Column cursor: a merged cell occupies several columns according to its
+        // span.
         let mut column = 0_usize;
         for (cell_index, cell) in row.cells.iter().enumerate() {
             let span = usize::try_from(cell.span.max(1)).unwrap_or(1);
@@ -1562,7 +1627,8 @@ impl<'a> Engine<'a> {
             let inner_left = x + padding_left;
             let inner_width = (width - padding_left - padding_right).max(1.0);
             let resume_at = resume.and_then(|items| items.get(cell_index).copied().flatten());
-            // 纵向合并的延续格内容为空，由上方起始格覆盖。
+            // A vertically merged continuation cell has no content of its own; it
+            // is covered by the starting cell above.
             if cell.v_merge == ofdbox_folio_ir::VMerge::Continue {
                 x += width;
                 column += span;
@@ -1606,7 +1672,7 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// 在一个单元格的子框里排版，最多排到 `frame.bottom`。
+    /// Lay out inside a cell's sub-frame, up to `frame.bottom` at most.
     fn layout_cell(
         &mut self,
         cell: &ofdbox_folio_ir::Cell,
@@ -1629,7 +1695,8 @@ impl<'a> Engine<'a> {
         while block_index < cell.blocks.len() {
             match &cell.blocks[block_index] {
                 Block::Paragraph(paragraph) => {
-                    // 只有续排的第一个块需要 force；后续块如果放不下就留给下一页。
+                    // Only the first continued block needs `force`; later blocks
+                    // are left for the next page when they do not fit.
                     let force_this = force && block_index == resume.map_or(0, |item| item.block);
                     let (next, total) =
                         self.place_paragraph_bounded(paragraph, line, frame.bottom, force_this);
@@ -1672,7 +1739,7 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// 画一行里每个单元格的边框。
+    /// Draw the border of every cell in a row.
     fn draw_row_borders(
         &mut self,
         table: &Table,
@@ -1708,7 +1775,8 @@ impl<'a> Engine<'a> {
                 table.borders.vertical.or(table.borders.outer)
             };
             if let Some(border) = horizontal {
-                // 纵向合并的延续格顶部被上方单元格盖住，不再画线。
+                // The top of a vertically merged continuation cell is covered by
+                // the cell above, so no line is drawn there.
                 if cell.v_merge != ofdbox_folio_ir::VMerge::Continue {
                     self.line(Point::new(x, top), Point::new(x + width, top), border);
                 }
@@ -1727,7 +1795,7 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// 画一条表格边框线。
+    /// Draw one table border line.
     fn line(&mut self, from: Point, to: Point, border: Border) {
         if border.width.to_mm() <= 0.0 {
             return;
@@ -1752,7 +1820,7 @@ impl<'a> Engine<'a> {
         }));
     }
 
-    /// 段前间距：页首丢弃。
+    /// Space before a paragraph: dropped at the top of a page.
     fn advance_space(&mut self, space: Twips) {
         let space = space.to_mm().max(0.0);
         if space <= 0.0 {
@@ -1788,9 +1856,12 @@ impl<'a> Engine<'a> {
 
         let line_count = lines.len();
 
-        // 四周型浮动对象：与对象垂直重叠的段落逐行重排（每行按当时的可用宽度断行）。
+        // Square floating objects: paragraphs that vertically overlap the object
+        // are re-laid out line by line (each line breaks against the width
+        // available at that moment).
         if !self.in_frame && line_count > 0 {
-            // 用整段估算高度探测：只要有一段落在绕排带里就改走逐行路径。
+            // Probe with a whole-paragraph height estimate: as soon as any part
+            // falls in a wrap band, switch to the line-by-line path.
             let first_size = self.max_size(&pieces, &lines[0]);
             let estimate = line_count as f64 * (first_size * 1.2).max(1.0);
             let (probe_left, probe_right) =
@@ -1801,7 +1872,8 @@ impl<'a> Engine<'a> {
             }
         }
 
-        // keep_lines_together：整段放不下就整段挪到下一栏/下一页。
+        // keep_lines_together: if the whole paragraph does not fit, move all of it
+        // to the next column / page.
         if !self.in_frame && self.page_body && style.keep_lines_together && line_count > 0 {
             let block = Block::Paragraph(paragraph.clone());
             let total = self.measure_blocks(std::slice::from_ref(&block), self.content_width());
@@ -1813,31 +1885,35 @@ impl<'a> Engine<'a> {
 
         let mut index = 0_usize;
         while index < line_count {
-            // 本页还能放下几行。
+            // How many more lines still fit on this page.
             let fit = if self.in_frame {
                 line_count - index
             } else {
                 self.lines_that_fit(&style, &pieces, &images, &lines, index, self.bottom())
             };
             if fit == 0 && !self.in_frame && self.page_body {
-                // 一行都放不下：换栏/换页后重算。
+                // Not even one line fits: move to the next column / page and
+                // recompute.
                 self.new_flow();
                 continue;
             }
             let mut take = fit.max(1);
             let at_top = self.cursor <= self.frame.top + 0.01;
-            // 孤行：本页只放得下 1 行、后面还有内容，且不在页首 → 整段挪页。
+            // Widow: only 1 line fits on this page while more content follows,
+            // and this is not the top of the page → move the whole paragraph.
             if !self.in_frame && self.page_body && take == 1 && index + 1 < line_count && !at_top {
                 self.new_flow();
                 continue;
             }
-            // 寡行：换页后只剩 1 行 → 本页少放一行，让下一页至少两行。
+            // Orphan: only 1 line would be left after the page break → place one
+            // fewer line here so the next page gets at least two.
             if !self.in_frame && self.page_body && take >= 2 && index + take + 1 == line_count {
                 take -= 1;
             }
             for offset in 0..take {
                 let line = &lines[index + offset];
-                // 行盒高度与基线都由字体度量决定，图片按高度撑高行盒。
+                // The line box height and baseline are both driven by the font
+                // metrics; images stretch the line box by their height.
                 let line_box = self.line_box(&style, &pieces, &images, line);
                 let baseline = self.cursor + line_box.ascent;
                 let first = index + offset == 0;
@@ -1855,7 +1931,8 @@ impl<'a> Engine<'a> {
         self.cursor += style.space_after.to_mm().max(0.0);
     }
 
-    /// 逐行绕排：每行按当前 y 处的可用宽度重新断行，绕过四周型浮动对象。
+    /// Line-by-line wrapping: re-break each line against the width available at
+    /// the current y, going around square floating objects.
     fn place_paragraph_wrapped(
         &mut self,
         style: &ParaStyle,
@@ -1872,7 +1949,8 @@ impl<'a> Engine<'a> {
             if guard > pieces.len() * 4 + 32 {
                 break;
             }
-            // 用当前字号估算行高，决定这一行落在哪个绕排带里。
+            // Estimate the line height from the current font size to decide which
+            // wrap band this line falls into.
             let estimate = self.max_size(
                 pieces,
                 &LineSpan {
@@ -1915,7 +1993,8 @@ impl<'a> Engine<'a> {
         self.cursor += style.space_after.to_mm().max(0.0);
     }
 
-    /// 从第 `start` 行起，当前框还能完整放下几行。
+    /// How many lines, starting from line `start`, still fit entirely in the
+    /// current frame.
     fn lines_that_fit(
         &self,
         style: &ParaStyle,
@@ -1938,7 +2017,7 @@ impl<'a> Engine<'a> {
         count
     }
 
-    /// 测量一个段落：样式、断行单元与行区间。
+    /// Measure a paragraph: style, line breaking pieces and line ranges.
     fn lay_out_paragraph(
         &mut self,
         paragraph: &Paragraph,
@@ -1948,7 +2027,9 @@ impl<'a> Engine<'a> {
         let page_number = self.page_number();
         let (pieces, links, images) = self.measure_paragraph(paragraph, page_number, total_pages);
         let content = self.content_width();
-        // 这里按整宽断行；与浮动对象重叠的段落由 place_paragraph_wrapped 逐行重排。
+        // Break lines against the full width here; paragraphs that overlap a
+        // floating object are re-laid out line by line by
+        // `place_paragraph_wrapped`.
         let indent_left = style.left_indent.to_mm().max(0.0);
         let indent_right = style.right_indent.to_mm().max(0.0);
         let width = (content - indent_left - indent_right).max(1.0);
@@ -1964,9 +2045,11 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// 在框内排段落，最多排到下边界 limit；返回 (下一个未排的行, 总行数)。
+    /// Lay out a paragraph inside the frame, up to the bottom boundary `limit`;
+    /// returns (next line not yet laid out, total line count).
     ///
-    /// force 为真时至少排一行，保证拆分能推进。
+    /// When `force` is true at least one line is laid out, so that splitting
+    /// always makes progress.
     fn place_paragraph_bounded(
         &mut self,
         paragraph: &Paragraph,
@@ -1989,7 +2072,8 @@ impl<'a> Engine<'a> {
         let mut index = start_line;
         while index < line_count {
             let line = &lines[index];
-            // 行盒高度与基线都由字体度量决定，图片按高度撑高行盒。
+            // The line box height and baseline are both driven by the font
+            // metrics; images stretch the line box by their height.
             let line_box = self.line_box(&style, &pieces, &images, line);
             let height = line_box.height;
             let fits = self.cursor + height <= limit + 1e-6;
@@ -2017,7 +2101,9 @@ impl<'a> Engine<'a> {
         (index, line_count)
     }
 
-    /// 一行的高度：单倍行高按字体 ascent/descent/lineGap 计算，倍数与固定行距在此基础上调整。
+    /// Height of one line: single spacing is computed from the font's
+    /// ascent/descent/lineGap, and the multiplier and fixed line spacing adjust
+    /// that base.
     fn line_height(&self, style: &ParaStyle, pieces: &[Piece], line: &LineSpan) -> f64 {
         let size = self.max_size(pieces, line);
         let (_, height_em) = self.font_metrics(pieces, line);
@@ -2033,7 +2119,8 @@ impl<'a> Engine<'a> {
         if base <= 0.0 { single } else { base }
     }
 
-    /// 行内主字体的垂直度量：(ascent, 单倍行高)，单位 em。
+    /// Vertical metrics of the line's primary font: (ascent, single line height),
+    /// in em.
     fn font_metrics(&self, pieces: &[Piece], line: &LineSpan) -> (f64, f64) {
         let mut best: Option<(f64, (f64, f64))> = None;
         for piece in &pieces[line.start..line.end] {
@@ -2044,7 +2131,8 @@ impl<'a> Engine<'a> {
             let key = FontKey::new(&style.family.name, style.bold, style.italic);
             let metrics = match self.fonts.get(&key) {
                 Some(font) => (font.ascender.max(0.1), font.line_height()),
-                // 字体没解析出来时退回经验值，与旧行为一致。
+                // Fall back to empirical values when the font could not be
+                // resolved, matching the old behavior.
                 None => (0.8, 1.2),
             };
             if best.is_none_or(|(best_size, _)| size > best_size) {
@@ -2054,7 +2142,8 @@ impl<'a> Engine<'a> {
         best.map(|(_, metrics)| metrics).unwrap_or((0.8, 1.2))
     }
 
-    /// 一行的行盒高度与基线偏移（相对行盒顶部）。
+    /// Line box height and baseline offset (relative to the line box top) of one
+    /// line.
     fn line_box(
         &self,
         style: &ParaStyle,
@@ -2068,7 +2157,8 @@ impl<'a> Engine<'a> {
         let height = self
             .line_height(style, pieces, line)
             .max(image_height + 0.2 * size);
-        // 基线：文字按字体 ascent 下移，行内有图片时贴图片底部。
+        // Baseline: text is shifted down by the font ascent, and sits on the image
+        // bottom when the line contains an image.
         let ascent = (size * ascent_em).max(image_height);
         let ascent = ascent.min((height - 0.1).max(0.0));
         LineBox { height, ascent }
@@ -2083,7 +2173,7 @@ impl<'a> Engine<'a> {
             .max(1.0)
     }
 
-    // ---- 测量 ----
+    // ---- Measurement ----
 
     fn measure_paragraph(
         &mut self,
@@ -2149,7 +2239,9 @@ impl<'a> Engine<'a> {
                     self.push_text(&text, &style, index, pieces);
                 }
                 Inline::Note(note) => {
-                    // 引用标记：小号数字，排成普通文本，落版时再预留页底注释区。
+                    // Reference marker: a smaller number laid out as normal text;
+                    // page-bottom space for the note area is reserved at
+                    // placement time.
                     let mut style = self.resolve_char_style(&TextStyle::default(), None);
                     style.size = Twips(style.size.0 * 7 / 10);
                     let index = self.intern_style(&style);
@@ -2174,7 +2266,10 @@ impl<'a> Engine<'a> {
                             pieces.push(Piece::object(width, index, images.len() - 1));
                         }
                         None => {
-                            self.diagnostic(DiagnosticCode::Image, "行内图片缺少资源，已跳过");
+                            self.diagnostic(
+                                DiagnosticCode::Image,
+                                "inline image has no resource; skipped",
+                            );
                         }
                     }
                 }
@@ -2192,11 +2287,14 @@ impl<'a> Engine<'a> {
                 continue;
             }
             if ch == '\t' {
-                // 制表符的宽度要等到知道当前 x 之后才能定，测量阶段记 0。
+                // A tab's width can only be determined once the current x is
+                // known, so it is recorded as 0 during measurement.
                 pieces.push(Piece::text('\t', 0.0, index));
                 continue;
             }
-            // 主字体缺字时用兜底字体的字形宽度；两者都缺才算缺字。
+            // Use the fallback font's glyph width when the primary font lacks the
+            // character; only when both lack it is the character counted as
+            // missing.
             let (width, missing) = match self.fonts.get(&key) {
                 Some(data) if !data.is_missing(ch) => (data.advance(ch) * size, false),
                 _ => match self.fonts.fallback() {
@@ -2242,7 +2340,7 @@ impl<'a> Engine<'a> {
         ))
     }
 
-    // ---- 放置 ----
+    // ---- Placement ----
 
     #[allow(clippy::too_many_arguments)]
     fn emit_line(
@@ -2274,7 +2372,9 @@ impl<'a> Engine<'a> {
             .sum();
         let mut extra = vec![0.0_f64; line.len()];
 
-        // 两端对齐：最后一行按左对齐；优先拉伸空格，没有空格时均摊到字间。
+        // Justification: the last line is left-aligned; spaces are stretched
+        // first, and when there are none the slack is distributed between
+        // characters.
         if style.align == Align::Justify && !last && width > natural + 1e-6 {
             let slack = width - natural;
             let spaces: Vec<usize> = (line.start..line.end)
@@ -2305,7 +2405,8 @@ impl<'a> Engine<'a> {
             positions.push(x);
             let piece = pieces[index];
             if piece.is_tab() {
-                // 制表符把 x 推到下一个制表位，并按需画前导符。
+                // A tab pushes x to the next tab stop and draws a leader when
+                // needed.
                 x = self.place_tab(style, pieces, line, index, x, baseline);
                 continue;
             }
@@ -2320,12 +2421,13 @@ impl<'a> Engine<'a> {
             x += advance;
         }
         let line_end_item = self.page.items.len() as u32;
-        // 这一行里的脚注引用要在本页预留页底空间。
+        // Footnote references on this line must reserve page-bottom space on this
+        // page.
         if !self.in_frame {
             self.reserve_notes_in_line(pieces, line);
         }
 
-        // 行框与基线。
+        // Line box and baseline.
         let line_width = (x - self.frame.left - indent_left).max(0.0);
         let bbox = Rect::new(
             self.frame.left + indent_left,
@@ -2345,7 +2447,7 @@ impl<'a> Engine<'a> {
             });
         }
 
-        // 链接区域。
+        // Link areas.
         for (start, end, target) in links {
             let from = (*start).max(line.start);
             let to = (*end).min(line.end);
@@ -2366,11 +2468,13 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// 制表符落版：把 x 推到下一个制表位，并按需画前导符。
+    /// Tab placement: push x to the next tab stop and draw a leader when needed.
     ///
-    /// 制表位之后的文字宽度在测量阶段是已知的（除制表符本身），所以右/居中/
-    /// 小数点对齐都能在这里一次算出来：先量「制表符到行尾」的宽度，再据此
-    /// 决定起点，最后用前导符填满剩下的空隙。
+    /// The width of the text after the tab stop is already known from
+    /// measurement (excluding the tab itself), so right / center / decimal
+    /// alignment can all be computed here in one go: first measure the width
+    /// from the tab to the end of the line, then decide the start position from
+    /// it, and finally fill the remaining gap with the leader.
     fn place_tab(
         &mut self,
         style: &ParaStyle,
@@ -2380,7 +2484,8 @@ impl<'a> Engine<'a> {
         x: f64,
         baseline: f64,
     ) -> f64 {
-        // 只对齐到本行末尾，行尾空白不参与。
+        // Only align up to the end of this line; trailing whitespace does not
+        // participate.
         let mut remaining = 0.0;
         let mut decimal_width = None;
         for piece in &pieces[index + 1..line.end] {
@@ -2389,14 +2494,16 @@ impl<'a> Engine<'a> {
                 break;
             }
             if decimal_width.is_none() && piece.ch == '.' {
-                // 小数点左侧的宽度：把小数点本身挪到制表位上。
+                // Width left of the decimal point: move the decimal point itself
+                // onto the tab stop.
                 decimal_width = Some(remaining);
             }
             remaining += piece.width;
         }
 
         let left = self.frame.left;
-        // 正文右边缘：制表位与后续内容都不能越过它。
+        // Body right edge: neither the tab stop nor the following content may
+        // cross it.
         let right = left + self.content_width();
         let default_step = DEFAULT_TAB_STEP;
         let stop = style
@@ -2411,18 +2518,23 @@ impl<'a> Engine<'a> {
                 stop.leader,
             ),
             None => {
-                // 没有显式制表位：按默认步进推到下一个格点。
+                // No explicit tab stop: advance by the default step to the next
+                // grid position.
                 let offset = x - left;
                 let next = ((offset / default_step).floor() + 1.0) * default_step;
                 ((left + next).min(right), TabAlign::Left, TabLeader::None)
             }
         };
 
-        // 制表位声明在正文宽度之外：裁到右边缘并记诊断。
+        // Tab stop declared outside the body width: clip to the right edge and
+        // record a diagnostic.
         if let Some(stop) = stop
             && stop.position.to_mm() > self.content_width() + 0.01
         {
-            self.diagnostic(DiagnosticCode::Geometry, "制表位超出正文宽度，已裁到右边缘");
+            self.diagnostic(
+                DiagnosticCode::Geometry,
+                "tab stop exceeds the body width; clipped to the right edge",
+            );
         }
         let mut start = match align {
             TabAlign::Left => target,
@@ -2434,15 +2546,18 @@ impl<'a> Engine<'a> {
             },
             _ => target,
         };
-        // 制表位后面的内容放不进剩余空间：不再右对齐，紧接前文，避免重叠。
+        // The content after the tab stop does not fit in the remaining space: stop
+        // right-aligning and place it directly after the preceding text to avoid
+        // overlap.
         if start < x {
             self.diagnostic(
                 DiagnosticCode::Geometry,
-                "制表位后的内容放不下，已紧接前文排布",
+                "content after the tab stop does not fit; placed directly after the preceding text",
             );
             start = x;
         }
-        // 仍然越界（制表位声明在页边距之外）时裁到正文右边缘。
+        // Still out of bounds (tab stop declared outside the page margins): clip to
+        // the body right edge.
         let start = start.min((right - remaining).max(x));
 
         if start > x + 0.4 {
@@ -2456,7 +2571,7 @@ impl<'a> Engine<'a> {
         start
     }
 
-    /// 画制表位前导符。
+    /// Draw the tab leader.
     fn draw_leader(&mut self, leader: TabLeader, from: f64, to: f64, baseline: f64, color: Rgba) {
         let style = match leader {
             TabLeader::None => return,
@@ -2506,14 +2621,17 @@ impl<'a> Engine<'a> {
             return;
         };
         let key = FontKey::new(&style.family.name, style.bold, style.italic);
-        // 主字体缺这个字形时换兜底字体：中英混排里英文样式排中文很常见。
+        // Switch to the fallback font when the primary font lacks this glyph:
+        // setting CJK text in an English style is very common in mixed
+        // Chinese/English layout.
         let (use_fallback, glyph) = match self.fonts.get(&key) {
             Some(data) if !data.is_missing(piece.ch) => (false, data.glyph(piece.ch)),
             _ => match self.fonts.fallback() {
                 Some(fallback) if !fallback.is_missing(piece.ch) => {
                     (true, fallback.glyph(piece.ch))
                 }
-                // 两者都没有这个字形：仍写 .notdef，保持文本层完整。
+                // Neither font has this glyph: still write .notdef so the text
+                // layer stays complete.
                 _ => (false, 0),
             },
         };
@@ -2561,7 +2679,7 @@ impl<'a> Engine<'a> {
         });
     }
 
-    /// 放置行内图片：底边贴基线。
+    /// Place an inline image: its bottom edge sits on the baseline.
     fn place_image(&mut self, image: &MeasuredImage, x: f64, baseline: f64, width: f64) {
         let Some(stored) = self.register_image(image.asset) else {
             return;
@@ -2581,7 +2699,8 @@ impl<'a> Engine<'a> {
         }));
     }
 
-    /// 把 Flow 的图片登记进 Fixed 的资源表，返回带 ID 的句柄。
+    /// Register a Flow image into the Fixed resource table and return the handle
+    /// carrying its ID.
     fn register_image(&mut self, id: ofdbox_folio_ir::AssetId) -> Option<Arc<ImageAsset>> {
         let (format, encoded, pixel_width, pixel_height, dpi, mask) = {
             let source = self.document.resources.image(id)?;
@@ -2607,7 +2726,10 @@ impl<'a> Engine<'a> {
 
     fn place_image_block(&mut self, image: &ImageBlock) {
         let Some((mut width, mut height)) = self.image_size_of(image.image, image.size) else {
-            self.diagnostic(DiagnosticCode::Image, "块级图片缺少资源，已跳过");
+            self.diagnostic(
+                DiagnosticCode::Image,
+                "block image has no resource; skipped",
+            );
             return;
         };
         let content = self.content_width();
@@ -2615,7 +2737,10 @@ impl<'a> Engine<'a> {
             let scale = content / width;
             width = content;
             height *= scale;
-            self.diagnostic(DiagnosticCode::Approximation, "图片超宽，已等比缩放到版心");
+            self.diagnostic(
+                DiagnosticCode::Approximation,
+                "image is wider than the text area; scaled proportionally to fit",
+            );
         }
         if height > self.bottom() - self.cursor && !self.in_frame && self.page_body {
             self.new_flow();
@@ -2627,7 +2752,7 @@ impl<'a> Engine<'a> {
             width *= scale;
             self.diagnostic(
                 DiagnosticCode::Approximation,
-                "图片超高，已等比缩放到当前页",
+                "image is taller than the page area; scaled proportionally to fit the current page",
             );
         }
         let Some(stored) = self.register_image(image.image) else {
@@ -2653,11 +2778,11 @@ impl<'a> Engine<'a> {
         self.cursor += height;
     }
 
-    // ---- 大纲 ----
+    // ---- Outline ----
 
     fn build_outline(&self) -> Vec<OutlineItem> {
         let mut roots: Vec<OutlineItem> = Vec::new();
-        // 父链：每项是（层级，在 roots 中的路径）。
+        // Parent chain: each entry is (level, path within `roots`).
         let mut path: Vec<(u8, usize)> = Vec::new();
         for (level, title, page, y) in &self.headings {
             let level = *level;
@@ -2688,7 +2813,7 @@ impl<'a> Engine<'a> {
     }
 }
 
-/// 沿路径取出可变的条目。
+/// Fetch a mutable entry along a path.
 fn element_at<'b>(
     roots: &'b mut [OutlineItem],
     path: &[(u8, usize)],
@@ -2701,9 +2826,11 @@ fn element_at<'b>(
     Some(current)
 }
 
-/// 把段落直接格式（相对默认值发生变化的部分）叠加到已解析样式上。
+/// Overlay a paragraph's direct formatting (the parts that differ from the
+/// defaults) onto an already resolved style.
 ///
-/// 继承链上无法区分「显式写成默认值」与「没写」，因此默认值一律视为未设置。
+/// On an inheritance chain it is impossible to tell "explicitly written as the
+/// default" from "not written", so default values are always treated as unset.
 fn apply_paragraph_direct(base: &mut ParaStyle, over: &ParaStyle) {
     let direct = ParaStyle::default();
     if over.align != direct.align {
@@ -2738,7 +2865,8 @@ fn apply_paragraph_direct(base: &mut ParaStyle, over: &ParaStyle) {
     }
 }
 
-/// 把字符直接格式叠加到已解析样式上，规则同 [`apply_paragraph_direct`]。
+/// Overlay character direct formatting onto an already resolved style, following
+/// the same rules as [`apply_paragraph_direct`].
 fn apply_text_direct(base: &mut TextStyle, over: &TextStyle) {
     let direct = TextStyle::default();
     if over.family != direct.family {
@@ -2770,7 +2898,7 @@ fn apply_text_direct(base: &mut TextStyle, over: &TextStyle) {
     }
 }
 
-/// 收集目录标题里排版时才出现的字符。
+/// Collect the characters that only appear at layout time in the TOC title.
 fn collect_toc_text(blocks: &[Block], chars: &mut HashSet<char>) {
     for block in blocks {
         match block {
@@ -2791,7 +2919,8 @@ fn collect_toc_text(blocks: &[Block], chars: &mut HashSet<char>) {
     }
 }
 
-/// 收集块里的目录样式（标题/条目/页码），供字体预解析。
+/// Collect the TOC styles (title / entry / page number) found in blocks, for font
+/// pre-resolution.
 fn collect_toc_styles(blocks: &[Block], styles: &mut Vec<TextStyle>) {
     for block in blocks {
         match block {
@@ -2812,7 +2941,7 @@ fn collect_toc_styles(blocks: &[Block], styles: &mut Vec<TextStyle>) {
     }
 }
 
-/// 递归收集块（含表格单元格）里的字符。
+/// Recursively collect the characters in blocks (including table cells).
 fn collect_block_chars(
     blocks: &[Block],
     engine: &Engine<'_>,
@@ -2836,7 +2965,7 @@ fn collect_block_chars(
     }
 }
 
-/// 一行里最高的行内图片高度。
+/// Height of the tallest inline image on a line.
 fn line_image_height(pieces: &[Piece], line: &LineSpan, images: &[MeasuredImage]) -> f64 {
     pieces[line.start..line.end]
         .iter()
@@ -2845,93 +2974,96 @@ fn line_image_height(pieces: &[Piece], line: &LineSpan, images: &[MeasuredImage]
         .fold(0.0, f64::max)
 }
 
-/// 目录条目：层级、标题、页码。
+/// TOC entry: level, title, page number.
 type TocEntry = (u8, String, usize);
 
-/// 当前排版的横向框：表格单元格、页眉页脚都会换一个框。
+/// Horizontal frame of the current layout: table cells, headers and footers all
+/// switch to a different frame.
 #[derive(Clone, Copy, Debug, Default)]
 struct Frame {
-    /// 左边界，毫米。
+    /// Left boundary, millimeters.
     left: f64,
-    /// 可用宽度，毫米。
+    /// Available width, millimeters.
     width: f64,
-    /// 顶边界，毫米。
+    /// Top boundary, millimeters.
     top: f64,
-    /// 底边界，毫米。
+    /// Bottom boundary, millimeters.
     bottom: f64,
 }
 
-/// 一行的行盒。
+/// Line box of one line.
 struct LineBox {
-    /// 行盒高度（毫米）。
+    /// Line box height (millimeters).
     height: f64,
-    /// 基线相对行盒顶部的偏移（毫米）。
+    /// Baseline offset from the line box top (millimeters).
     ascent: f64,
 }
 
-/// 测量好的段落。
+/// A measured paragraph.
 struct LaidParagraph {
-    /// 解析后的段落样式。
+    /// Resolved paragraph style.
     style: ParaStyle,
-    /// 断行单元。
+    /// Line breaking pieces.
     pieces: Vec<Piece>,
-    /// 链接区间。
+    /// Link ranges.
     links: Vec<(usize, usize, LinkTarget)>,
-    /// 行内图片。
+    /// Inline images.
     images: Vec<MeasuredImage>,
-    /// 行区间。
+    /// Line ranges.
     lines: Vec<LineSpan>,
-    /// 因浮动对象而增加的水平内缩。
+    /// Extra horizontal inset caused by floating objects.
     inset_left: f64,
 }
 
-/// 表格行里某个单元格的续排位置。
+/// Continuation position of one cell within a table row.
 #[derive(Clone, Copy, Debug)]
 struct CellContinuation {
-    /// 下一个未排的块下标。
+    /// Index of the next block not yet laid out.
     block: usize,
-    /// 该块是段落时，已排完的行数。
+    /// When that block is a paragraph, the number of lines already laid out.
     line: usize,
 }
 
-/// 一行（或行的一段）的排版结果。
+/// Layout result of one row (or a fragment of one).
 #[derive(Clone, Debug)]
 struct RowFragment {
-    /// 本页占用的底部 y。
+    /// Bottom y occupied on this page.
     bottom: f64,
-    /// 每格未排完的续排位置；None 表示该格已排完。
+    /// Continuation position of each cell not yet complete; None means the cell is
+    /// done.
     continuation: Vec<Option<CellContinuation>>,
-    /// 本页是否落下过内容。
+    /// Whether any content was placed on this page.
     placed_any: bool,
 }
 
-/// 单元格的排版结果。
+/// Layout result of a cell.
 #[derive(Clone, Copy, Debug)]
 struct CellOutcome {
-    /// 内容底部的 y。
+    /// y of the content bottom.
     bottom: f64,
-    /// 未排完时的续排位置。
+    /// Continuation position when not complete.
     continuation: Option<CellContinuation>,
-    /// 是否落下过内容。
+    /// Whether any content was placed.
     placed_any: bool,
 }
 
-/// 一页内容的快照，用于「放到一半发现放不下」时回滚。
+/// Snapshot of one page's content, used to roll back when "it turns out not to
+/// fit halfway through placement".
 #[derive(Clone, Copy, Debug)]
 struct Snapshot {
-    /// 场景子元素数量。
+    /// Number of scene children.
     children: usize,
-    /// 文本项数量。
+    /// Number of text items.
     items: usize,
-    /// 行数量。
+    /// Number of lines.
     lines: usize,
-    /// 链接数量。
+    /// Number of links.
     links: usize,
-    /// 竖直游标。
+    /// Vertical cursor.
     cursor: f64,
 }
 
-/// 段落纯文本。
+/// Plain text of a paragraph.
 fn paragraph_text(paragraph: &Paragraph) -> String {
     let mut text = String::new();
     fn walk(inlines: &[Inline], text: &mut String) {
@@ -2952,7 +3084,7 @@ fn paragraph_text(paragraph: &Paragraph) -> String {
     text
 }
 
-/// 文本项的页面包围盒。
+/// Page bounding box of a text item.
 fn text_bbox(run: &ofdbox_folio_ir::GlyphRun, size: f64, transform: Matrix) -> Rect {
     let mut min_x = f64::INFINITY;
     let mut min_y = f64::INFINITY;

@@ -1,7 +1,8 @@
-//! OFDBox Folio 的 Fixed IR 渲染层。
+//! Fixed IR rendering layer for OFDBox Folio.
 //!
-//! 只消费 [`ofdbox_folio_ir::Page`] 等 Fixed IR 类型，不感知源文档格式。
-//! 当前实现提供基于 `vello_cpu` 的 CPU 位图渲染器、图片解码和资源缓存。
+//! Consumes only Fixed IR types such as [`ofdbox_folio_ir::Page`] and is
+//! unaware of the source document format. The current implementation provides
+//! a `vello_cpu`-based CPU bitmap renderer, image decoding and resource caches.
 
 mod error;
 mod image;

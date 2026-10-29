@@ -1,7 +1,7 @@
-//! 图片解码。
+//! Image decoding.
 //!
-//! Fixed IR 只保存编码字节；渲染器按需把 PNG、JPEG、BMP、TIFF、JBIG2
-//! 解码为 RGBA8，并应用透明度蒙版。
+//! Fixed IR only stores encoded bytes; the renderer decodes PNG, JPEG, BMP,
+//! TIFF and JBIG2 to RGBA8 on demand and applies transparency masks.
 
 use std::io::Cursor;
 
@@ -9,22 +9,24 @@ use ofdbox_folio_ir::ImageFormat;
 
 use crate::error::RenderError;
 
-/// 解码后的 RGBA8 图像。
+/// A decoded RGBA8 image.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecodedImage {
-    /// 宽度，像素。
+    /// Width in pixels.
     pub width: u32,
-    /// 高度，像素。
+    /// Height in pixels.
     pub height: u32,
-    /// 非预乘 RGBA8 像素。
+    /// Non-premultiplied RGBA8 pixels.
     pub rgba: Vec<u8>,
 }
 
 impl DecodedImage {
-    /// 将灰度蒙版乘入 alpha 通道。
+    /// Multiplies the grayscale mask into the alpha channel.
     ///
-    /// 蒙版与图片描述同一块物理区域，但生产方常按不同分辨率存放；尺寸不等时
-    /// 由 [`ofdbox_folio_ir::apply_image_mask`] 按面积平均重采样到图片像素网格。
+    /// The mask and the image describe the same physical region, but producers often
+    /// store them at different resolutions; when the sizes differ,
+    /// [`ofdbox_folio_ir::apply_image_mask`] resamples to the image pixel grid by
+    /// area averaging.
     pub fn apply_mask(&mut self, mask: &DecodedImage) -> Result<(), RenderError> {
         ofdbox_folio_ir::apply_image_mask(
             &mut self.rgba,
@@ -34,11 +36,11 @@ impl DecodedImage {
             mask.width,
             mask.height,
         )
-        .map_err(|error| RenderError::Image(format!("图像蒙版不可用: {error}")))
+        .map_err(|error| RenderError::Image(format!("image mask unavailable: {error}")))
     }
 }
 
-/// 按文件头识别图片格式。
+/// Recognizes the image format from the file header.
 pub fn detect_format(data: &[u8]) -> Option<ImageFormat> {
     if data.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
         Some(ImageFormat::Png)
@@ -57,7 +59,7 @@ pub fn detect_format(data: &[u8]) -> Option<ImageFormat> {
     }
 }
 
-/// 解码图片并转换为 RGBA8。
+/// Decodes an image and converts it to RGBA8.
 pub fn decode_image(
     format: ImageFormat,
     data: &[u8],
@@ -70,15 +72,21 @@ pub fn decode_image(
         ImageFormat::Jbig2 => decode_jbig2(data)?,
         ImageFormat::Tiff => decode_tiff(data, max_pixels)?,
         ImageFormat::Ccitt | ImageFormat::Unknown => {
-            return Err(RenderError::Unsupported(format!("图片格式: {format:?}")));
+            return Err(RenderError::Unsupported(format!(
+                "image format: {format:?}"
+            )));
         }
         _ => {
-            return Err(RenderError::Unsupported(format!("图片格式: {format:?}")));
+            return Err(RenderError::Unsupported(format!(
+                "image format: {format:?}"
+            )));
         }
     };
     let pixels = u64::from(image.width) * u64::from(image.height);
     if pixels > max_pixels {
-        return Err(RenderError::Image("图片像素数超出限制".to_owned()));
+        return Err(RenderError::Image(
+            "image pixel count exceeds the limit".to_owned(),
+        ));
     }
     Ok(image)
 }
@@ -92,11 +100,13 @@ fn decode_png(data: &[u8], max_pixels: u64) -> Result<DecodedImage, RenderError>
     let header = reader.info();
     let pixels = u64::from(header.width) * u64::from(header.height);
     if pixels > max_pixels {
-        return Err(RenderError::Image("图片像素数超出限制".to_owned()));
+        return Err(RenderError::Image(
+            "image pixel count exceeds the limit".to_owned(),
+        ));
     }
     let size = reader
         .output_buffer_size()
-        .ok_or_else(|| RenderError::Image("PNG 输出尺寸未知".to_owned()))?;
+        .ok_or_else(|| RenderError::Image("PNG output size unknown".to_owned()))?;
     let mut buffer = vec![0; size];
     let info = reader
         .next_frame(&mut buffer)
@@ -121,7 +131,9 @@ fn decode_png(data: &[u8], max_pixels: u64) -> Result<DecodedImage, RenderError>
             .flat_map(|pixel| [pixel[0], pixel[0], pixel[0], pixel[1]])
             .collect(),
         png::ColorType::Indexed => {
-            return Err(RenderError::Image("PNG 调色板未展开".to_owned()));
+            return Err(RenderError::Image(
+                "PNG palette was not expanded".to_owned(),
+            ));
         }
     };
     Ok(DecodedImage {
@@ -138,17 +150,19 @@ fn decode_jpeg(data: &[u8], max_pixels: u64) -> Result<DecodedImage, RenderError
         .map_err(|error| RenderError::Image(error.to_string()))?;
     let header = decoder
         .info()
-        .ok_or_else(|| RenderError::Image("缺少 JPEG 图像信息".to_owned()))?;
+        .ok_or_else(|| RenderError::Image("missing JPEG image info".to_owned()))?;
     let pixel_count = u64::from(header.width) * u64::from(header.height);
     if pixel_count > max_pixels {
-        return Err(RenderError::Image("图片像素数超出限制".to_owned()));
+        return Err(RenderError::Image(
+            "image pixel count exceeds the limit".to_owned(),
+        ));
     }
     let pixels = decoder
         .decode()
         .map_err(|error| RenderError::Image(error.to_string()))?;
     let info = decoder
         .info()
-        .ok_or_else(|| RenderError::Image("缺少 JPEG 图像信息".to_owned()))?;
+        .ok_or_else(|| RenderError::Image("missing JPEG image info".to_owned()))?;
     let rgba = match info.pixel_format {
         jpeg_decoder::PixelFormat::L8 => pixels
             .iter()
@@ -178,7 +192,9 @@ fn decode_jpeg(data: &[u8], max_pixels: u64) -> Result<DecodedImage, RenderError
             })
             .collect(),
         jpeg_decoder::PixelFormat::L16 => {
-            return Err(RenderError::Image("不支持 16 位灰度 JPEG".to_owned()));
+            return Err(RenderError::Image(
+                "16-bit grayscale JPEG is not supported".to_owned(),
+            ));
         }
     };
     Ok(DecodedImage {
@@ -214,7 +230,9 @@ fn decode_tiff(data: &[u8], max_pixels: u64) -> Result<DecodedImage, RenderError
         .dimensions()
         .map_err(|error| RenderError::Image(error.to_string()))?;
     if u64::from(width) * u64::from(height) > max_pixels {
-        return Err(RenderError::Image("图片像素数超出限制".to_owned()));
+        return Err(RenderError::Image(
+            "image pixel count exceeds the limit".to_owned(),
+        ));
     }
     let color = decoder
         .colortype()
@@ -225,7 +243,9 @@ fn decode_tiff(data: &[u8], max_pixels: u64) -> Result<DecodedImage, RenderError
     {
         tiff::decoder::DecodingResult::U8(bytes) => bytes,
         _ => {
-            return Err(RenderError::Image("不支持的 TIFF 像素深度".to_owned()));
+            return Err(RenderError::Image(
+                "unsupported TIFF pixel depth".to_owned(),
+            ));
         }
     };
     let rgba = match color {
@@ -265,7 +285,7 @@ fn decode_tiff(data: &[u8], max_pixels: u64) -> Result<DecodedImage, RenderError
             .collect(),
         _ => {
             return Err(RenderError::Image(format!(
-                "不支持的 TIFF 颜色类型: {color:?}"
+                "unsupported TIFF color type: {color:?}"
             )));
         }
     };
@@ -283,9 +303,9 @@ fn decode_jbig2(data: &[u8]) -> Result<DecodedImage, RenderError> {
     let page = pages
         .into_iter()
         .next()
-        .ok_or_else(|| RenderError::Image("JBIG2 没有页面".to_owned()))?;
+        .ok_or_else(|| RenderError::Image("JBIG2 has no page".to_owned()))?;
     if page.width == 0 || page.height == 0 {
-        return Err(RenderError::Image("JBIG2 页面尺寸无效".to_owned()));
+        return Err(RenderError::Image("invalid JBIG2 page size".to_owned()));
     }
     let mut rgba = Vec::with_capacity(page.width as usize * page.height as usize * 4);
     for y in 0..page.height {
@@ -329,7 +349,7 @@ mod tests {
             height: 2,
             rgba: [10, 20, 30, 255].repeat(4),
         };
-        // 4×4 蒙版：上半黑、下半白，与 2×2 图片描述同一块区域。
+        // A 4×4 mask: black on top, white on the bottom, describing the same region as the 2×2 image.
         let mut mask = DecodedImage {
             width: 4,
             height: 4,

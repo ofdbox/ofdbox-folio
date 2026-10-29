@@ -1,4 +1,4 @@
-//! 包读取：容器/解密、entry 路径解析、宽松解析与模型加载。
+//! Package reading: container/decryption, entry path resolution, lenient parsing and model loading.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -17,7 +17,8 @@ use ofdbox_core::store::OfdFile;
 use crate::lenient;
 use crate::{LenientMode, OfdDiagnostic, OfdError, OfdReadOptions};
 
-/// 包读取器：持有一个 `OfdFile`，负责解密、路径解析和「严格优先、失败宽松」的模型解析。
+/// Package reader: holds an `OfdFile` and handles decryption, path resolution, and
+/// "strict first, lenient on failure" model parsing.
 pub(crate) struct PackageReader {
     file: OfdFile,
     lenient: LenientMode,
@@ -36,7 +37,8 @@ impl PackageReader {
                 )))?;
             } else {
                 return Err(OfdError::Unsupported(
-                    "OFD 已加密，需要提供密码或证书私钥".to_owned(),
+                    "OFD is encrypted; a password or certificate private key is required"
+                        .to_owned(),
                 ));
             }
         }
@@ -110,7 +112,7 @@ impl PackageReader {
                         Ok(value)
                     }
                     Err(lenient_error) => Err(OfdError::InvalidStructure(format!(
-                        "{entry}: 严格解析失败（{strict}），宽松解析仍失败（{lenient_error}）"
+                        "{entry}: strict parsing failed ({strict}), lenient parsing also failed ({lenient_error})"
                     ))),
                 }
             }
@@ -146,7 +148,7 @@ impl PackageReader {
     }
 }
 
-/// 一个 XML entry 的上下文：共享读取器 + 当前 entry 所在目录。
+/// Context of one XML entry: shared reader + the directory the current entry lives in.
 pub(crate) struct Ctx {
     reader: Rc<PackageReader>,
     dir: String,
@@ -257,7 +259,7 @@ impl Ctx {
     }
 }
 
-/// 已解析并绑定上下文的对象。
+/// An object that has been parsed and had its context bound.
 pub(crate) struct Loaded<T> {
     pub data: T,
     ctx: Ctx,
@@ -293,7 +295,7 @@ impl<T> Loaded<T> {
     }
 }
 
-/// 生成候选 entry：相对当前目录、包根路径。
+/// Generates candidate entries: path relative to the current directory, and package-root path.
 pub(crate) fn candidates(base_dir: &str, loc: &str) -> Vec<String> {
     let raw = loc.trim();
     let mut values = Vec::new();
@@ -326,7 +328,7 @@ fn normalize(path: &str) -> String {
     parts.join("/")
 }
 
-/// 取路径的父目录，统一成不带尾斜杠的形式。
+/// Returns the parent directory of a path, normalized to have no trailing slash.
 pub(crate) fn parent_dir(path: &str) -> &str {
     let path = path.trim_end_matches('/');
     match path.rsplit_once('/') {

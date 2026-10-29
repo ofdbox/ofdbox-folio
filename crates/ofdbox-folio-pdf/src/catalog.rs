@@ -1,4 +1,4 @@
-﻿//! PDF 目录级结构：大纲与附件。
+//! PDF catalog-level structures: outlines and attachments.
 
 use std::collections::{HashMap, HashSet};
 
@@ -11,10 +11,10 @@ use crate::frontend;
 
 const MAX_DEPTH: usize = 32;
 
-/// 1 点等于多少毫米。
+/// How many millimeters one point equals.
 const PT_TO_MM: f64 = 25.4 / 72.0;
 
-/// 解析大纲树；目标页解析失败时跳过该条目。
+/// Parses the outline tree; entries whose destination page fails to resolve are skipped.
 pub(crate) fn outline(document: &Document, pages: &[ObjectId]) -> Vec<OutlineItem> {
     let Some(catalog) = catalog(document) else {
         return Vec::new();
@@ -134,7 +134,7 @@ fn destination(
         .ok()
         .map(|info| info.crop_box.height)
         .unwrap_or(0.0);
-    // 目标区域坐标是 PDF 用户空间单位（点），IR 用毫米。
+    // Destination rectangle coordinates are in PDF user-space units (points), while IR uses millimeters.
     let to_mm = |value: f64| value * PT_TO_MM;
     let point = match values.get(1).and_then(|object| object.as_name().ok()) {
         Some(b"XYZ") => {
@@ -190,7 +190,7 @@ fn named_destination(document: &Document, name: &[u8]) -> Option<Vec<Object>> {
     result
 }
 
-/// 解析 EmbeddedFiles 名称树。
+/// Parses the EmbeddedFiles name tree.
 pub(crate) fn attachments(
     document: &Document,
 ) -> (Vec<AttachmentInfo>, Vec<(AttachmentId, ObjectId)>) {

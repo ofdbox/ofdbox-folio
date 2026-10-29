@@ -1,104 +1,105 @@
-//! 资源标识、字体、图片与文档级资源表。
+//! Resource identifiers, fonts, images, and the document-level resource table.
 //!
-//! 资源 ID 在文档内分配，`0` 表示未分配。字体和图片按内容去重，页面元素
-//! 通过共享句柄引用资源，不复制字节。
+//! Resource IDs are allocated within the document; `0` means unassigned. Fonts and
+//! images are deduplicated by content, and page elements reference resources through
+//! shared handles without copying bytes.
 
 use std::sync::Arc;
 
-/// 字体或图片资源标识。
+/// A font or image resource identifier.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AssetId(u64);
 
 impl AssetId {
-    /// 未分配标识。
+    /// The unassigned identifier.
     pub const UNASSIGNED: Self = Self(0);
 
-    /// 以原始值构造。
+    /// Construct from a raw value.
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
 
-    /// 原始值。
+    /// The raw value.
     pub const fn get(self) -> u64 {
         self.0
     }
 }
 
-/// 附件标识。
+/// An attachment identifier.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AttachmentId(u64);
 
 impl AttachmentId {
-    /// 未分配标识。
+    /// The unassigned identifier.
     pub const UNASSIGNED: Self = Self(0);
 
-    /// 以原始值构造。
+    /// Construct from a raw value.
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
 
-    /// 原始值。
+    /// The raw value.
     pub const fn get(self) -> u64 {
         self.0
     }
 }
 
-/// 模板层标识。
+/// A template layer identifier.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TemplateId(u64);
 
 impl TemplateId {
-    /// 未分配标识。
+    /// The unassigned identifier.
     pub const UNASSIGNED: Self = Self(0);
 
-    /// 以原始值构造。
+    /// Construct from a raw value.
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
 
-    /// 原始值。
+    /// The raw value.
     pub const fn get(self) -> u64 {
         self.0
     }
 }
 
-/// 标题或书签锚点标识。
+/// A heading or bookmark anchor identifier.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AnchorId(u64);
 
 impl AnchorId {
-    /// 未分配标识。
+    /// The unassigned identifier.
     pub const UNASSIGNED: Self = Self(0);
 
-    /// 以原始值构造。
+    /// Construct from a raw value.
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
 
-    /// 原始值。
+    /// The raw value.
     pub const fn get(self) -> u64 {
         self.0
     }
 }
 
-/// 内嵌字体资源。
+/// An embedded font resource.
 #[derive(Debug, PartialEq)]
 pub struct FontAsset {
     id: AssetId,
-    /// 字体文件字节。
+    /// Font file bytes.
     pub data: Arc<[u8]>,
-    /// 字体集合内的 face 索引。
+    /// Face index within the font collection.
     pub face_index: u32,
-    /// 字体名称，对应 OFD `FontName`。
+    /// Font name, corresponding to OFD `FontName`.
     pub font_name: Option<String>,
-    /// 字体家族名。
+    /// Font family name.
     pub family: Option<String>,
-    /// PostScript 名称。
+    /// PostScript name.
     pub postscript_name: Option<String>,
 }
 
 impl FontAsset {
-    /// 创建字体资源，ID 由资源表分配。
+    /// Create a font resource; the ID is allocated by the resource table.
     pub fn new(data: Arc<[u8]>, face_index: u32) -> Self {
         Self {
             id: AssetId::UNASSIGNED,
@@ -110,81 +111,81 @@ impl FontAsset {
         }
     }
 
-    /// 设置字体名称。
+    /// Set the font name.
     pub fn with_font_name(mut self, name: impl Into<String>) -> Self {
         self.font_name = Some(name.into());
         self
     }
 
-    /// 设置字体家族名。
+    /// Set the font family name.
     pub fn with_family(mut self, family: impl Into<String>) -> Self {
         self.family = Some(family.into());
         self
     }
 
-    /// 设置 PostScript 名称。
+    /// Set the PostScript name.
     pub fn with_postscript_name(mut self, name: impl Into<String>) -> Self {
         self.postscript_name = Some(name.into());
         self
     }
 
-    /// 资源标识。
+    /// Resource identifier.
     pub fn id(&self) -> AssetId {
         self.id
     }
 
-    /// 字体文件字节。
+    /// Font file bytes.
     pub fn data(&self) -> &[u8] {
         &self.data
     }
 
-    /// 字体集合内的 face 索引。
+    /// Face index within the font collection.
     pub fn face_index(&self) -> u32 {
         self.face_index
     }
 }
 
-/// 图片编码格式。
+/// Image encoding format.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ImageFormat {
-    /// PNG。
+    /// PNG.
     Png,
-    /// JPEG。
+    /// JPEG.
     Jpeg,
-    /// BMP。
+    /// BMP.
     Bmp,
-    /// TIFF。
+    /// TIFF.
     Tiff,
-    /// JBIG2。
+    /// JBIG2.
     Jbig2,
-    /// CCITT Group 3/4。
+    /// CCITT Group 3/4.
     Ccitt,
-    /// 未知格式。
+    /// Unknown format.
     #[default]
     Unknown,
 }
 
-/// 图片资源。
+/// An image resource.
 #[derive(Debug, PartialEq)]
 pub struct ImageAsset {
     id: AssetId,
-    /// 编码格式。
+    /// Encoding format.
     pub format: ImageFormat,
-    /// 原始编码字节。
+    /// Original encoded bytes.
     pub encoded: Arc<[u8]>,
-    /// 像素宽度。
+    /// Pixel width.
     pub pixel_width: u32,
-    /// 像素高度。
+    /// Pixel height.
     pub pixel_height: u32,
-    /// 可选 DPI。
+    /// Optional DPI.
     pub dpi: Option<(f64, f64)>,
-    /// 可选透明度蒙版。
+    /// Optional transparency mask.
     pub mask: Option<Arc<ImageAsset>>,
 }
 
 impl ImageAsset {
-    /// 创建图片资源，ID 由资源表分配。
+    /// Create an image resource; the ID is allocated by the resource table.
     pub fn new(
         format: ImageFormat,
         encoded: Arc<[u8]>,
@@ -202,27 +203,28 @@ impl ImageAsset {
         }
     }
 
-    /// 设置 DPI。
+    /// Set the DPI.
     pub fn with_dpi(mut self, x: f64, y: f64) -> Self {
         self.dpi = Some((x, y));
         self
     }
 
-    /// 设置透明度蒙版。
+    /// Set the transparency mask.
     pub fn with_mask(mut self, mask: Arc<ImageAsset>) -> Self {
         self.mask = Some(mask);
         self
     }
 
-    /// 资源标识。
+    /// Resource identifier.
     pub fn id(&self) -> AssetId {
         self.id
     }
 }
 
-/// 文档级字体与图片资源表。
+/// The document-level font and image resource table.
 ///
-/// 相同内容只保存一份，并分配稳定 ID。ID 从 1 开始，`0` 保留给未分配状态。
+/// Identical content is stored only once and assigned a stable ID. IDs start at 1;
+/// `0` is reserved for the unassigned state.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ResourceStore {
     next_id: u64,
@@ -231,7 +233,7 @@ pub struct ResourceStore {
 }
 
 impl ResourceStore {
-    /// 创建空资源表。
+    /// Create an empty resource table.
     pub fn new() -> Self {
         Self::default()
     }
@@ -241,7 +243,7 @@ impl ResourceStore {
         AssetId(self.next_id)
     }
 
-    /// 添加字体；相同字节和 face 索引会复用已有资源。
+    /// Add a font; identical bytes and face index reuse the existing resource.
     pub fn add_font(&mut self, data: Arc<[u8]>, face_index: u32) -> AssetId {
         if let Some(existing) = self
             .fonts
@@ -262,7 +264,7 @@ impl ResourceStore {
         id
     }
 
-    /// 添加带元数据的字体；相同字节、face 索引与名称会复用已有资源。
+    /// Add a font with metadata; identical bytes, face index, and names reuse the existing resource.
     pub fn add_font_asset(&mut self, mut asset: FontAsset) -> AssetId {
         if let Some(existing) = self.fonts.iter().find(|font| {
             font.face_index == asset.face_index
@@ -279,7 +281,7 @@ impl ResourceStore {
         id
     }
 
-    /// 添加图片；相同编码、尺寸和蒙版会复用已有资源。
+    /// Add an image; identical encoding, dimensions, and mask reuse the existing resource.
     pub fn add_image(&mut self, mut image: ImageAsset) -> AssetId {
         if let Some(existing) = self
             .images
@@ -294,32 +296,32 @@ impl ResourceStore {
         id
     }
 
-    /// 按 ID 查找字体。
+    /// Look up a font by ID.
     pub fn font(&self, id: AssetId) -> Option<&Arc<FontAsset>> {
         self.fonts.iter().find(|font| font.id == id)
     }
 
-    /// 按 ID 查找图片。
+    /// Look up an image by ID.
     pub fn image(&self, id: AssetId) -> Option<&Arc<ImageAsset>> {
         self.images.iter().find(|image| image.id == id)
     }
 
-    /// 遍历全部字体。
+    /// Iterate over all fonts.
     pub fn fonts(&self) -> impl Iterator<Item = &Arc<FontAsset>> {
         self.fonts.iter()
     }
 
-    /// 遍历全部图片。
+    /// Iterate over all images.
     pub fn images(&self) -> impl Iterator<Item = &Arc<ImageAsset>> {
         self.images.iter()
     }
 
-    /// 字体数量。
+    /// The number of fonts.
     pub fn font_count(&self) -> usize {
         self.fonts.len()
     }
 
-    /// 图片数量。
+    /// The number of images.
     pub fn image_count(&self) -> usize {
         self.images.len()
     }
@@ -338,13 +340,15 @@ fn same_image(a: &ImageAsset, b: &ImageAsset) -> bool {
         }
 }
 
-/// 把灰度蒙版乘入 RGBA8 像素的 alpha 通道。
+/// Multiply a grayscale mask into the alpha channel of RGBA8 pixels.
 ///
-/// 蒙版与图片描述同一块物理区域，但生产方常按不同分辨率存放（例如 25×25 的
-/// 图片配 75×75 的 1 bit 蒙版）。尺寸不同时把蒙版按面积平均重采样到图片像素
-/// 网格，因此调用方不需要自己处理缩放。
+/// The mask and the image describe the same physical area, but producers often store
+/// them at different resolutions (for example a 25×25 image with a 75×75 1-bit mask).
+/// When the sizes differ, the mask is area-averaged and resampled onto the image pixel
+/// grid, so callers do not need to handle scaling themselves.
 ///
-/// 返回的错误说明蒙版为什么不可用；调用方应按无蒙版降级或报错，而不是使用半张蒙版。
+/// The returned error explains why the mask is unusable; callers should degrade to
+/// using no mask or report an error, rather than using half a mask.
 pub fn apply_image_mask(
     rgba: &mut [u8],
     width: u32,
@@ -354,13 +358,13 @@ pub fn apply_image_mask(
     mask_height: u32,
 ) -> Result<(), &'static str> {
     if mask_width == 0 || mask_height == 0 {
-        return Err("蒙版尺寸为 0");
+        return Err("mask dimensions are 0");
     }
     if mask.len() < mask_width as usize * mask_height as usize * 4 {
-        return Err("蒙版像素数据不完整");
+        return Err("mask pixel data is incomplete");
     }
     if rgba.len() < width as usize * height as usize * 4 {
-        return Err("图像像素数据不完整");
+        return Err("image pixel data is incomplete");
     }
     if mask_width == width && mask_height == height {
         for (pixel, mask_pixel) in rgba
@@ -401,17 +405,17 @@ pub fn apply_image_mask(
     Ok(())
 }
 
-/// 蒙版像素的灰度。
+/// The gray level of a mask pixel.
 fn mask_factor(mask_pixel: &[u8]) -> u32 {
     (u32::from(mask_pixel[0]) + u32::from(mask_pixel[1]) + u32::from(mask_pixel[2])) / 3
 }
 
-/// 把 0–255 的灰度系数乘到 alpha 上。
+/// Multiply alpha by a 0–255 gray factor.
 fn apply_factor(alpha: u8, factor: u32) -> u8 {
     ((u32::from(alpha) * factor) / 255) as u8
 }
 
-/// 目标像素 `index` 在源像素网格上覆盖的半开区间。
+/// The half-open interval of source pixel grid cells covered by destination pixel `index`.
 fn sample_range(index: u32, dst_len: u32, src_len: u32) -> (u32, u32) {
     let start = (u64::from(index) * u64::from(src_len) / u64::from(dst_len)) as u32;
     let start = start.min(src_len - 1);
@@ -419,9 +423,10 @@ fn sample_range(index: u32, dst_len: u32, src_len: u32) -> (u32, u32) {
     (start, end.max(start + 1).min(src_len))
 }
 
-/// 按文件头识别图片编码格式。
+/// Detect the image encoding format from the file header.
 ///
-/// 只看魔数，不做完整解码；无法识别时返回 `None`。
+/// Only the magic number is inspected and no full decoding is performed; returns
+/// `None` if it cannot be recognized.
 pub fn detect_image_format(data: &[u8]) -> Option<ImageFormat> {
     if data.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
         Some(ImageFormat::Png)
@@ -440,9 +445,10 @@ pub fn detect_image_format(data: &[u8]) -> Option<ImageFormat> {
     }
 }
 
-/// 从编码字节读出像素尺寸。
+/// Read the pixel dimensions from the encoded bytes.
 ///
-/// 支持 PNG、JPEG、BMP、TIFF；只需读文件头，不解码像素。
+/// Supports PNG, JPEG, BMP, and TIFF; only the file header is read and pixels are
+/// not decoded.
 pub fn image_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     if data.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
         if data.len() < 24 {
@@ -593,7 +599,7 @@ mod tests {
     #[test]
     fn mask_is_downsampled_to_image_grid() {
         let mut pixels = [10, 20, 30, 255].repeat(4);
-        // 4×4 蒙版：上半黑、下半白，与 2×2 图片描述同一块区域。
+        // 4×4 mask: black on the top half, white on the bottom half, covering the same area as the 2×2 image.
         let mut mask = Vec::new();
         for y in 0..4 {
             let value = if y < 2 { 0 } else { 255 };
@@ -638,7 +644,7 @@ mod tests {
 
     #[test]
     fn reads_png_and_bmp_dimensions() {
-        // 只有文件头也要能读出尺寸。
+        // Dimensions must be readable from the file header alone.
         let mut png = vec![0_u8; 24];
         png[..8].copy_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
         png[16..20].copy_from_slice(&32_u32.to_be_bytes());

@@ -1,4 +1,4 @@
-//! `styles.xml`、`theme1.xml` 与样式层叠解析。
+//! `styles.xml`, `theme1.xml` and style cascade resolution.
 
 use std::collections::HashMap;
 
@@ -9,49 +9,49 @@ use crate::props::{
 };
 use crate::xml::{XmlReader, attr, local_name, skip_element};
 
-/// 一条命名段落样式。
+/// A named paragraph style.
 #[derive(Clone, Debug, Default)]
 struct ParaStyleDef {
-    /// 显示名。
+    /// Display name.
     name: String,
-    /// 父样式 ID。
+    /// Parent style ID.
     based_on: Option<String>,
-    /// 属性。
+    /// Properties.
     props: RawParaProps,
 }
 
-/// 一条命名字符样式。
+/// A named character style.
 #[derive(Clone, Debug, Default)]
 struct RunStyleDef {
-    /// 父样式 ID。
+    /// Parent style ID.
     based_on: Option<String>,
-    /// 属性。
+    /// Properties.
     props: RawRunProps,
 }
 
-/// 解析后的样式表。
+/// Parsed style sheet.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Styles {
-    /// 文档默认段落属性。
+    /// Document default paragraph properties.
     default_para: RawParaProps,
-    /// 文档默认字符属性。
+    /// Document default character properties.
     default_run: RawRunProps,
-    /// 命名段落样式。
+    /// Named paragraph styles.
     paragraph: HashMap<String, ParaStyleDef>,
-    /// 命名字符样式。
+    /// Named character styles.
     character: HashMap<String, RunStyleDef>,
-    /// 命名表格样式。
+    /// Named table styles.
     table: HashMap<String, RawTableProps>,
-    /// 隐式默认段落样式 ID（w:default="1"）。
+    /// Implicit default paragraph style ID (w:default="1").
     default_para_id: Option<String>,
-    /// 隐式默认字符样式 ID。
+    /// Implicit default character style ID.
     default_run_id: Option<String>,
-    /// 主题字体。
+    /// Theme fonts.
     pub theme: ThemeFonts,
 }
 
 impl Styles {
-    /// 解析 `styles.xml`。
+    /// Parse `styles.xml`.
     pub fn parse(text: &str, theme: ThemeFonts) -> Result<Self, DocxError> {
         let mut styles = Self {
             theme,
@@ -63,7 +63,8 @@ impl Styles {
                 quick_xml::events::Event::Start(element) => match local_name(&element).as_str() {
                     "docDefaults" => parse_doc_defaults(&mut reader, &mut styles)?,
                     "style" => parse_style(&mut reader, &element, &mut styles)?,
-                    // 顶层 `w:styles` 等容器本身不携带样式定义，忽略即可。
+                    // Top-level containers such as `w:styles` carry no style
+                    // definitions themselves, so ignore them.
                     _ => {}
                 },
                 quick_xml::events::Event::Eof => break,
@@ -73,7 +74,8 @@ impl Styles {
         Ok(styles)
     }
 
-    /// 解析段落样式：文档默认 → 样式链（根到叶）→ 直接格式。
+    /// Resolve paragraph properties: document defaults → style chain (root to leaf) →
+    /// direct formatting.
     pub fn resolve_para(&self, direct: &RawParaProps) -> RawParaProps {
         let mut resolved = self.default_para.clone();
         let id = direct
@@ -87,7 +89,8 @@ impl Styles {
         resolved
     }
 
-    /// 解析字符样式：文档默认 → 段落样式字符属性 → 字符样式链 → 直接格式。
+    /// Resolve character properties: document defaults → paragraph style character
+    /// properties → character style chain → direct formatting.
     pub fn resolve_run(&self, paragraph: &RawParaProps, direct: &RawRunProps) -> RawRunProps {
         let mut resolved = self.default_run.clone();
         if let Some(mark) = &paragraph.mark {
@@ -104,12 +107,12 @@ impl Styles {
         resolved
     }
 
-    /// 命名段落样式的显示名。
+    /// Display name of a named paragraph style.
     pub fn paragraph_name(&self, id: &str) -> Option<&str> {
         self.paragraph.get(id).map(|style| style.name.as_str())
     }
 
-    /// 解析表格样式：样式链（根到叶）→ 直接格式。
+    /// Resolve table properties: style chain (root to leaf) → direct formatting.
     pub fn resolve_table(&self, direct: &RawTableProps) -> RawTableProps {
         let mut resolved = RawTableProps::default();
         let mut chain: Vec<&RawTableProps> = Vec::new();
@@ -216,7 +219,8 @@ fn parse_style(
     let Some(id) = attr(start, "styleId") else {
         return skip_element(reader, start);
     };
-    // `w:default="1"` 标记「隐式应用」的默认样式；其它属性的开关语义不适用。
+    // `w:default="1"` marks a default style applied implicitly; the on/off semantics of
+    // the other attributes do not apply here.
     let is_default = matches!(attr(start, "default").as_deref(), Some("1" | "true" | "on"));
 
     let mut name = String::new();
@@ -246,7 +250,8 @@ fn parse_style(
     match kind.as_str() {
         "paragraph" => {
             para.style_id = None;
-            // 段落样式里的 rPr 是该样式的文字默认属性，供 run 继承。
+            // The rPr inside a paragraph style holds that style's default character
+            // properties, which runs inherit.
             para.mark = Some(run);
             if is_default {
                 styles.default_para_id = Some(id.clone());
@@ -282,11 +287,11 @@ fn parse_style(
     Ok(())
 }
 
-/// 解析 `theme1.xml` 里的字体方案。
+/// Parse the font scheme in `theme1.xml`.
 pub(crate) fn parse_theme(text: &str) -> ThemeFonts {
     let mut theme = ThemeFonts::default();
     let mut reader = XmlReader::from_str(text);
-    // 当前读的是 major 还是 minor 字体组。
+    // Whether the major or the minor font group is currently being read.
     let mut major = false;
     while let Ok(event) = reader.read_event() {
         match event {
@@ -321,7 +326,7 @@ pub(crate) fn parse_theme(text: &str) -> ThemeFonts {
     theme
 }
 
-/// 判断样式名是不是标题样式，返回层级。
+/// Whether the style name is a heading style; returns its level.
 pub(crate) fn heading_level_from_name(name: &str) -> Option<u8> {
     let lower = name.trim().to_ascii_lowercase();
     if matches!(lower.as_str(), "title" | "标题" | "副标题" | "subtitle") {
@@ -364,7 +369,7 @@ mod tests {
   </w:style>
 </w:styles>"#;
 
-    /// 解析 `xml` 里第一个 `pPr`。
+    /// Parse the first `pPr` in `xml`.
     fn para_props(xml: &str) -> RawParaProps {
         let mut reader = XmlReader::from_str(xml);
         loop {
@@ -374,7 +379,7 @@ mod tests {
                         return parse_para_props(&mut reader, &element).expect("pPr");
                     }
                 }
-                quick_xml::events::Event::Eof => panic!("没有 pPr"),
+                quick_xml::events::Event::Eof => panic!("no pPr"),
                 _ => {}
             }
         }
@@ -386,7 +391,8 @@ mod tests {
         let props =
             para_props(r#"<w:pPr><w:pStyle w:val="Heading1"/><w:jc w:val="center"/></w:pPr>"#);
         let resolved = styles.resolve_para(&props);
-        // 显式写回的 0 覆盖文档默认的 200，段前继承样式里的 480。
+        // The explicitly written back 0 overrides the document default 200, while space
+        // before is inherited as 480 from the style.
         assert_eq!(resolved.space_after.map(|value| value.0), Some(0));
         assert_eq!(resolved.space_before.map(|value| value.0), Some(480));
         assert_eq!(resolved.align, Some(Align::Center));
@@ -396,7 +402,8 @@ mod tests {
         let style = run.to_style(&styles.theme);
         assert!(style.bold);
         assert_eq!(style.size, Twips::from_pt(14.0));
-        // Normal 的 rPr 写了 SimSun，Heading1 没写字形，应继承下来。
+        // Normal's rPr specifies SimSun and Heading1 specifies no typeface, so it should
+        // be inherited.
         assert_eq!(style.family.name, "SimSun");
     }
 

@@ -1,54 +1,55 @@
-//! 长度单位。
+//! Length units.
 //!
-//! Flow IR 的规范长度单位是 twip（1/1440 英寸）。API 可以接收 pt 或 mm，
-//! 进入 IR 前统一量化为整数 twip，避免跨格式往返时累积漂移。
+//! The canonical length unit of Flow IR is the twip (1/1440 inch). The API may
+//! accept pt or mm; before entering the IR, values are uniformly quantized to
+//! integer twips to avoid accumulated drift when round-tripping across formats.
 
 use std::ops::{Add, Mul, Neg, Sub};
 
-/// 以 twip（1/1440 英寸）表示的长度。
+/// A length expressed in twips (1/1440 inch).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Twips(pub i64);
 
 impl Twips {
-    /// 零长度。
+    /// Zero length.
     pub const ZERO: Self = Self(0);
 
-    /// 直接以 twip 构造。
+    /// Construct directly from twips.
     pub const fn new(value: i64) -> Self {
         Self(value)
     }
 
-    /// 从磅（point）换算，四舍五入到整数 twip。
+    /// Convert from points, rounding to the nearest integer twip.
     pub fn from_pt(pt: f64) -> Self {
         Self((pt * 20.0).round() as i64)
     }
 
-    /// 从毫米换算，四舍五入到整数 twip。
+    /// Convert from millimeters, rounding to the nearest integer twip.
     pub fn from_mm(mm: f64) -> Self {
         Self((mm * 1440.0 / 25.4).round() as i64)
     }
 
-    /// 换算为磅。
+    /// Convert to points.
     pub fn to_pt(self) -> f64 {
         self.0 as f64 / 20.0
     }
 
-    /// 换算为毫米。
+    /// Convert to millimeters.
     pub fn to_mm(self) -> f64 {
         self.0 as f64 * 25.4 / 1440.0
     }
 
-    /// 返回绝对值。
+    /// Return the absolute value.
     pub const fn abs(self) -> Self {
         Self(self.0.abs())
     }
 
-    /// 返回较小值。
+    /// Return the smaller value.
     pub const fn min(self, other: Self) -> Self {
         if self.0 < other.0 { self } else { other }
     }
 
-    /// 返回较大值。
+    /// Return the larger value.
     pub const fn max(self, other: Self) -> Self {
         if self.0 > other.0 { self } else { other }
     }

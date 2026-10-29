@@ -1,4 +1,4 @@
-//! DOCX（OPC）包访问：按需读取部分、解析关系表。
+//! DOCX (OPC) package access: read parts on demand, parse relationship tables.
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -6,25 +6,26 @@ use std::io::{Cursor, Read};
 use crate::DocxError;
 use crate::DocxReadOptions;
 
-/// 一条包关系。
+/// A package relationship.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Relation {
-    /// 目标部件路径，已按源部件所在目录解析成包内绝对路径。
+    /// Target part path, already resolved against the source part's directory into a
+    /// package-absolute path.
     pub target: String,
-    /// 关系类型 URI。
+    /// Relationship type URI.
     pub kind: String,
-    /// 是否为外部链接（`TargetMode="External"`）。
+    /// Whether this is an external link (`TargetMode="External"`).
     pub external: bool,
 }
 
-/// 只读的 DOCX 包。
+/// Read-only DOCX package.
 pub(crate) struct Package<'a> {
     archive: zip::ZipArchive<Cursor<&'a [u8]>>,
     options: DocxReadOptions,
 }
 
 impl<'a> Package<'a> {
-    /// 打开包；`max_part_bytes` 之外的部分拒绝读取。
+    /// Open the package; parts larger than `max_part_bytes` are refused.
     pub fn open(bytes: &'a [u8], options: &DocxReadOptions) -> Result<Self, DocxError> {
         let archive = zip::ZipArchive::new(Cursor::new(bytes))
             .map_err(|error| DocxError::Package(error.to_string()))?;
@@ -34,7 +35,7 @@ impl<'a> Package<'a> {
         })
     }
 
-    /// 读取一个部件的字节；不存在时返回 `None`。
+    /// Read the bytes of one part; returns `None` when it does not exist.
     pub fn read(&mut self, name: &str) -> Result<Option<Vec<u8>>, DocxError> {
         let Some(index) = self.archive.index_for_name(name) else {
             return Ok(None);
@@ -46,7 +47,7 @@ impl<'a> Package<'a> {
         let size = file.size();
         if size > self.options.max_part_bytes as u64 {
             return Err(DocxError::Limit(format!(
-                "部件 {name} 有 {size} 字节，超过上限 {}",
+                "part {name} is {size} bytes, over the limit of {}",
                 self.options.max_part_bytes
             )));
         }
@@ -55,14 +56,14 @@ impl<'a> Package<'a> {
             .map_err(|error| DocxError::Package(error.to_string()))?;
         if bytes.len() > self.options.max_part_bytes {
             return Err(DocxError::Limit(format!(
-                "部件 {name} 解压后超过上限 {}",
+                "part {name} exceeds the limit of {} after decompression",
                 self.options.max_part_bytes
             )));
         }
         Ok(Some(bytes))
     }
 
-    /// 读取一个 XML 部件并解码成文本。
+    /// Read an XML part and decode it into text.
     pub fn read_text(&mut self, name: &str) -> Result<Option<String>, DocxError> {
         let Some(bytes) = self.read(name)? else {
             return Ok(None);
@@ -70,10 +71,10 @@ impl<'a> Package<'a> {
         Ok(Some(decode_xml(&bytes)))
     }
 
-    /// 读取某个部件的关系表。
+    /// Read the relationship table of a part.
     ///
-    /// `part` 是包内路径，例如 `word/document.xml`；关系表位于同目录的
-    /// `_rels/<文件名>.rels`。
+    /// `part` is a package path such as `word/document.xml`; the relationship table lives
+    /// in `_rels/<file name>.rels` in the same directory.
     pub fn relations(&mut self, part: &str) -> Result<HashMap<String, Relation>, DocxError> {
         let (directory, file) = match part.rsplit_once('/') {
             Some((directory, file)) => (directory, file),
@@ -91,7 +92,7 @@ impl<'a> Package<'a> {
     }
 }
 
-/// 解码 XML 字节：去掉 BOM，非法 UTF-8 走有损解码。
+/// Decode XML bytes: strip the BOM, fall back to lossy decoding for invalid UTF-8.
 fn decode_xml(bytes: &[u8]) -> String {
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
     match std::str::from_utf8(bytes) {
@@ -100,7 +101,7 @@ fn decode_xml(bytes: &[u8]) -> String {
     }
 }
 
-/// 解析 `.rels` 文本。
+/// Parse `.rels` text.
 fn parse_relations(text: &str, base: &str) -> Result<HashMap<String, Relation>, DocxError> {
     let mut reader = crate::xml::XmlReader::from_str(text);
     let mut relations = HashMap::new();
@@ -120,7 +121,8 @@ fn parse_relations(text: &str, base: &str) -> Result<HashMap<String, Relation>, 
                 relations.insert(
                     id,
                     Relation {
-                        // 外部链接（网页、邮件）保持原样，不能按包内路径解析。
+                        // External links (web pages, mail) stay as-is and cannot be
+                        // resolved as package paths.
                         target: if external {
                             target
                         } else {
@@ -138,7 +140,7 @@ fn parse_relations(text: &str, base: &str) -> Result<HashMap<String, Relation>, 
     Ok(relations)
 }
 
-/// 把关系目标解析成包内绝对路径。
+/// Resolve a relationship target into a package-absolute path.
 fn resolve_target(base: &str, target: &str) -> String {
     if target.starts_with('/') {
         return target.trim_start_matches('/').to_owned();

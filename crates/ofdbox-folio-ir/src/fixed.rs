@@ -1,10 +1,13 @@
-//! 固定版式文档模型（Fixed IR）。
+//! Fixed-layout document model (Fixed IR).
 //!
-//! Fixed IR 是不可变、可缓存的页面集合。坐标使用毫米，原点在页面左上角，
-//! x 向右、y 向下；旋转已经应用到内容，`PageInfo` 保留原始页面信息供导出。
+//! Fixed IR is an immutable, cacheable collection of pages. Coordinates are in
+//! millimeters, with the origin at the top-left corner of the page, x pointing right
+//! and y pointing down; rotation has already been applied to the content, and
+//! `PageInfo` retains the original page information for export.
 //!
-//! `FixedDocument` 是布局或导出的完整结果；`Page` 是阅读器的加载单位。
-//! 两者使用同一套页面内容树，但阅读器不会一次性构建全部页面。
+//! `FixedDocument` is the complete result of layout or export; `Page` is the unit the
+//! reader loads. Both use the same page content tree, but the reader does not build
+//! all pages at once.
 
 use std::sync::Arc;
 
@@ -16,24 +19,24 @@ use crate::paint::{FillRule, Paint, StrokePaint};
 use crate::path::Path;
 use crate::text::{GlyphRun, TextLayer};
 
-/// 完整的固定版式文档。
+/// A complete fixed-layout document.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FixedDocument {
-    /// 文档元数据。
+    /// Document metadata.
     pub metadata: Metadata,
-    /// 页面，按阅读顺序排列。
+    /// Pages, in reading order.
     pub pages: Vec<Page>,
-    /// 共享模板层。
+    /// Shared template layers.
     pub templates: Vec<Arc<TemplateLayer>>,
-    /// 已解析到页码和坐标的大纲。
+    /// Outline resolved to page numbers and coordinates.
     pub outline: Vec<OutlineItem>,
-    /// 附件。
+    /// Attachments.
     pub attachments: Vec<Attachment>,
-    /// 字体与图片资源。
+    /// Font and image resources.
     pub resources: ResourceStore,
-    /// 布局与降级诊断。
+    /// Layout and degradation diagnostics.
     pub report: Report,
-    /// 引擎版本与字体指纹。
+    /// Engine version and font fingerprints.
     pub engine: EngineInfo,
 }
 
@@ -52,23 +55,23 @@ impl Default for FixedDocument {
     }
 }
 
-/// 单页固定版式内容。
+/// The fixed-layout content of a single page.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Page {
-    /// 页面信息。
+    /// Page information.
     pub info: PageInfo,
-    /// 页面内容树。
+    /// Page content tree.
     pub content: Scene,
-    /// 逻辑阅读顺序的文本层。
+    /// Text layer in logical reading order.
     pub text: TextLayer,
-    /// 背景与前景模板层。
+    /// Background and foreground template layers.
     pub templates: Vec<Arc<TemplateLayer>>,
-    /// 链接区域。
+    /// Link areas.
     pub links: Vec<LinkArea>,
 }
 
 impl Page {
-    /// 创建空页面。
+    /// Create an empty page.
     pub fn new(info: PageInfo, content: Scene) -> Self {
         Self {
             info,
@@ -79,25 +82,26 @@ impl Page {
         }
     }
 
-    /// 页面显示尺寸：裁剪框应用旋转后的尺寸。
+    /// The page display size: the crop box size after rotation is applied.
     pub fn display_size(&self) -> Size {
         self.info.display_size()
     }
 
-    /// 命中文本位置。
+    /// Hit-test a text position.
     pub fn hit_test(&self, point: Point) -> Option<crate::text::TextPosition> {
         crate::text::hit_test(&self.text, point)
     }
 
-    /// 命中链接区域。
+    /// Hit-test a link area.
     pub fn link_at(&self, point: Point) -> Option<&LinkArea> {
         self.links.iter().find(|link| link.rect.contains(point))
     }
 
-    /// 粗略估计页面结构占用的字节数，用于阅读器缓存预算。
+    /// Roughly estimate the number of bytes the page structure occupies, for the reader's cache budget.
     ///
-    /// 字体和图片字节属于文档级共享资源，不计入单页成本；文本 run 与
-    /// `TextLayer` 共享的负载只计一次。
+    /// Font and image bytes are document-level shared resources and are not counted
+    /// toward the per-page cost; the payload shared between text runs and the
+    /// `TextLayer` is counted only once.
     pub fn estimated_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + scene_bytes(&self.content)
@@ -110,7 +114,7 @@ impl Page {
                 .sum::<usize>()
     }
 
-    /// 校验页面几何与文本映射的基本一致性。
+    /// Validate the basic consistency of page geometry and text mapping.
     pub fn validate(&self) -> Result<(), ValidationError> {
         if !self.info.media_box.is_finite() || !self.info.crop_box.is_finite() {
             return Err(ValidationError::NonFiniteGeometry);
@@ -137,53 +141,53 @@ impl Page {
     }
 }
 
-/// 页面信息。
+/// Page information.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PageInfo {
-    /// 原始媒体框。
+    /// Original media box.
     pub media_box: Rect,
-    /// 裁剪框，决定显示区域。
+    /// Crop box, which determines the display area.
     pub crop_box: Rect,
-    /// 原始页面旋转。
+    /// Original page rotation.
     pub rotation: Rotation,
-    /// 页码标签；`None` 表示使用物理页码。
+    /// Page label; `None` means use the physical page number.
     pub label: Option<String>,
 }
 
 impl PageInfo {
-    /// 应用旋转后的显示尺寸。
+    /// The display size after applying the rotation.
     pub fn display_size(&self) -> Size {
         self.rotation
             .apply_to_size(Size::new(self.crop_box.width, self.crop_box.height))
     }
 }
 
-/// 页面内容树。
+/// The page content tree.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Scene {
-    /// 页面显示尺寸。
+    /// Page display size.
     pub size: Size,
-    /// 根组。
+    /// Root group.
     pub root: Group,
-    /// 构建该页面时产生的诊断。
+    /// Diagnostics produced while building this page.
     pub diagnostics: Vec<crate::meta::Diagnostic>,
 }
 
-/// 带变换、裁剪和透明度的组。
+/// A group with a transform, clip, and opacity.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Group {
-    /// 组局部空间到父空间的变换。
+    /// Transform from the group local space to the parent space.
     pub transform: Matrix,
-    /// 可选裁剪区域。
+    /// Optional clipping region.
     pub clip: Option<Arc<Clip>>,
-    /// 组透明度。
+    /// Group opacity.
     pub opacity: f32,
-    /// 子元素。
+    /// Child elements.
     pub children: Vec<Element>,
 }
 
 impl Group {
-    /// 创建空组。
+    /// Create an empty group.
     pub fn new(transform: Matrix) -> Self {
         Self {
             transform,
@@ -200,132 +204,132 @@ impl Default for Group {
     }
 }
 
-/// 裁剪路径。
+/// A clipping path.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Clip {
-    /// 裁剪路径。
+    /// Clipping path.
     pub path: Arc<Path>,
-    /// 填充规则。
+    /// Fill rule.
     pub rule: FillRule,
 }
 
-/// 页面元素。
+/// A page element.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Element {
-    /// 子组。
+    /// A child group.
     Group(Group),
-    /// 路径。
+    /// A path.
     Path(PathElement),
-    /// 文本。
+    /// Text.
     Text(TextElement),
-    /// 图片。
+    /// An image.
     Image(ImageElement),
 }
 
-/// 路径元素。
+/// A path element.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PathElement {
-    /// 路径。
+    /// Path.
     pub path: Arc<Path>,
-    /// 元素局部空间到父空间的变换。
+    /// Transform from the element local space to the parent space.
     pub transform: Matrix,
-    /// 填充画笔。
+    /// Fill paint.
     pub fill: Option<Paint>,
-    /// 描边。
+    /// Stroke.
     pub stroke: Option<StrokePaint>,
-    /// 填充规则。
+    /// Fill rule.
     pub rule: FillRule,
 }
 
-/// 文本元素。
+/// A text element.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextElement {
-    /// 字体资源。
+    /// Font resource.
     pub font: Arc<FontAsset>,
-    /// 字号，单位毫米。
+    /// Font size, in millimeters.
     pub font_size: f64,
-    /// 文本局部空间到父空间的变换。
+    /// Transform from the text local space to the parent space.
     pub transform: Matrix,
-    /// 已定位的字形与字符映射。
+    /// Positioned glyphs and character mapping.
     pub run: Arc<GlyphRun>,
-    /// 填充画笔。
+    /// Fill paint.
     pub fill: Option<Paint>,
-    /// 描边。
+    /// Stroke.
     pub stroke: Option<StrokePaint>,
 }
 
-/// 图片元素。
+/// An image element.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImageElement {
-    /// 图片资源。
+    /// Image resource.
     pub image: Arc<ImageAsset>,
-    /// 图片局部矩形。
+    /// Rectangle in image local space.
     pub rect: Rect,
-    /// 图片局部空间到父空间的变换。
+    /// Transform from the image local space to the parent space.
     pub transform: Matrix,
-    /// 图片透明度，范围 0.0 到 1.0。
+    /// Image opacity, ranging from 0.0 to 1.0.
     pub alpha: f32,
 }
 
-/// 共享模板层。
+/// A shared template layer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TemplateLayer {
-    /// 模板标识。
+    /// Template identifier.
     pub id: TemplateId,
-    /// 模板名称。
+    /// Template name.
     pub name: Option<String>,
-    /// 绘制层级。
+    /// Drawing level.
     pub z_order: TemplateZOrder,
-    /// 模板内容。
+    /// Template content.
     pub scene: Scene,
 }
 
-/// 模板绘制层级。
+/// The drawing level of a template.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum TemplateZOrder {
-    /// 位于页面内容之下。
+    /// Drawn below the page content.
     #[default]
     Background,
-    /// 位于页面内容之上。
+    /// Drawn above the page content.
     Foreground,
 }
 
-/// 链接区域。
+/// A link area.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinkArea {
-    /// 可点击矩形。
+    /// Clickable rectangle.
     pub rect: Rect,
-    /// 链接目标。
+    /// Link target.
     pub target: LinkTarget,
 }
 
-/// 大纲条目。
+/// An outline item.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutlineItem {
-    /// 标题。
+    /// Title.
     pub title: String,
-    /// 跳转目标。
+    /// Jump destination.
     pub destination: Destination,
-    /// 子条目。
+    /// Child items.
     pub children: Vec<OutlineItem>,
 }
 
-/// 跳转目标。
+/// A jump destination.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Destination {
-    /// 页面索引。
+    /// Page index.
     pub page: usize,
-    /// 页面坐标。
+    /// Page coordinates.
     pub point: Point,
 }
 
-/// 引擎版本与输入指纹。
+/// Engine version and input fingerprints.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineInfo {
-    /// 布局引擎版本。
+    /// Layout engine version.
     pub layout_version: &'static str,
-    /// 参与布局的字体内容指纹。
+    /// Fingerprints of the font content that participated in layout.
     pub font_fingerprints: Vec<FontFingerprint>,
 }
 
@@ -338,32 +342,32 @@ impl Default for EngineInfo {
     }
 }
 
-/// 字体内容指纹。
+/// A font content fingerprint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FontFingerprint {
-    /// 资源标识。
+    /// Resource identifier.
     pub asset: AssetId,
-    /// 字体字节的内容哈希。
+    /// Content hash of the font bytes.
     pub content_hash: [u8; 32],
 }
 
-/// 页面校验错误。
+/// A page validation error.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ValidationError {
-    /// 页面尺寸非法。
-    #[error("页面尺寸非法")]
+    /// Invalid page size.
+    #[error("invalid page size")]
     InvalidPageSize,
-    /// 坐标包含非有限值。
-    #[error("几何数据包含非有限值")]
+    /// Coordinates contain non-finite values.
+    #[error("geometry data contains non-finite values")]
     NonFiniteGeometry,
-    /// 文本簇映射越界或倒序。
-    #[error("文本簇映射越界或倒序")]
+    /// Text cluster mapping is out of bounds or reversed.
+    #[error("text cluster mapping is out of bounds or reversed")]
     InvalidTextCluster,
 }
 
 impl TemplateLayer {
-    /// 粗略估计模板结构占用的字节数。
+    /// Roughly estimate the number of bytes the template structure occupies.
     pub fn estimated_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.name.as_ref().map_or(0, String::len)

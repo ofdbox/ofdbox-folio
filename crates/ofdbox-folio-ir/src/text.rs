@@ -1,7 +1,8 @@
-//! 文本层：已定位字形、字符映射、选择与搜索。
+//! The text layer: positioned glyphs, character mapping, selection, and search.
 //!
-//! 页面绘制顺序与阅读顺序不一定相同。文本层按逻辑阅读顺序保存行与文本项，
-//! 负责命中测试、选择、复制和搜索，不重新解析页面。
+//! Page drawing order and reading order are not necessarily the same. The text layer
+//! stores lines and text items in logical reading order and handles hit-testing,
+//! selection, copying, and search without re-parsing the page.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -9,48 +10,49 @@ use std::sync::Arc;
 use crate::asset::FontAsset;
 use crate::geometry::{Matrix, Point, Rect};
 
-/// 一个已定位字形。
+/// A positioned glyph.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Glyph {
-    /// 字体内的字形编号。
+    /// Glyph ID within the font.
     pub id: u32,
-    /// 局部空间基线横坐标。
+    /// Baseline x coordinate in local space.
     pub x: f64,
-    /// 局部空间基线纵坐标。
+    /// Baseline y coordinate in local space.
     pub y: f64,
-    /// 到下一个字形的水平步进。
+    /// Horizontal advance to the next glyph.
     pub advance: f64,
 }
 
-/// 字符与字形之间的簇映射。
+/// Cluster mapping between characters and glyphs.
 ///
-/// 文本位置使用字符索引，不使用字节索引。一个簇可以覆盖多个字符和多个
-/// 字形，用于连字、组合字符和字体回退。
+/// Text positions use character indices, not byte indices. A single cluster may span
+/// multiple characters and multiple glyphs, for ligatures, combining marks, and font
+/// fallback.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Cluster {
-    /// 起始字符索引。
+    /// Starting character index.
     pub text_start: u32,
-    /// 结束字符索引，不含。
+    /// Ending character index, exclusive.
     pub text_end: u32,
-    /// 起始字形索引。
+    /// Starting glyph index.
     pub glyph_start: u32,
-    /// 结束字形索引，不含。
+    /// Ending glyph index, exclusive.
     pub glyph_end: u32,
 }
 
-/// 一段已 shaping 的文本。
+/// A shaped run of text.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GlyphRun {
-    /// 原始文本。
+    /// Original text.
     pub text: String,
-    /// 字形。
+    /// Glyphs.
     pub glyphs: Vec<Glyph>,
-    /// 字符与字形的簇映射。
+    /// Cluster mapping between characters and glyphs.
     pub clusters: Vec<Cluster>,
 }
 
 impl GlyphRun {
-    /// 创建字形 run。
+    /// Create a glyph run.
     pub fn new(text: impl Into<String>, glyphs: Vec<Glyph>, clusters: Vec<Cluster>) -> Self {
         Self {
             text: text.into(),
@@ -59,51 +61,51 @@ impl GlyphRun {
         }
     }
 
-    /// 字符数量。
+    /// The number of characters.
     pub fn char_count(&self) -> usize {
         self.text.chars().count()
     }
 }
 
-/// 文本层中的一个文本项。
+/// A text item within the text layer.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextItem {
-    /// 已 shaping 的文本。
+    /// The shaped text.
     pub run: Arc<GlyphRun>,
-    /// 文本局部空间到页面空间的变换。
+    /// Transform from text local space to page space.
     pub transform: Matrix,
-    /// 页面空间包围盒。
+    /// Bounding box in page space.
     pub bbox: Rect,
-    /// 字体资源。
+    /// Font resource.
     pub font: Arc<FontAsset>,
-    /// 字号，单位毫米。
+    /// Font size, in millimeters.
     pub font_size: f64,
 }
 
-/// 逻辑阅读顺序中的一行。
+/// A line in logical reading order.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TextLine {
-    /// 该行在 `TextLayer::items` 中的索引范围。
+    /// The range of indices into `TextLayer::items` covered by this line.
     pub items: Range<u32>,
-    /// 页面空间包围盒。
+    /// Bounding box in page space.
     pub bbox: Rect,
-    /// 基线纵坐标。
+    /// Baseline y coordinate.
     pub baseline: f64,
 }
 
-/// 一页的文本层。
+/// The text layer of one page.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TextLayer {
-    /// 页面索引。
+    /// Page index.
     pub page: usize,
-    /// 按逻辑阅读顺序排列的文本项。
+    /// Text items arranged in logical reading order.
     pub items: Vec<TextItem>,
-    /// 行。
+    /// Lines.
     pub lines: Vec<TextLine>,
 }
 
 impl TextLayer {
-    /// 返回按行拼接的纯文本，行之间使用换行符。
+    /// Return plain text joined by line, with newlines between lines.
     pub fn plain_text(&self) -> String {
         if self.lines.is_empty() {
             return self
@@ -126,12 +128,12 @@ impl TextLayer {
         text
     }
 
-    /// 页面文本起点。
+    /// The start position of the page text.
     pub fn start_position(&self) -> TextPosition {
         TextPosition::new(self.page, 0, 0)
     }
 
-    /// 页面文本终点（最后一个文本项的末尾）。
+    /// The end position of the page text (the end of the last text item).
     pub fn end_position(&self) -> TextPosition {
         match self.items.len().checked_sub(1) {
             Some(index) => TextPosition::new(
@@ -143,25 +145,25 @@ impl TextLayer {
         }
     }
 
-    /// 文本层是否为空。
+    /// Whether the text layer is empty.
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
 }
 
-/// 文本位置。
+/// A text position.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TextPosition {
-    /// 页面索引。
+    /// Page index.
     pub page: usize,
-    /// 文本项索引。
+    /// Text item index.
     pub item: u32,
-    /// 字符索引。
+    /// Character index.
     pub char_offset: u32,
 }
 
 impl TextPosition {
-    /// 创建文本位置。
+    /// Create a text position.
     pub const fn new(page: usize, item: u32, char_offset: u32) -> Self {
         Self {
             page,
@@ -171,27 +173,27 @@ impl TextPosition {
     }
 }
 
-/// 文本范围，结束位置不含。
+/// A text range; the end position is exclusive.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct TextRange {
-    /// 起点。
+    /// Start.
     pub start: TextPosition,
-    /// 终点，不含。
+    /// End, exclusive.
     pub end: TextPosition,
 }
 
 impl TextRange {
-    /// 创建文本范围。
+    /// Create a text range.
     pub const fn new(start: TextPosition, end: TextPosition) -> Self {
         Self { start, end }
     }
 
-    /// 是否为空范围。
+    /// Whether the range is empty.
     pub fn is_empty(self) -> bool {
         self.start == self.end
     }
 
-    /// 返回起点在终点之前的方向；若反向则交换。
+    /// Return the direction with the start before the end; swap if reversed.
     pub fn normalized(self) -> Self {
         if self.start <= self.end {
             self
@@ -204,45 +206,46 @@ impl TextRange {
     }
 }
 
-/// 选择区域。
+/// A selection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Selection {
-    /// 选择锚点。
+    /// Selection anchor.
     pub anchor: TextPosition,
-    /// 选择焦点。
+    /// Selection focus.
     pub focus: TextPosition,
 }
 
 impl Selection {
-    /// 转换为规范化文本范围。
+    /// Convert to a normalized text range.
     pub fn range(self) -> TextRange {
         TextRange::new(self.anchor, self.focus).normalized()
     }
 }
 
-/// 搜索条件。
+/// Search criteria.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SearchQuery {
-    /// 搜索文本。
+    /// Search text.
     pub text: String,
-    /// 是否区分大小写。
+    /// Whether the search is case-sensitive.
     pub case_sensitive: bool,
-    /// 是否要求整词匹配。
+    /// Whether whole-word matching is required.
     pub whole_word: bool,
 }
 
-/// 一个搜索命中。
+/// A single search hit.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchHit {
-    /// 命中范围。
+    /// Hit range.
     pub range: TextRange,
-    /// 页面空间矩形。
+    /// Rectangles in page space.
     pub rects: Vec<Rect>,
 }
 
-/// 在文本层中做命中测试。
+/// Hit-test within the text layer.
 ///
-/// 该实现使用文本项的页面包围盒和簇的近似字形框，不依赖字体轮廓。
+/// This implementation uses the page bounding box of text items and approximate
+/// glyph boxes derived from clusters; it does not depend on font outlines.
 pub fn hit_test(layer: &TextLayer, point: Point) -> Option<TextPosition> {
     for line in &layer.lines {
         if !line.bbox.contains(point) {
@@ -264,7 +267,7 @@ pub fn hit_test(layer: &TextLayer, point: Point) -> Option<TextPosition> {
     None
 }
 
-/// 返回选择范围覆盖的页面矩形。
+/// Return the page rectangles covered by a selection range.
 pub fn selection_rects(layer: &TextLayer, range: &TextRange) -> Vec<Rect> {
     let range = range.normalized();
     let mut rects = Vec::new();
@@ -306,7 +309,7 @@ pub fn selection_rects(layer: &TextLayer, range: &TextRange) -> Vec<Rect> {
     rects
 }
 
-/// 返回选择范围对应的文本。
+/// Return the text corresponding to a selection range.
 pub fn selection_text(layer: &TextLayer, range: &TextRange) -> String {
     let range = range.normalized();
     let mut text = String::new();
@@ -347,7 +350,7 @@ pub fn selection_text(layer: &TextLayer, range: &TextRange) -> String {
     text
 }
 
-/// 在文本层中搜索。
+/// Search within the text layer.
 pub fn search(layer: &TextLayer, query: &SearchQuery) -> Vec<SearchHit> {
     if query.text.is_empty() {
         return Vec::new();

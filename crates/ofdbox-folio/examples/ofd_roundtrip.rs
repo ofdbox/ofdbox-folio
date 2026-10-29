@@ -1,4 +1,4 @@
-//! OFD → Fixed IR → OFD 往返验证。
+//! OFD → Fixed IR → OFD round-trip verification.
 //!
 //! ```text
 //! cargo run -p ofdbox-folio --example ofd_roundtrip -- input.ofd output.ofd
@@ -13,8 +13,8 @@ use ofdbox_folio::ofd::{OfdDocument, OfdReadOptions, OfdWriteOptions, write_fixe
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = env::args().skip(1);
-    let input = args.next().ok_or("缺少输入 OFD")?;
-    let output = args.next().ok_or("缺少输出 OFD")?;
+    let input = args.next().ok_or("missing input OFD")?;
+    let output = args.next().ok_or("missing output OFD")?;
 
     let mut source = OfdDocument::open_path(&input, OfdReadOptions::default())?;
     let page_count = source.page_count();

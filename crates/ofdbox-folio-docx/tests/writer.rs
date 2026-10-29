@@ -1,4 +1,4 @@
-//! DOCX 写出的端到端测试：构造 Flow IR → 写包 → 再读回来。
+//! End-to-end tests for DOCX writing: build Flow IR → write the package → read it back.
 
 use std::sync::Arc;
 
@@ -11,7 +11,7 @@ use ofdbox_folio_ir::{
     WrapMode,
 };
 
-/// 1×1 的 RGBA PNG。
+/// A 1×1 RGBA PNG.
 const TINY_PNG: &[u8] = &[
     0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
     0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
@@ -99,7 +99,7 @@ fn round_trips_paragraphs_and_run_formatting() {
             assert!(run.style.bold);
             assert_eq!(run.style.size.to_pt(), 16.0);
         }
-        other => panic!("期望文本 run: {other:?}"),
+        other => panic!("expected text run: {other:?}"),
     }
 
     let body = paragraphs[1];
@@ -117,14 +117,14 @@ fn round_trips_paragraphs_and_run_formatting() {
             assert_eq!(run.text, "普通文字");
             assert_eq!(run.style.family.name, "SimSun");
         }
-        other => panic!("期望文本 run: {other:?}"),
+        other => panic!("expected text run: {other:?}"),
     }
     match &body.runs[1] {
         Inline::Text(run) => {
             assert!(run.style.bold);
             assert_eq!(run.style.size.to_pt(), 12.0);
         }
-        other => panic!("期望文本 run: {other:?}"),
+        other => panic!("expected text run: {other:?}"),
     }
     match &body.runs[2] {
         Inline::Text(run) => {
@@ -134,7 +134,7 @@ fn round_trips_paragraphs_and_run_formatting() {
                 ofdbox_folio_ir::Rgba::from_rgb(0xC8, 0x1E, 0x1E)
             );
         }
-        other => panic!("期望文本 run: {other:?}"),
+        other => panic!("expected text run: {other:?}"),
     }
 }
 
@@ -197,7 +197,7 @@ fn round_trips_tables_and_tabs() {
             Block::Table(table) => Some(table),
             _ => None,
         })
-        .expect("表格");
+        .expect("table");
     assert_eq!(table.columns.len(), 2);
     assert_eq!(table.rows.len(), 2);
     assert_eq!(table.header_rows, 1);
@@ -218,7 +218,7 @@ fn round_trips_tables_and_tabs() {
                 .iter()
                 .any(|inline| matches!(inline, Inline::Text(run) if run.text.contains('\t')))
         })
-        .expect("制表段落");
+        .expect("tabbed paragraph");
     assert_eq!(tabbed.style.tabs.len(), 1);
     let stop = tabbed.style.tabs[0];
     assert_eq!(stop.align, TabAlign::Right);
@@ -262,9 +262,13 @@ fn round_trips_merged_cells() {
             Block::Table(table) => Some(table),
             _ => None,
         })
-        .expect("表格");
+        .expect("table");
     assert_eq!(table.rows.len(), 3);
-    assert_eq!(table.rows[0].cells.len(), 1, "横跨行只有一个单元格");
+    assert_eq!(
+        table.rows[0].cells.len(),
+        1,
+        "a spanning row has only one cell"
+    );
     assert_eq!(table.rows[0].cells[0].span, 2);
     assert_eq!(
         table.rows[1].cells[0].v_merge,
@@ -298,7 +302,7 @@ fn weight_columns_get_real_widths() {
             Block::Table(table) => Some(table),
             _ => None,
         })
-        .expect("表格");
+        .expect("table");
     let widths: Vec<i64> = table
         .columns
         .iter()
@@ -309,9 +313,9 @@ fn weight_columns_get_real_widths() {
         .collect();
     assert!(
         widths.iter().all(|width| *width > 0),
-        "权重列应换算成实际宽度: {widths:?}"
+        "weighted columns should become real widths: {widths:?}"
     );
-    assert!(widths[1] > widths[0], "2:1 权重: {widths:?}");
+    assert!(widths[1] > widths[0], "2:1 weights: {widths:?}");
 }
 
 #[test]
@@ -342,8 +346,12 @@ fn round_trips_images_positions_and_floating_objects() {
     flow.push(Block::Floating(Box::new(floating)));
 
     let back = read_back(&flow);
-    // 两张图内容相同会被资源表去重，这里只要求至少保留一张，并验证浮动对象还在。
-    assert!(back.resources.image_count() >= 1, "图片应写出");
+    // Identical images are deduplicated by the resource table, so only require at least
+    // one to survive, and check that the floating object is still there.
+    assert!(
+        back.resources.image_count() >= 1,
+        "the image should be written"
+    );
 
     let floating = back.sections[0]
         .blocks
@@ -352,7 +360,7 @@ fn round_trips_images_positions_and_floating_objects() {
             Block::Floating(object) => Some(object),
             _ => None,
         })
-        .expect("浮动对象");
+        .expect("floating object");
     assert_eq!(floating.wrap, WrapMode::Square);
     assert_eq!(
         floating.position_from,
@@ -395,11 +403,11 @@ fn round_trips_sections_headers_footers_and_fields() {
     assert!((section.setup.column_gap.to_mm() - 8.0).abs() < 0.01);
     assert!((section.setup.margins.left.to_mm() - 30.0).abs() < 0.01);
 
-    let header = section.headers.default.as_ref().expect("页眉");
+    let header = section.headers.default.as_ref().expect("header");
     let text: String = header.blocks.iter().map(block_text).collect();
-    assert!(text.contains("页眉"), "页眉文字: {text}");
+    assert!(text.contains("页眉"), "header text: {text}");
 
-    let footer = section.footers.default.as_ref().expect("页脚");
+    let footer = section.footers.default.as_ref().expect("footer");
     let kinds: Vec<FieldKind> = footer
         .blocks
         .iter()
@@ -474,14 +482,14 @@ fn round_trips_footnotes_links_and_toc() {
     }));
 
     let back = read_back(&flow);
-    assert_eq!(back.notes.len(), 1, "注释: {:?}", back.notes);
+    assert_eq!(back.notes.len(), 1, "notes: {:?}", back.notes);
     assert_eq!(back.notes[0].id, 1);
     assert_eq!(back.notes[0].kind, NoteKind::Footnote);
 
     let text: String = back.sections[0].blocks.iter().map(block_text).collect();
-    assert!(text.contains("带脚注的段落"), "正文: {text}");
-    assert!(text.contains("外链"), "链接: {text}");
-    assert!(text.contains("目录"), "目录标题: {text}");
+    assert!(text.contains("带脚注的段落"), "body: {text}");
+    assert!(text.contains("外链"), "link: {text}");
+    assert!(text.contains("目录"), "TOC title: {text}");
 
     let has_note_ref = back.sections[0]
         .blocks
@@ -492,7 +500,7 @@ fn round_trips_footnotes_links_and_toc() {
         })
         .flat_map(|paragraph| paragraph.runs.iter())
         .any(|inline| matches!(inline, Inline::Note(_)));
-    assert!(has_note_ref, "应保留脚注引用");
+    assert!(has_note_ref, "the footnote reference should be preserved");
 
     let has_link = back.sections[0]
         .blocks
@@ -503,10 +511,10 @@ fn round_trips_footnotes_links_and_toc() {
         })
         .flat_map(|paragraph| paragraph.runs.iter())
         .any(|inline| matches!(inline, Inline::Link(_)));
-    assert!(has_link, "应保留超链接");
+    assert!(has_link, "the hyperlink should be preserved");
 }
 
-/// 生成一张纯色 PNG。
+/// Generate a solid-colour PNG.
 fn solid_png(width: u32, height: u32, pixel: [u8; 4]) -> Vec<u8> {
     let mut pixels = Vec::new();
     for _ in 0..(width * height) {
@@ -541,7 +549,7 @@ fn writes_masked_image_as_png_with_alpha() {
 
     let bytes = write_flow(&flow, &DocxWriteOptions::default()).expect("write");
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).expect("zip");
-    let mut media = archive.by_name("word/media/image1.png").expect("媒体");
+    let mut media = archive.by_name("word/media/image1.png").expect("media");
     let mut png_bytes = Vec::new();
     std::io::Read::read_to_end(&mut media, &mut png_bytes).expect("read");
     let mut decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
@@ -550,8 +558,8 @@ fn writes_masked_image_as_png_with_alpha() {
     let mut buffer = vec![0; reader.output_buffer_size().unwrap_or(0).max(1)];
     let info = reader.next_frame(&mut buffer).expect("frame");
     assert_eq!(info.color_type, png::ColorType::Rgba);
-    // 黑蒙版把整张图压成全透明。
-    assert_eq!(buffer[3], 0, "蒙版应烘进 alpha");
+    // The black mask makes the whole image fully transparent.
+    assert_eq!(buffer[3], 0, "the mask should be baked into alpha");
 }
 
 #[test]
@@ -564,13 +572,14 @@ fn reports_unsupported_mask_combination() {
         2,
         2,
     ));
-    // JPEG 底图 + PNG 蒙版：无法烘进 alpha，应降级并记诊断。
+    // JPEG base plus PNG mask: it cannot be baked into alpha, so it should degrade and
+    // record a diagnostic.
     let id = flow.resources.add_image(
         ImageAsset::new(ImageFormat::Jpeg, Arc::from(&b"jpeg-bytes"[..]), 2, 2).with_mask(mask),
     );
     assert!(
         flow.resources.image(id).expect("asset").mask.is_some(),
-        "蒙版应挂在资源上"
+        "the mask should be attached to the asset"
     );
     flow.push(Block::Image(ImageBlock::new(id)));
 
@@ -581,8 +590,8 @@ fn reports_unsupported_mask_combination() {
         report
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("蒙版")),
-        "报告: {:?}",
+            .any(|diagnostic| diagnostic.message.contains("mask")),
+        "report: {:?}",
         report.diagnostics
     );
 }
@@ -603,7 +612,12 @@ fn round_trips_attachments() {
     flow.push(Block::Paragraph(paragraph("带附件")));
 
     let back = read_back(&flow);
-    assert_eq!(back.attachments.len(), 1, "附件: {:?}", back.attachments);
+    assert_eq!(
+        back.attachments.len(),
+        1,
+        "attachments: {:?}",
+        back.attachments
+    );
     assert_eq!(back.attachments[0].info.name, "说明.txt");
     assert_eq!(&back.attachments[0].bytes[..], b"attachment!");
 }
@@ -614,7 +628,10 @@ fn output_is_deterministic_and_valid_zip() {
     flow.push(Block::Paragraph(paragraph("确定性")));
     let first = write_flow(&flow, &DocxWriteOptions::default()).expect("write");
     let second = write_flow(&flow, &DocxWriteOptions::default()).expect("write again");
-    assert_eq!(first, second, "相同输入应产生相同字节");
+    assert_eq!(
+        first, second,
+        "identical input should produce identical bytes"
+    );
 
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&first)).expect("zip");
     let names: Vec<String> = (0..archive.len())
@@ -637,7 +654,7 @@ fn output_is_deterministic_and_valid_zip() {
     ] {
         assert!(
             names.iter().any(|name| name == expected),
-            "缺少 {expected}: {names:?}"
+            "missing {expected}: {names:?}"
         );
     }
 }

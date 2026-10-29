@@ -7,7 +7,7 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 license.workspace = true
-description = "OFDBox Folio 的 Flow IR、Fixed IR 与阅读器契约。"
+description = "Flow IR, Fixed IR, and reader contracts for OFDBox Folio."
 keywords = ["ofd", "pdf", "docx", "document", "layout"]
 categories = ["text-processing", "graphics"]
 

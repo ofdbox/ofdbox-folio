@@ -1,7 +1,7 @@
-//! OFD → PNG 性能基线。
+//! OFD → PNG performance baseline.
 //!
 //! ```text
-//! cargo run --release -p ofdbox-folio --example perf_baseline -- ../OFD文件 96
+//! cargo run --release -p ofdbox-folio --example perf_baseline -- ../ofd-files 96
 //! ```
 
 use std::env;
@@ -26,7 +26,7 @@ struct DocResult {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = env::args().skip(1);
-    let root = args.next().ok_or("缺少 OFD 目录")?;
+    let root = args.next().ok_or("missing OFD directory")?;
     let dpi = args
         .next()
         .map(|value| value.parse::<f64>())

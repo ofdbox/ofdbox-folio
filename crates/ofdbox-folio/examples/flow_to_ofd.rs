@@ -1,4 +1,4 @@
-//! Flow → Fixed → OFD 的最小示例。
+//! Minimal Flow → Fixed → OFD example.
 //!
 //! ```text
 //! cargo run -p ofdbox-folio --example flow_to_ofd -- out.ofd [page.png]
@@ -99,7 +99,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         fixed.report.diagnostics.len()
     );
     for diagnostic in &fixed.report.diagnostics {
-        println!("  [诊断] {}", diagnostic.message);
+        println!("  [diagnostic] {}", diagnostic.message);
     }
 
     let bytes =

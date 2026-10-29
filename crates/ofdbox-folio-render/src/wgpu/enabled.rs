@@ -1,4 +1,4 @@
-//! wgpu compute 后端，W0 支持实色填充路径。
+//! wgpu compute backend; W0 supports solid-color fill paths.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -26,14 +26,14 @@ struct DrawPath {
     gradient: [f32; 4],
 }
 
-/// wgpu 设备上下文。
+/// A wgpu device context.
 pub struct WgpuContext {
     device: wgpu::Device,
     queue: wgpu::Queue,
 }
 
 impl WgpuContext {
-    /// 创建默认适配器和设备。
+    /// Creates the default adapter and device.
     pub async fn new() -> Result<Self, RenderError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = instance
@@ -50,50 +50,52 @@ impl WgpuContext {
         Ok(Self { device, queue })
     }
 
-    /// 阻塞创建上下文。
+    /// Creates the context in a blocking manner.
     pub fn new_blocking() -> Result<Self, RenderError> {
         pollster::block_on(Self::new())
     }
 
-    /// 复用外部已经创建的设备与队列。
+    /// Reuses a device and queue already created externally.
     ///
-    /// 显示核心接在 UI 框架（如 dioxus-native/anyrender）上时，必须复用框架的
-    /// wgpu 设备，避免同进程创建第二个 GPU 上下文或无法共享纹理。
+    /// When the display core is attached to a UI framework (such as
+    /// dioxus-native/anyrender), the framework's wgpu device must be reused to
+    /// avoid creating a second GPU context in the same process or being unable to
+    /// share textures.
     pub fn from_device_queue(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         Self { device, queue }
     }
 
-    /// 设备引用。
+    /// The device reference.
     pub fn device(&self) -> &wgpu::Device {
         &self.device
     }
 
-    /// 队列引用。
+    /// The queue reference.
     pub fn queue(&self) -> &wgpu::Queue {
         &self.queue
     }
 }
 
-/// wgpu 当前能力。
+/// Current wgpu capabilities.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WgpuCapabilities {
-    /// 实色路径。
+    /// Solid-color paths.
     pub solid_paths: bool,
-    /// 描边。
+    /// Strokes.
     pub strokes: bool,
-    /// 线性渐变。
+    /// Linear gradients.
     pub linear_gradients: bool,
-    /// 裁剪路径。
+    /// Clip paths.
     pub clips: bool,
-    /// 文本轮廓。
+    /// Text outlines.
     pub text_outlines: bool,
-    /// 图片。
+    /// Images.
     pub images: bool,
-    /// 混合模式。
+    /// Blend modes.
     pub blend_modes: bool,
 }
 
-/// wgpu 渲染目标。
+/// A wgpu render target.
 pub struct WgpuTarget {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -103,9 +105,10 @@ pub struct WgpuTarget {
 }
 
 impl WgpuTarget {
-    /// 按设备像素尺寸创建目标。
+    /// Creates a target from a device pixel size.
     ///
-    /// 显示核心按 tile 光栅时使用：tile 尺寸固定为设备像素，不再由页面毫米尺寸换算。
+    /// Used when the display core rasterizes tiles: the tile size is fixed in
+    /// device pixels and is no longer derived from the page's millimeter size.
     pub fn from_pixels(
         context: &WgpuContext,
         width: u32,
@@ -142,7 +145,7 @@ impl WgpuTarget {
         })
     }
 
-    /// 按 Scene 尺寸创建离屏目标。
+    /// Creates an offscreen target from the Scene size.
     pub fn new(context: &WgpuContext, size: Size, dpi: f64) -> Result<Self, RenderError> {
         let width = (size.width / 25.4 * dpi).ceil().max(1.0) as u32;
         let height = (size.height / 25.4 * dpi).ceil().max(1.0) as u32;
@@ -172,21 +175,21 @@ impl WgpuTarget {
         })
     }
 
-    /// 宽度（像素）。
+    /// Width in pixels.
     pub fn width(&self) -> u32 {
         self.width
     }
-    /// 高度（像素）。
+    /// Height in pixels.
     pub fn height(&self) -> u32 {
         self.height
     }
 
-    /// 目标纹理（可直接交给 UI 框架合成）。
+    /// The target texture (can be handed directly to a UI framework for compositing).
     pub fn texture(&self) -> &wgpu::Texture {
         &self.texture
     }
 
-    /// 读回 RGBA8 像素。
+    /// Reads back the RGBA8 pixels.
     pub fn read_rgba(&self, context: &WgpuContext) -> Result<Vec<u8>, RenderError> {
         let row = self.width * 4;
         let padded =
@@ -249,7 +252,7 @@ impl WgpuTarget {
     }
 }
 
-/// wgpu compute 后端。
+/// The wgpu compute backend.
 pub struct WgpuBackend {
     context: Arc<WgpuContext>,
     pipeline: wgpu::ComputePipeline,
@@ -257,12 +260,12 @@ pub struct WgpuBackend {
 }
 
 impl WgpuBackend {
-    /// 创建后端；需要显式提供已初始化的 context。
+    /// Creates a backend; an initialized context must be supplied explicitly.
     pub fn new(context: WgpuContext) -> Result<Self, RenderError> {
         Self::from_shared(Arc::new(context))
     }
 
-    /// 从共享 context 创建。
+    /// Creates a backend from a shared context.
     pub fn from_shared(context: Arc<WgpuContext>) -> Result<Self, RenderError> {
         let module = context
             .device
@@ -315,14 +318,15 @@ impl WgpuBackend {
         })
     }
 
-    /// 渲染到离屏纹理。
+    /// Renders into an offscreen texture.
     pub fn render_to_target(&self, scene: &Scene, target: &WgpuTarget) -> Result<(), RenderError> {
         self.render_to_target_with_offset(scene, target, (0.0, 0.0))
     }
 
-    /// 把场景的指定区域渲染到离屏纹理。
+    /// Renders the given region of a scene into an offscreen texture.
     ///
-    /// `origin_px` 是区域左上角在整页设备像素坐标中的位置，用于 tile 局部刷新。
+    /// `origin_px` is the position of the region's top-left corner in whole-page
+    /// device pixel coordinates, used for per-tile partial refreshes.
     pub fn render_region(
         &self,
         scene: &Scene,
@@ -450,7 +454,7 @@ impl WgpuBackend {
 }
 
 impl WgpuBackend {
-    /// 返回共享的 wgpu 上下文。
+    /// Returns the supported capabilities.
     pub fn capabilities(&self) -> WgpuCapabilities {
         WgpuCapabilities {
             solid_paths: true,
@@ -463,7 +467,7 @@ impl WgpuBackend {
         }
     }
 
-    /// 返回共享的 wgpu 上下文。
+    /// Returns the shared wgpu context.
     pub fn context(&self) -> &WgpuContext {
         &self.context
     }

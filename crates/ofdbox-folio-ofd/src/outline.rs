@@ -1,8 +1,8 @@
-//! OFD 大纲（`Outlines`）到 Fixed IR 的映射。
+//! Mapping of OFD outlines (`Outlines`) to Fixed IR.
 //!
-//! GB/T 33190 §7.8：`OutlineElem` 可层层嵌套，跳转目标放在
-//! `Actions/Action/Goto/Dest` 里，`PageID` 引用页面标识，坐标单位毫米、
-//! 原点在左上角，与 Fixed IR 一致。
+//! GB/T 33190 §7.8: `OutlineElem` can nest arbitrarily, the jump target lives in
+//! `Actions/Action/Goto/Dest`, `PageID` references the page identity, and coordinates are in
+//! millimeters with the origin at the top-left corner, consistent with Fixed IR.
 
 use std::collections::HashMap;
 
@@ -10,10 +10,10 @@ use ofdbox_core::model::definition::{ActionKind, GotoKind};
 use ofdbox_core::model::document::{Document, OutlineElem, PageEntry};
 use ofdbox_folio_ir::{Destination, OutlineItem, Point};
 
-/// 大纲树最大嵌套深度，避免异常文件把解析拖入深递归。
+/// Maximum nesting depth of the outline tree, so that malformed files cannot drag parsing into deep recursion.
 const MAX_DEPTH: usize = 16;
 
-/// 把文档大纲映射为 Fixed IR 的大纲树。
+/// Maps a document outline to the Fixed IR outline tree.
 pub(crate) fn build_outline(document: &Document, pages: &[PageEntry]) -> Vec<OutlineItem> {
     let Some(outlines) = document.outlines.as_ref() else {
         return Vec::new();
@@ -30,11 +30,11 @@ pub(crate) fn build_outline(document: &Document, pages: &[PageEntry]) -> Vec<Out
         .collect()
 }
 
-/// 转换单个大纲节点。
+/// Converts a single outline node.
 fn convert(elem: &OutlineElem, index: &HashMap<String, usize>, depth: usize) -> OutlineItem {
     let title = elem.title.trim();
     let title = if title.is_empty() {
-        "未命名".to_owned()
+        "Untitled".to_owned()
     } else {
         title.to_owned()
     };
@@ -46,7 +46,7 @@ fn convert(elem: &OutlineElem, index: &HashMap<String, usize>, depth: usize) -> 
     } else {
         Vec::new()
     };
-    // 分组节点可能自己没有跳转，退化到第一个能跳的子节点。
+    // A grouping node may have no jump target of its own; fall back to the first child that can jump.
     let destination = destination(elem, index)
         .or_else(|| children.first().map(|child| child.destination))
         .unwrap_or(Destination {
@@ -60,7 +60,7 @@ fn convert(elem: &OutlineElem, index: &HashMap<String, usize>, depth: usize) -> 
     }
 }
 
-/// 读取节点自身的跳转目标。
+/// Reads the jump target of the node itself.
 fn destination(elem: &OutlineElem, index: &HashMap<String, usize>) -> Option<Destination> {
     let actions = elem.actions.as_ref()?;
     for action in &actions.actions {

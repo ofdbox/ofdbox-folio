@@ -1,18 +1,19 @@
-//! 位图渲染选项。
+//! Bitmap rendering options.
 
 use ofdbox_folio_ir::Rgba;
 
-/// 位图渲染选项。
+/// Bitmap rendering options.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RenderOptions {
-    /// 页面背景色。
+    /// Page background color.
     pub background: Rgba,
-    /// 单张图片允许的最大像素数。
+    /// Maximum pixels allowed per image.
     pub max_image_pixels: u64,
-    /// 已解码图片缓存的字节上限；超出后按插入顺序淘汰。
+    /// Byte budget for the decoded image cache; entries are evicted in insertion order once exceeded.
     ///
-    /// 浏览器里 wasm 的线性内存不会归还系统，缓存无上限时长时间翻页会把
-    /// 进程堆到触发分配失败，因此默认给一个明确的预算。
+    /// In browsers, wasm linear memory is never returned to the system, so an
+    /// unbounded cache would grow the process heap until allocation fails after
+    /// long paging sessions; a clear budget is therefore provided by default.
     pub max_image_cache_bytes: u64,
 }
 

@@ -1,4 +1,4 @@
-//! 脚注与尾注的端到端测试。
+//! End-to-end tests for footnotes and endnotes.
 
 use std::sync::Arc;
 
@@ -8,7 +8,7 @@ use ofdbox_folio_ir::{
 };
 use ofdbox_folio_layout::layout;
 
-/// 固定返回同一份字体字节的提供者。
+/// Provider that always returns the same font bytes.
 struct SystemFonts {
     bytes: Arc<[u8]>,
 }
@@ -51,7 +51,7 @@ fn paragraph_with_note(text: &str, note: NoteRef) -> Paragraph {
     paragraph
 }
 
-/// 页面里每一行的文字与 y。
+/// The text and y of every line on a page.
 fn lines(page: &ofdbox_folio_ir::Page) -> Vec<(String, f64)> {
     page.text
         .lines
@@ -99,23 +99,30 @@ fn footnote_lands_at_the_bottom_of_its_page() {
     assert_eq!(fixed.pages.len(), 1);
     let page = &fixed.pages[0];
     let text = page_text(page);
-    assert!(text.contains("正文里带一个脚注"), "正文: {text}");
-    assert!(text.contains("这是脚注正文"), "脚注: {text}");
-    assert!(text.contains('1'), "应有序号: {text}");
+    assert!(text.contains("正文里带一个脚注"), "body: {text}");
+    assert!(text.contains("这是脚注正文"), "footnote: {text}");
+    assert!(text.contains('1'), "there should be a number: {text}");
 
-    // 脚注行比正文行更靠下：接近版心底边。
+    // The footnote line sits lower than the body lines: near the bottom of the
+    // text area.
     let note_y = lines(page)
         .iter()
         .find(|(text, _)| text.contains("这是脚注正文"))
         .map(|(_, y)| *y)
-        .expect("脚注行");
+        .expect("footnote line");
     let body_y = lines(page)
         .iter()
         .find(|(text, _)| text.contains("正文里带一个脚注"))
         .map(|(_, y)| *y)
-        .expect("正文行");
-    assert!(note_y > body_y + 100.0, "脚注应在页面下方: {note_y}");
-    assert!(note_y > 240.0, "脚注应贴近版心底: {note_y}");
+        .expect("body line");
+    assert!(
+        note_y > body_y + 100.0,
+        "the footnote should be low on the page: {note_y}"
+    );
+    assert!(
+        note_y > 240.0,
+        "the footnote should sit near the bottom of the text area: {note_y}"
+    );
 }
 
 #[test]
@@ -124,7 +131,7 @@ fn footnote_reserves_space_so_body_does_not_overlap() {
         return;
     };
     let mut flow = FlowDocument::new(Metadata::default());
-    // 一条很高的脚注。
+    // A very tall footnote.
     let mut note_blocks = Vec::new();
     for index in 0..8 {
         note_blocks.push(Block::Paragraph(Paragraph::plain(
@@ -153,13 +160,16 @@ fn footnote_reserves_space_so_body_does_not_overlap() {
         .filter(|(text, _)| text.contains("脚注第"))
         .map(|(_, y)| *y)
         .fold(f64::MAX, f64::min);
-    assert!(note_top < 300.0, "脚注区应从版心底往上: {note_top}");
-    // 正文不应压进注释区。
+    assert!(
+        note_top < 300.0,
+        "the note area should grow upward from the text area bottom: {note_top}"
+    );
+    // The body must not be pushed into the note area.
     for (text, y) in &lines {
         if text.contains("后续正文") {
             assert!(
                 *y < note_top - 2.0,
-                "正文 {text} 落进注释区: y={y} note_top={note_top}"
+                "body {text} falls into the note area: y={y} note_top={note_top}"
             );
         }
     }
@@ -188,14 +198,17 @@ fn endnote_goes_to_the_end_of_the_document() {
     let fixed = layout(&flow, &mut fonts).expect("layout");
     assert!(
         fixed.pages.len() >= 2,
-        "尾注应另起一页: {}",
+        "the endnotes should start on a new page: {}",
         fixed.pages.len()
     );
-    let last = fixed.pages.last().expect("最后一页");
+    let last = fixed.pages.last().expect("last page");
     let text = page_text(last);
-    assert!(text.contains("尾注"), "尾注页: {text}");
-    assert!(text.contains("这是尾注正文"), "尾注页: {text}");
-    assert!(!text.contains("普通正文"), "普通正文不应在尾注页: {text}");
+    assert!(text.contains("尾注"), "endnote page: {text}");
+    assert!(text.contains("这是尾注正文"), "endnote page: {text}");
+    assert!(
+        !text.contains("普通正文"),
+        "regular body text should not be on the endnote page: {text}"
+    );
 }
 
 #[test]
@@ -204,8 +217,9 @@ fn note_chars_are_prepared_for_the_font_subset() {
         return;
     };
     let mut flow = FlowDocument::new(Metadata::default());
-    // 脚注正文用了正文里没出现过的字符：没进字表时字形号是 0（.notdef），
-    // 写进 OFD 会被子集丢掉，渲染出来是空白。
+    // The footnote body uses characters that never appear in the body text: when
+    // they are missing from the glyph table their glyph id is 0 (.notdef), the
+    // OFD subset drops them and they render blank.
     flow.notes.push(Note::new(
         NoteKind::Footnote,
         1,
@@ -217,7 +231,8 @@ fn note_chars_are_prepared_for_the_font_subset() {
     )));
 
     let fixed = layout(&flow, &mut fonts).expect("layout");
-    // 文本层是逐字符一项，摊平成 (字符, 字形号) 再逐个检查。
+    // The text layer has one item per character, so flatten it to (char, glyph id)
+    // pairs and check them one by one.
     let glyphs: Vec<(char, u32)> = fixed.pages[0]
         .text
         .items
@@ -234,8 +249,11 @@ fn note_chars_are_prepared_for_the_font_subset() {
             .iter()
             .find(|(candidate, _)| *candidate == ch)
             .map(|(_, id)| *id)
-            .unwrap_or_else(|| panic!("脚注字符 {ch} 缺失"));
-        assert_ne!(id, 0, "脚注字符 {ch} 没进字表（.notdef）");
+            .unwrap_or_else(|| panic!("footnote character {ch} is missing"));
+        assert_ne!(
+            id, 0,
+            "footnote character {ch} is not in the glyph table (.notdef)"
+        );
     }
 }
 
@@ -256,8 +274,8 @@ fn missing_note_body_is_reported() {
             .report
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("缺少正文")),
-        "诊断: {:?}",
+            .any(|diagnostic| diagnostic.message.contains("has no body")),
+        "diagnostics: {:?}",
         fixed.report.diagnostics
     );
 }
@@ -275,7 +293,8 @@ fn footnotes_are_numbered_in_reading_order() {
             vec![Block::Paragraph(Paragraph::plain(text, note_style()))],
         ));
     }
-    // 先引用 id=5，再引用 id=3：编号应按出现顺序 1、2。
+    // Reference id=5 first and id=3 afterwards: numbering follows the order of
+    // appearance, 1 then 2.
     flow.push(Block::Paragraph(paragraph_with_note(
         "第一次引用",
         NoteRef::new(NoteKind::Footnote, 5),
@@ -287,9 +306,13 @@ fn footnotes_are_numbered_in_reading_order() {
 
     let fixed = layout(&flow, &mut fonts).expect("layout");
     let text = page_text(&fixed.pages[0]);
-    let yi = text.find("1) 注释乙").expect("第一条例注应编号 1");
-    let er = text.find("2) 注释甲").expect("第二条例注应编号 2");
-    assert!(yi < er, "编号顺序: {text}");
+    let yi = text
+        .find("1) 注释乙")
+        .expect("the first note should be numbered 1");
+    let er = text
+        .find("2) 注释甲")
+        .expect("the second note should be numbered 2");
+    assert!(yi < er, "numbering order: {text}");
 }
 
 #[test]
@@ -315,6 +338,6 @@ fn note_reference_mark_is_smaller_than_body_text() {
         .items
         .iter()
         .find(|item| item.run.text == "1" && item.font_size < 3.5)
-        .expect("小号引用标记");
-    assert!(mark.font_size < 3.2, "标记字号: {}", mark.font_size);
+        .expect("small reference marker");
+    assert!(mark.font_size < 3.2, "marker font size: {}", mark.font_size);
 }

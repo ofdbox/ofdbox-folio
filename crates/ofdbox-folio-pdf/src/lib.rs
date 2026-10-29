@@ -1,8 +1,9 @@
-//! OFDBox Folio 的 PDF 适配层。
+//! PDF adapter layer for OFDBox Folio.
 //!
-//! 负责把 PDF 页面解析为 Fixed IR，以及把 Fixed IR 写出为 PDF。
-//! 对外不暴露 `lopdf` 的类型；PDF 阅读的图案、透明组、加密与复杂 CMap
-//! 按路线图分期硬化。
+//! Parses PDF pages into Fixed IR and writes Fixed IR back out as PDF.
+//! `lopdf` types are not exposed publicly; patterns, transparency groups,
+//! encryption and complex CMaps on the PDF reading side are hardened in
+//! stages per the roadmap.
 
 #![allow(clippy::too_many_lines)]
 
@@ -27,16 +28,17 @@ pub use backend::{
 pub use error::PdfError;
 pub use frontend::PdfReadOptions;
 
-/// 探测字节是否为 PDF。
+/// Probes whether the bytes are a PDF.
 ///
-/// PDF 允许文件头前存在少量垃圾字节，因此在前 1024 字节内查找 `%PDF-`。
+/// PDF allows a small amount of junk before the header, so `%PDF-` is
+/// searched within the first 1024 bytes.
 pub fn probe(bytes: &[u8]) -> bool {
     bytes
         .get(..bytes.len().min(1024))
         .is_some_and(|head| head.windows(5).any(|window| window == b"%PDF-"))
 }
 
-/// PDF 文档源。
+/// A PDF document source.
 pub struct PdfDocument {
     document: Document,
     pages: Vec<ObjectId>,
@@ -49,12 +51,12 @@ pub struct PdfDocument {
 }
 
 impl PdfDocument {
-    /// 从内存字节打开 PDF。
+    /// Opens a PDF from in-memory bytes.
     pub fn open_bytes(bytes: Vec<u8>, options: PdfReadOptions) -> Result<Self, PdfError> {
         Self::open_bytes_with_fonts(bytes, options, None)
     }
 
-    /// 从内存字节打开 PDF，并注入缺失字体的来源。
+    /// Opens a PDF from in-memory bytes and injects a source for missing fonts.
     pub fn open_bytes_with_fonts(
         bytes: Vec<u8>,
         options: PdfReadOptions,
@@ -83,7 +85,7 @@ impl PdfDocument {
         })
     }
 
-    /// 从文件打开 PDF。
+    /// Opens a PDF from a file.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_path(
         path: impl AsRef<std::path::Path>,
@@ -92,7 +94,7 @@ impl PdfDocument {
         Self::open_path_with_fonts(path, options, None)
     }
 
-    /// 从文件打开 PDF，并注入缺失字体的来源。
+    /// Opens a PDF from a file and injects a source for missing fonts.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_path_with_fonts(
         path: impl AsRef<std::path::Path>,
@@ -103,12 +105,12 @@ impl PdfDocument {
         Self::open_bytes_with_fonts(bytes, options, font_provider)
     }
 
-    /// 页面数量。
+    /// Page count.
     pub fn page_count(&self) -> usize {
         self.pages.len()
     }
 
-    /// 资源表。
+    /// Resource store.
     pub fn resources(&self) -> &ofdbox_folio_ir::ResourceStore {
         &self.store
     }
@@ -152,7 +154,7 @@ impl DocumentSource for PdfDocument {
             .iter()
             .find(|(attachment, _)| *attachment == id)
             .map(|(_, object)| *object)
-            .ok_or_else(|| PageError::Decode(format!("附件不存在: {}", id.get())))?;
+            .ok_or_else(|| PageError::Decode(format!("attachment not found: {}", id.get())))?;
         let object = self
             .document
             .get_object(object)
@@ -214,13 +216,13 @@ impl DocumentSource for PdfDocument {
     }
 }
 
-/// 加载并解密 PDF；区分密码错误与一般的解析失败。
+/// Loads and decrypts a PDF; distinguishes a wrong password from a general parse failure.
 fn load_document(bytes: &[u8], password: Option<&str>) -> Result<Document, PdfError> {
-    // 部分生成器把 /Encrypt 字典直接写在 trailer 里，lopdf 只识别间接对象。
+    // Some generators write the /Encrypt dictionary inline in the trailer, while lopdf only recognizes indirect objects.
     let normalized = normalize_inline_encryption(bytes);
     let bytes = normalized.as_deref().unwrap_or(bytes);
     let load_options = lopdf::LoadOptions {
-        // 仅有权限密码的 PDF 用空用户密码即可解锁。
+        // A PDF that only has an owner password unlocks with an empty user password.
         password: Some(password.unwrap_or_default().to_owned()),
         ..lopdf::LoadOptions::default()
     };
@@ -239,7 +241,7 @@ fn load_document(bytes: &[u8], password: Option<&str>) -> Result<Document, PdfEr
     }
 }
 
-/// 把 trailer 中的直接 `/Encrypt <<...>>` 改写为间接对象，并让 xref 重建。
+/// Rewrites a direct `/Encrypt <<...>>` in the trailer into an indirect object and forces an xref rebuild.
 fn normalize_inline_encryption(bytes: &[u8]) -> Option<Vec<u8>> {
     let marker = b"/Encrypt";
     let mut search_end = bytes.len();
@@ -331,7 +333,7 @@ fn dictionary_end(bytes: &[u8], start: usize) -> Option<usize> {
     None
 }
 
-/// 追加对象后原 xref 不再完整，令 lopdf 扫描重建。
+/// After appending objects the original xref is no longer complete, so make lopdf scan and rebuild it.
 fn force_xref_recovery(bytes: &mut [u8]) {
     let marker = b"startxref";
     let Some(position) = bytes
@@ -403,7 +405,7 @@ fn metadata(document: &Document) -> Metadata {
     }
 }
 
-/// 解码 PDF 文本字符串：UTF-16BE（带 BOM）或 PDFDocEncoding/latin-1。
+/// Decodes a PDF text string: UTF-16BE (with BOM) or PDFDocEncoding/latin-1.
 pub(crate) fn decode_pdf_string(bytes: &[u8]) -> String {
     if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
         let units = rest
@@ -419,7 +421,7 @@ pub(crate) fn decode_pdf_string(bytes: &[u8]) -> String {
     }
 }
 
-/// 去掉 PDF 子集前缀，例如 `ABCDEF+SimSun` → `SimSun`。
+/// Strips the PDF subset prefix, e.g. `ABCDEF+SimSun` → `SimSun`.
 fn strip_subset_prefix(name: &str) -> &str {
     match name.split_once('+') {
         Some((prefix, rest))

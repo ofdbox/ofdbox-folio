@@ -1,4 +1,4 @@
-//! `document.xml`、页眉页脚与核心属性的读取。
+//! Reading of `document.xml`, headers/footers and core properties.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -25,38 +25,39 @@ use crate::xml::{
     skip_element,
 };
 
-/// 读取 DOCX，产出 Flow IR。
+/// Read a DOCX and produce Flow IR.
 pub(crate) fn read(bytes: &[u8], options: &DocxReadOptions) -> Result<FlowDocument, DocxError> {
     Builder::new(bytes, options)?.run()
 }
 
-/// 一个 `w:drawing` 的解析结果。
+/// Result of parsing one `w:drawing`.
 enum Drawing {
-    /// 行内图片。
+    /// Inline image.
     Inline(InlineImage),
-    /// 浮动图片。
+    /// Floating image.
     Floating(FloatingObject),
 }
 
-/// 读取过程的状态。
+/// State of the read process.
 struct Builder<'a> {
     package: Package<'a>,
     styles: Styles,
     numbering: Numbering,
     relations: HashMap<String, Relation>,
     doc: FlowDocument,
-    /// 当前分节的正文块。
+    /// Body blocks of the current section.
     blocks: Vec<Block>,
-    /// 当前分节属性（会向后续分节继承）。
+    /// Properties of the current section (inherited by the following sections).
     section_props: RawSectionProps,
-    /// 每个已结束分节的属性，供最后回填页眉页脚。
+    /// Properties of every finished section, used at the end to fill in headers and
+    /// footers.
     section_log: Vec<RawSectionProps>,
     counters: Counters,
-    /// 书签名到锚点的映射。
+    /// Mapping from bookmark name to anchor.
     anchors: HashMap<String, AnchorId>,
-    /// 已解析的图片：关系 ID → 资源。
+    /// Parsed images: relationship ID → asset.
     images: HashMap<String, Option<AssetId>>,
-    /// 已报告过的诊断，避免同类问题刷屏。
+    /// Diagnostics already reported, so the same problem is not spammed.
     reported: HashSet<String>,
 }
 
@@ -65,7 +66,7 @@ impl<'a> Builder<'a> {
         let mut package = Package::open(bytes, options)?;
         let Some(document_xml) = package.read_text("word/document.xml")? else {
             return Err(DocxError::Structure(
-                "缺少 word/document.xml，不是 DOCX 文档".to_owned(),
+                "missing word/document.xml, not a DOCX document".to_owned(),
             ));
         };
         let relations = package.relations("word/document.xml")?;
@@ -123,7 +124,7 @@ impl<'a> Builder<'a> {
         let document_xml = self
             .package
             .read_text("word/document.xml")?
-            .ok_or_else(|| DocxError::Structure("缺少 word/document.xml".to_owned()))?;
+            .ok_or_else(|| DocxError::Structure("missing word/document.xml".to_owned()))?;
         {
             let mut reader = XmlReader::from_str(&document_xml);
             let blocks = self.parse_blocks(&mut reader, Some("body"), true)?;
@@ -137,9 +138,10 @@ impl<'a> Builder<'a> {
         Ok(self.doc)
     }
 
-    // ---- 块级 ----
+    // ---- Block level ----
 
-    /// 读取到配对的 `end` 为止的块序列；`top` 表示这是分节正文层级。
+    /// Read the block sequence up to the matching `end`; `top` means this is the section
+    /// body level.
     fn parse_blocks(
         &mut self,
         reader: &mut XmlReader<'_>,
@@ -170,8 +172,9 @@ impl<'a> Builder<'a> {
                         let mut produced = self.parse_sdt(reader)?;
                         blocks.append(&mut produced);
                     }
-                    // 容器元素本身（`w:body`、`w:hdr`、`w:ftr` 等）不承载块内容，
-                    // 忽略即可，子元素会继续被本循环处理。
+                    // Container elements themselves (`w:body`, `w:hdr`, `w:ftr`, etc.)
+                    // carry no block content, so ignore them; the child elements are
+                    // still handled by this loop.
                     _ => {}
                 },
                 quick_xml::events::Event::Empty(element) => {
@@ -193,7 +196,8 @@ impl<'a> Builder<'a> {
         Ok(blocks)
     }
 
-    /// 结束当前分节；没有内容且已有分节时不额外制造空分节。
+    /// Finish the current section; when it has no content and a section already exists,
+    /// do not manufacture an extra empty section.
     fn finish_section(&mut self) {
         if self.blocks.is_empty() && !self.doc.sections.is_empty() {
             return;
@@ -204,13 +208,15 @@ impl<'a> Builder<'a> {
         self.section_log.push(self.section_props.clone());
     }
 
-    /// 解析一个段落，返回它产生的块（含段内分页符）与段末分节属性。
+    /// Parse a paragraph and return the blocks it produces (including in-paragraph page
+    /// breaks) plus the section properties at its end.
     fn parse_paragraph(
         &mut self,
         reader: &mut XmlReader<'_>,
     ) -> Result<(Vec<Block>, Option<RawSectionProps>), DocxError> {
         let mut props = RawParaProps::default();
-        // 解析出 `pPr` 就立刻解析样式：run 的字符属性要继承段落样式链的 rPr。
+        // Resolve the style as soon as `pPr` is parsed: a run's character properties must
+        // inherit the rPr of the paragraph style chain.
         let mut resolved: Option<RawParaProps> = None;
         let mut sink = InlineSink::default();
         loop {
@@ -232,7 +238,7 @@ impl<'a> Builder<'a> {
                 }
                 quick_xml::events::Event::End(_) => break,
                 quick_xml::events::Event::Eof => {
-                    return Err(DocxError::Structure("段落没有结束标签".to_owned()));
+                    return Err(DocxError::Structure("paragraph has no end tag".to_owned()));
                 }
                 _ => {}
             }
@@ -263,7 +269,8 @@ impl<'a> Builder<'a> {
         if resolved.page_break_before.unwrap_or(false) {
             blocks.push(Block::PageBreak);
         }
-        // 段落里的浮动对象脱离正文流，先作为块级元素输出（位置由对象自己带）。
+        // Floating objects inside the paragraph leave the text flow, so output them as
+        // block-level elements first (each object carries its own position).
         for floating in std::mem::take(&mut sink.floatings) {
             blocks.push(Block::Floating(Box::new(floating)));
         }
@@ -289,7 +296,8 @@ impl<'a> Builder<'a> {
                     Inline::Text(TextRun::new(format!("{marker} "), marker_style.clone())),
                 );
             }
-            // 空段只有「整段没有内容」时才保留一个，避免段内分页符凭空多出空行。
+            // Keep an empty paragraph only when the whole segment has no content, so an
+            // in-paragraph page break does not conjure up a spurious blank line.
             if !runs.is_empty() || (!pushed && segments.len() == 1) {
                 blocks.push(Block::Paragraph(Paragraph {
                     style: style.clone(),
@@ -312,7 +320,7 @@ impl<'a> Builder<'a> {
         heading_level_from_name(name)
     }
 
-    // ---- 行内 ----
+    // ---- Inline level ----
 
     fn parse_inlines(
         &mut self,
@@ -339,7 +347,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// 读取容器里直到配对 `End` 为止的行内内容。
+    /// Read the inline content of a container up to the matching `End`.
     fn parse_inline_container(
         &mut self,
         reader: &mut XmlReader<'_>,
@@ -396,7 +404,7 @@ impl<'a> Builder<'a> {
                         self.warn_once(
                             "pict",
                             DiagnosticCode::UnsupportedObject,
-                            "VML 图形（w:pict）暂不支持，已跳过",
+                            "VML graphics (w:pict) are not supported yet, skipped",
                         );
                         skip_element(reader, &element)?;
                     }
@@ -412,7 +420,7 @@ impl<'a> Builder<'a> {
                         self.warn_once(
                             "commentReference",
                             DiagnosticCode::Unsupported,
-                            "批注引用暂不支持，已忽略",
+                            "Comment references are not supported yet, ignored",
                         );
                         skip_element(reader, &element)?;
                     }
@@ -420,7 +428,7 @@ impl<'a> Builder<'a> {
                         self.warn_once(
                             "sym",
                             DiagnosticCode::Unsupported,
-                            "符号字体（w:sym）暂不支持，已跳过",
+                            "Symbol fonts (w:sym) are not supported yet, skipped",
                         );
                         skip_element(reader, &element)?;
                     }
@@ -442,7 +450,7 @@ impl<'a> Builder<'a> {
                         self.warn_once(
                             "sym",
                             DiagnosticCode::Unsupported,
-                            "符号字体（w:sym）暂不支持，已跳过",
+                            "Symbol fonts (w:sym) are not supported yet, skipped",
                         );
                     }
                     "footnoteReference" | "endnoteReference" => {
@@ -452,7 +460,7 @@ impl<'a> Builder<'a> {
                         self.warn_once(
                             "commentReference",
                             DiagnosticCode::Unsupported,
-                            "批注引用暂不支持，已忽略",
+                            "Comment references are not supported yet, ignored",
                         );
                     }
                     _ => {}
@@ -499,7 +507,8 @@ impl<'a> Builder<'a> {
         }
         Ok(text)
     }
-    /// 读取附件：清单 word/attachments.xml + 原文件部件（本库约定）。
+    /// Read attachments: the word/attachments.xml manifest plus the original file parts
+    /// (a convention of this library).
     fn parse_attachments(&mut self) -> Result<(), DocxError> {
         let Some(target) = target_by_kind(&self.relations, "urn:ofdbox:relationships/attachments")
         else {
@@ -543,7 +552,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// 读取 word/footnotes.xml 或 word/endnotes.xml 里的注释正文。
+    /// Read note bodies from word/footnotes.xml or word/endnotes.xml.
     fn parse_notes(&mut self, kind: NoteKind) -> Result<(), DocxError> {
         let suffix = match kind {
             NoteKind::Footnote => "/footnotes",
@@ -560,12 +569,13 @@ impl<'a> Builder<'a> {
             match reader.read_event().map_err(crate::xml::xml_error)? {
                 quick_xml::events::Event::Start(element) => {
                     let name = local_name(&element);
-                    // 顶层 w:footnotes/w:endnotes 容器本身不携带内容，忽略即可。
+                    // The top-level w:footnotes/w:endnotes container carries no content
+                    // itself, so ignore it.
                     if name != "footnote" && name != "endnote" {
                         continue;
                     }
                     let id = attr_u32(&element, "id");
-                    // separator / continuationNotice 之类的伪注释没有正文。
+                    // Pseudo-notes such as separator / continuationNotice have no body.
                     let note_type = attr(&element, "type").unwrap_or_default();
                     let blocks = self.parse_blocks(&mut reader, Some(&name), false)?;
                     if let (Some(id), true) = (id, note_type.is_empty())
@@ -581,7 +591,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// 把 w:footnoteReference / w:endnoteReference 记成注释引用。
+    /// Record w:footnoteReference / w:endnoteReference as a note reference.
     fn push_note_reference(
         &mut self,
         element: &quick_xml::events::BytesStart<'_>,
@@ -595,11 +605,11 @@ impl<'a> Builder<'a> {
         let Some(id) = attr_u32(element, "id") else {
             return;
         };
-        // Word 用 -1/0 表示分隔符笔记，正文里不会引用。
+        // Word uses -1/0 for separator notes, which the body never references.
         sink.push_inline(Inline::Note(NoteRef::new(kind, id)));
     }
 
-    /// 处理复杂域的 begin / separate / end。
+    /// Handle the begin / separate / end of a complex field.
     fn apply_field_char(
         &mut self,
         element: &quick_xml::events::BytesStart<'_>,
@@ -675,7 +685,8 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// 读取 `w:fldSimple`：指令在属性里，内容是缓存结果。
+    /// Read `w:fldSimple`: the instruction is in an attribute and the content is the
+    /// cached result.
     fn parse_simple_field(
         &mut self,
         reader: &mut XmlReader<'_>,
@@ -704,7 +715,8 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// 读取内容控件；目录内容控件整体映射成自动目录块。
+    /// Read a content control; a table-of-contents content control is mapped wholesale
+    /// to an automatic TOC block.
     fn parse_sdt(&mut self, reader: &mut XmlReader<'_>) -> Result<Vec<Block>, DocxError> {
         let mut gallery = None;
         let mut blocks = Vec::new();
@@ -725,7 +737,8 @@ impl<'a> Builder<'a> {
         if let Some(gallery) = gallery
             && is_toc_gallery(&gallery)
         {
-            // 目录控件里那段文字是标题（如「目录」），条目由排版按标题重算。
+            // The text inside a TOC control is the title (such as "Contents"); the
+            // entries are recomputed by layout from the headings.
             let title = blocks.iter().find_map(|block| match block {
                 Block::Paragraph(paragraph) => {
                     let text = runs_text(&paragraph.runs);
@@ -766,7 +779,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    // ---- 表格 ----
+    // ---- Tables ----
 
     fn parse_table(&mut self, reader: &mut XmlReader<'_>) -> Result<Table, DocxError> {
         let mut props = RawTableProps::default();
@@ -782,7 +795,7 @@ impl<'a> Builder<'a> {
                 },
                 quick_xml::events::Event::End(_) => break,
                 quick_xml::events::Event::Eof => {
-                    return Err(DocxError::Structure("表格没有结束标签".to_owned()));
+                    return Err(DocxError::Structure("table has no end tag".to_owned()));
                 }
                 _ => {}
             }
@@ -790,7 +803,7 @@ impl<'a> Builder<'a> {
         let resolved = self.styles.resolve_table(&props);
         let header_rows = rows.iter().take_while(|row| row.is_header).count() as u32;
         if columns.is_empty() {
-            // 没有 grid 时按最多的单元格数均分。
+            // Without a grid, divide the width evenly by the largest cell count.
             let count = rows.iter().map(|row| row.cells.len()).max().unwrap_or(0);
             columns = (0..count)
                 .map(|_| Column {
@@ -893,11 +906,12 @@ impl<'a> Builder<'a> {
             self.warn_once(
                 "grid_span",
                 DiagnosticCode::Approximation,
-                "合并单元格（gridSpan）暂不支持，按普通单元格处理",
+                "Merged cells (gridSpan) are not supported yet; treating them as ordinary cells",
             );
         }
         if v_merge == VMerge::Continue {
-            // 纵向合并的续格留空，由上方起始单元格覆盖。
+            // A vertically merged continuation cell stays empty and is covered by the
+            // start cell above.
             return Ok(Some(
                 Cell::new(Vec::new())
                     .with_span(span)
@@ -909,9 +923,10 @@ impl<'a> Builder<'a> {
         ))
     }
 
-    // ---- 图片与浮动对象 ----
+    // ---- Images and floating objects ----
 
-    /// 解析 `w:drawing`：行内返回 `wp:inline`，浮动返回 `wp:anchor` 的位置与绕排。
+    /// Parse `w:drawing`: for inline returns `wp:inline`, for floating returns the
+    /// position and wrap of `wp:anchor`.
     fn parse_drawing(&mut self, reader: &mut XmlReader<'_>) -> Result<Option<Drawing>, DocxError> {
         let mut extent: Option<(f64, f64)> = None;
         let mut embed = None;
@@ -920,7 +935,8 @@ impl<'a> Builder<'a> {
         let mut wrap = WrapMode::None;
         let mut offset_x: Option<f64> = None;
         let mut offset_y: Option<f64> = None;
-        // 当前在 positionH / positionV 里，用来区分两个方向的 posOffset。
+        // Whether we are inside positionH / positionV, used to tell the two directions'
+        // posOffset apart.
         let mut horizontal = false;
         let mut vertical = false;
         let mut from_h = ofdbox_folio_ir::PositionFrom::Margin;
@@ -944,7 +960,8 @@ impl<'a> Builder<'a> {
                         "wrapTopAndBottom" => wrap = WrapMode::TopBottom,
                         "wrapNone" => wrap = WrapMode::None,
                         "posOffset" => {
-                            // `wp:posOffset` 的值是元素文本，不是属性。
+                            // The value of `wp:posOffset` is element text, not an
+                            // attribute.
                             let text = self.read_text(reader)?;
                             if let Ok(value) = text.trim().parse::<f64>() {
                                 if horizontal {
@@ -1017,7 +1034,8 @@ impl<'a> Builder<'a> {
             return Ok(Some(Drawing::Inline(image)));
         }
 
-        // 浮动图片：位置换算成相对版心左上角的毫米。
+        // Floating image: convert the position into millimetres relative to the top-left
+        // corner of the text area.
         let mut image = ImageBlock::new(asset);
         image.size = size;
         image.alt = alt;
@@ -1049,7 +1067,7 @@ impl<'a> Builder<'a> {
             self.warn_once(
                 &format!("image-format-{}", relation.target),
                 DiagnosticCode::UnsupportedObject,
-                format!("不支持的图片格式，已跳过：{}", relation.target),
+                format!("unsupported image format, skipped: {}", relation.target),
             );
             self.images.insert(rid.to_owned(), None);
             return Ok(None);
@@ -1058,7 +1076,7 @@ impl<'a> Builder<'a> {
             self.warn_once(
                 &format!("image-size-{}", relation.target),
                 DiagnosticCode::Image,
-                format!("读不出图片尺寸，已跳过：{}", relation.target),
+                format!("cannot read image dimensions, skipped: {}", relation.target),
             );
             self.images.insert(rid.to_owned(), None);
             return Ok(None);
@@ -1069,7 +1087,7 @@ impl<'a> Builder<'a> {
         Ok(Some(id))
     }
 
-    // ---- 页眉页脚 ----
+    // ---- Headers and footers ----
 
     fn fill_headers_footers(&mut self) -> Result<(), DocxError> {
         let mut requests: Vec<(usize, bool, String, String)> = Vec::new();
@@ -1112,7 +1130,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// 只报告一次同类诊断。
+    /// Report the same kind of diagnostic only once.
     fn warn_once(&mut self, key: &str, code: DiagnosticCode, message: impl Into<String>) {
         if !self.reported.insert(key.to_owned()) {
             return;
@@ -1121,34 +1139,36 @@ impl<'a> Builder<'a> {
     }
 }
 
-/// 行内收集器。
+/// Inline collector.
 #[derive(Default)]
 struct InlineSink {
-    /// 已完成的 run。
+    /// Completed runs.
     runs: Vec<Inline>,
-    /// 分页符在 `runs` 中的位置。
+    /// Positions of page breaks within `runs`.
     breaks: Vec<usize>,
-    /// 段落锚点。
+    /// Paragraph anchor.
     anchor: Option<AnchorId>,
-    /// 进行中的复杂域。
+    /// The complex field in progress.
     field: Option<FieldState>,
-    /// 段落里出现的浮动对象，按块级元素另排。
+    /// Floating objects appearing in the paragraph, laid out separately as block-level
+    /// elements.
     floatings: Vec<FloatingObject>,
 }
 
-/// 进行中的复杂域。
+/// The complex field in progress.
 #[derive(Default)]
 struct FieldState {
-    /// 域指令。
+    /// Field instruction.
     instr: String,
-    /// 是否已进入结果部分。
+    /// Whether the result part has been entered.
     separated: bool,
-    /// 结果 run。
+    /// Result runs.
     result: Vec<Inline>,
 }
 
 impl InlineSink {
-    /// 收集目标：域结果或普通 run 列表；处于指令阶段时丢弃。
+    /// Collection target: the field result or the ordinary run list; discarded while in
+    /// the instruction phase.
     fn target(&mut self) -> Option<&mut Vec<Inline>> {
         match &mut self.field {
             Some(state) if state.separated => Some(&mut state.result),
@@ -1180,7 +1200,8 @@ impl InlineSink {
     }
 }
 
-/// 追加文本 run；样式相同且相邻时合并，避免碎片化。
+/// Append a text run; merge with an adjacent run of the same style to avoid
+/// fragmentation.
 fn push_text_run(runs: &mut Vec<Inline>, style: &TextStyle, text: &str) {
     if let Some(Inline::Text(last)) = runs.last_mut()
         && last.style == *style
@@ -1191,7 +1212,7 @@ fn push_text_run(runs: &mut Vec<Inline>, style: &TextStyle, text: &str) {
     runs.push(Inline::Text(TextRun::new(text, style.clone())));
 }
 
-/// 域指令到字段类型。
+/// Field instruction to field kind.
 fn field_kind(instr: &str) -> Option<FieldKind> {
     let token = instr.split_whitespace().next()?.to_ascii_uppercase();
     match token.as_str() {
@@ -1202,7 +1223,7 @@ fn field_kind(instr: &str) -> Option<FieldKind> {
     }
 }
 
-/// 把行内内容拍平成纯文本，作为域的缓存结果。
+/// Flatten inline content into plain text, used as a field's cached result.
 fn runs_text(runs: &[Inline]) -> String {
     let mut text = String::new();
     for inline in runs {
@@ -1220,7 +1241,7 @@ fn runs_text(runs: &[Inline]) -> String {
     text
 }
 
-/// 收集文档里的书签名，按出现顺序分配锚点。
+/// Collect bookmark names in the document and assign anchors in order of appearance.
 fn collect_bookmarks(xml: &str) -> HashMap<String, AnchorId> {
     let mut anchors = HashMap::new();
     let mut reader = XmlReader::from_str(xml);
@@ -1246,10 +1267,11 @@ fn collect_bookmarks(xml: &str) -> HashMap<String, AnchorId> {
     anchors
 }
 
-/// 读取 `sdtPr` 里的内容控件库分类。
+/// Read the content-control gallery from `sdtPr`.
 fn parse_sdt_gallery(reader: &mut XmlReader<'_>) -> Result<Option<String>, DocxError> {
     let mut gallery = None;
-    // docPartGallery 藏在 docPartObj 里，必须按深度读到配对 End，不能跳子树。
+    // docPartGallery hides inside docPartObj, so the matching End must be reached by
+    // depth; the subtree cannot be skipped.
     let mut depth = 0_usize;
     loop {
         match reader.read_event().map_err(crate::xml::xml_error)? {
@@ -1275,13 +1297,13 @@ fn parse_sdt_gallery(reader: &mut XmlReader<'_>) -> Result<Option<String>, DocxE
     Ok(gallery)
 }
 
-/// 内容控件分类是否为目录。
+/// Whether the content-control gallery denotes a table of contents.
 fn is_toc_gallery(gallery: &str) -> bool {
     let lower = gallery.to_ascii_lowercase();
     lower.contains("table of contents") || gallery.contains("目录")
 }
 
-/// 行属性（`w:trPr`）。
+/// Row properties (`w:trPr`).
 fn parse_row_props(reader: &mut XmlReader<'_>) -> Result<(bool, Option<Twips>), DocxError> {
     let mut header = false;
     let mut height = None;
@@ -1305,7 +1327,8 @@ fn parse_row_props(reader: &mut XmlReader<'_>) -> Result<(bool, Option<Twips>), 
     Ok((header, height))
 }
 
-/// 单元格属性（`w:tcPr`）：返回 `(列跨度, 是否为纵向合并续格)`。
+/// Cell properties (`w:tcPr`): returns `(column span, whether this is a vertically
+/// merged continuation cell)`.
 fn parse_cell_props(reader: &mut XmlReader<'_>) -> Result<(u32, VMerge), DocxError> {
     let mut span = 1;
     let mut v_merge = VMerge::None;
@@ -1334,7 +1357,7 @@ fn parse_cell_props(reader: &mut XmlReader<'_>) -> Result<(u32, VMerge), DocxErr
     Ok((span, v_merge))
 }
 
-/// 从关系表里按类型后缀取目标部件。
+/// Get a target part from the relationship table by type suffix.
 fn target_by_kind(relations: &HashMap<String, Relation>, suffix: &str) -> Option<String> {
     relations
         .values()
@@ -1342,7 +1365,7 @@ fn target_by_kind(relations: &HashMap<String, Relation>, suffix: &str) -> Option
         .map(|relation| relation.target.clone())
 }
 
-/// 读取 `docProps/core.xml` 的元数据。
+/// Read the metadata of `docProps/core.xml`.
 fn parse_core(text: &str) -> Metadata {
     let mut metadata = Metadata::default();
     let mut reader = XmlReader::from_str(text);
@@ -1354,8 +1377,9 @@ fn parse_core(text: &str) -> Metadata {
             continue;
         };
         let tag = local_name(&element);
-        // 只对已知字段读取文本；容器元素（如 cp:coreProperties）直接忽略，
-        // 否则会把整棵子树当成一个字段的文本，什么也匹配不到。
+        // Read text only for known fields; container elements (such as cp:coreProperties)
+        // are ignored outright, otherwise the whole subtree would be taken as the text of
+        // one field and nothing would match.
         if !matches!(
             tag.as_str(),
             "title" | "creator" | "subject" | "keywords" | "language"
@@ -1406,7 +1430,7 @@ fn parse_core(text: &str) -> Metadata {
     metadata
 }
 
-/// 取第一个同名元素的文本内容。
+/// Get the text content of the first element with the same name.
 fn find_element_text(text: &str, name: &str) -> Option<String> {
     let mut reader = XmlReader::from_str(text);
     while let Ok(event) = reader.read_event() {
@@ -1434,9 +1458,9 @@ fn find_element_text(text: &str, name: &str) -> Option<String> {
     None
 }
 
-/// EMU（1/914400 英寸）换算成 twip。
+/// Convert EMU (1/914400 inch) into twips.
 ///
-/// `relativeFrom` 属性 → 位置基准。
+/// `relativeFrom` attribute → position reference.
 fn position_from(value: Option<&str>) -> ofdbox_folio_ir::PositionFrom {
     match value.unwrap_or_default() {
         "page" => ofdbox_folio_ir::PositionFrom::Page,

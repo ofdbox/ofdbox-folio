@@ -1,52 +1,53 @@
-//! 颜色、画笔与描边样式。
+//! Colors, paint, and stroke styles.
 //!
-//! 所有颜色在进入 Fixed IR 前统一为 8 位 sRGB；CMYK、ICC 等色彩空间由
-//! 格式适配器转换并记录诊断。描边宽度使用毫米。
+//! All colors are normalized to 8-bit sRGB before entering Fixed IR; color spaces
+//! such as CMYK and ICC are converted by the format adapter and recorded as
+//! diagnostics. Stroke widths are expressed in millimeters.
 
 use crate::geometry::Point;
 
-/// 8 位 sRGB 颜色。
+/// An 8-bit sRGB color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Rgba {
-    /// 红色分量。
+    /// Red component.
     pub r: u8,
-    /// 绿色分量。
+    /// Green component.
     pub g: u8,
-    /// 蓝色分量。
+    /// Blue component.
     pub b: u8,
-    /// 透明度分量。
+    /// Alpha component.
     pub a: u8,
 }
 
 impl Rgba {
-    /// 黑色。
+    /// Black.
     pub const BLACK: Self = Self::new(0, 0, 0, 255);
-    /// 白色。
+    /// White.
     pub const WHITE: Self = Self::new(255, 255, 255, 255);
-    /// 全透明。
+    /// Fully transparent.
     pub const TRANSPARENT: Self = Self::new(0, 0, 0, 0);
 
-    /// 创建颜色。
+    /// Create a color.
     pub const fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self { r, g, b, a }
     }
 
-    /// 创建不透明颜色。
+    /// Create an opaque color.
     pub const fn from_rgb(r: u8, g: u8, b: u8) -> Self {
         Self::new(r, g, b, 255)
     }
 
-    /// 从 8 位分量创建颜色。
+    /// Create a color from 8-bit components.
     pub const fn from_rgba8(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self::new(r, g, b, a)
     }
 
-    /// 返回 `[r, g, b, a]`。
+    /// Return `[r, g, b, a]`.
     pub const fn to_array(self) -> [u8; 4] {
         [self.r, self.g, self.b, self.a]
     }
 
-    /// 返回 8 位非预乘分量。
+    /// Return the 8-bit non-premultiplied components.
     pub const fn to_rgba8(self) -> [u8; 4] {
         self.to_array()
     }
@@ -58,54 +59,54 @@ impl Default for Rgba {
     }
 }
 
-/// 线帽样式。
+/// Line cap style.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum LineCap {
-    /// 平头。
+    /// Butt cap.
     #[default]
     Butt,
-    /// 圆头。
+    /// Round cap.
     Round,
-    /// 方头。
+    /// Square cap.
     Square,
 }
 
-/// 线段连接样式。
+/// Line segment join style.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum LineJoin {
-    /// 尖角。
+    /// Miter join.
     #[default]
     Miter,
-    /// 圆角。
+    /// Round join.
     Round,
-    /// 斜角。
+    /// Bevel join.
     Bevel,
 }
 
-/// 填充规则。
+/// Fill rule.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum FillRule {
-    /// 非零环绕规则。
+    /// Non-zero winding rule.
     #[default]
     NonZero,
-    /// 奇偶规则。
+    /// Even-odd rule.
     EvenOdd,
 }
 
-/// 描边样式。
+/// Stroke style.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StrokeStyle {
-    /// 线宽，单位毫米。
+    /// Line width, in millimeters.
     pub width: f64,
-    /// 线帽。
+    /// Line cap.
     pub cap: LineCap,
-    /// 连接。
+    /// Join.
     pub join: LineJoin,
-    /// 虚线模式，单位毫米；空数组表示实线。
+    /// Dash pattern, in millimeters; an empty array means a solid line.
     pub dash: Vec<f64>,
-    /// 虚线起始偏移，单位毫米。
+    /// Dash starting offset, in millimeters.
     pub dash_offset: f64,
-    /// 尖角限制。
+    /// Miter limit.
     pub miter_limit: f64,
 }
 
@@ -122,79 +123,79 @@ impl Default for StrokeStyle {
     }
 }
 
-/// 带画笔的描边。
+/// A stroke with its paint.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StrokePaint {
-    /// 描边画笔。
+    /// Stroke paint.
     pub paint: Paint,
-    /// 描边样式。
+    /// Stroke style.
     pub style: StrokeStyle,
 }
 
-/// 颜色渐变端点。
+/// A color gradient stop.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GradientStop {
-    /// 位置，范围 0.0 到 1.0。
+    /// Position, ranging from 0.0 to 1.0.
     pub offset: f64,
-    /// 颜色。
+    /// Color.
     pub color: Rgba,
 }
 
-/// 渐变超出端点范围时的填充方式。
+/// How a gradient fills beyond its end stops.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum GradientExtend {
-    /// 保持端点颜色。
+    /// Keep the end stop colors.
     #[default]
     Pad,
-    /// 重复渐变。
+    /// Repeat the gradient.
     Repeat,
-    /// 反射渐变。
+    /// Reflect the gradient.
     Reflect,
 }
 
-/// 线性渐变。
+/// A linear gradient.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinearGradient {
-    /// 起点。
+    /// Start point.
     pub start: Point,
-    /// 终点。
+    /// End point.
     pub end: Point,
-    /// 色标。
+    /// Color stops.
     pub stops: Vec<GradientStop>,
-    /// 超出范围时的填充方式。
+    /// Fill behavior outside the range.
     pub extend: GradientExtend,
 }
 
-/// 径向渐变，支持两点圆锥形式和椭圆压缩。
+/// A radial gradient, supporting the two-point conical form and elliptical squash.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RadialGradient {
-    /// 起始圆心。
+    /// Start center.
     pub start_center: Point,
-    /// 起始半径，单位毫米。
+    /// Start radius, in millimeters.
     pub start_radius: f64,
-    /// 结束圆心。
+    /// End center.
     pub end_center: Point,
-    /// 结束半径，单位毫米。
+    /// End radius, in millimeters.
     pub end_radius: f64,
-    /// 色标。
+    /// Color stops.
     pub stops: Vec<GradientStop>,
-    /// 超出范围时的填充方式。
+    /// Fill behavior outside the range.
     pub extend: GradientExtend,
-    /// 椭圆离心率，0 表示圆。
+    /// Ellipse eccentricity; 0 means a circle.
     pub eccentricity: f64,
-    /// 椭圆长轴与 X 轴正向的夹角，单位度。
+    /// Angle between the ellipse major axis and the positive X axis, in degrees.
     pub angle: f64,
 }
 
-/// 填充或描边使用的画笔。
+/// The paint used for filling or stroking.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Paint {
-    /// 纯色。
+    /// A solid color.
     Color(Rgba),
-    /// 线性渐变。
+    /// A linear gradient.
     LinearGradient(LinearGradient),
-    /// 径向渐变。
+    /// A radial gradient.
     RadialGradient(RadialGradient),
 }
 

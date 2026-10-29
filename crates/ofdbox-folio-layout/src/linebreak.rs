@@ -1,27 +1,31 @@
-//! 断行规则。
+//! Line breaking rules.
 //!
-//! 输入是已测量的单元序列，输出是行区间。这里刻意不依赖字体，便于单独测试
-//! CJK / 拉丁混排与行首行尾禁则。
+//! The input is a sequence of already measured pieces and the output is line
+//! ranges. This deliberately does not depend on fonts so that CJK / Latin mixed
+//! text and the line-start / line-end prohibition rules can be tested in
+//! isolation.
 
 use ofdbox_folio_ir::NoteRef;
 
-/// 一个已测量的排版单元。
+/// A piece that has already been measured.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Piece {
-    /// 字符；`'\n'` 表示强制断行，`'\u{0}'` 表示不可断的行内对象（图片）。
+    /// Character; `'\n'` means a forced break, `'\u{0}'` means an unbreakable
+    /// inline object (image).
     pub ch: char,
-    /// 宽度，毫米。
+    /// Width in millimeters.
     pub width: f64,
-    /// 样式下标。
+    /// Style index.
     pub style: usize,
-    /// 行内对象下标（图片）。
+    /// Inline object index (image).
     pub object: Option<usize>,
-    /// 单元所属的脚注/尾注引用（只标在标记的首字符上）。
+    /// The footnote / endnote reference this piece belongs to (marked only on
+    /// the first character of the marker).
     pub note: Option<NoteRef>,
 }
 
 impl Piece {
-    /// 文本单元。
+    /// Text piece.
     pub fn text(ch: char, width: f64, style: usize) -> Self {
         Self {
             ch,
@@ -32,7 +36,7 @@ impl Piece {
         }
     }
 
-    /// 行内对象单元。
+    /// Inline object piece.
     pub fn object(width: f64, style: usize, object: usize) -> Self {
         Self {
             ch: '\u{0}',
@@ -43,53 +47,57 @@ impl Piece {
         }
     }
 
-    /// 是否是强制断行。
+    /// Whether this is a forced break.
     pub fn is_break(&self) -> bool {
         self.ch == '\n'
     }
 
-    /// 是否是空格（不含制表符）。
+    /// Whether this is a space (tabs excluded).
     pub fn is_space(&self) -> bool {
         self.ch == ' '
     }
 
-    /// 是否是制表符：宽度由落版时的制表位决定，测量阶段记 0。
+    /// Whether this is a tab: the width is determined by the tab stops at
+    /// layout time, so it is recorded as 0 during measurement.
     pub fn is_tab(&self) -> bool {
         self.ch == '\t'
     }
 }
 
-/// 一行覆盖的单元区间（左闭右开，已去掉行尾空白）。
+/// The piece range covered by one line (left-closed, right-open; trailing
+/// whitespace already removed).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LineSpan {
-    /// 起始单元下标。
+    /// Start piece index.
     pub start: usize,
-    /// 结束单元下标。
+    /// End piece index.
     pub end: usize,
 }
 
 impl LineSpan {
-    /// 单元数量。
+    /// Number of pieces.
     pub fn len(&self) -> usize {
         self.end.saturating_sub(self.start)
     }
 
-    /// 是否为空行。
+    /// Whether this is an empty line.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 }
 
-/// 把单元切成行。
+/// Cut pieces into lines.
 ///
-/// `first_width` 用于段落首行（已减去首行缩进），`width` 用于其余行。
+/// `first_width` is used for the first line of a paragraph (already reduced by
+/// the first-line indent) and `width` for the remaining lines.
 pub(crate) fn break_lines(pieces: &[Piece], first_width: f64, width: f64) -> Vec<LineSpan> {
     let mut lines = Vec::new();
     let mut start = 0;
     let mut available = first_width.max(1.0);
 
     while start < pieces.len() {
-        // 跳过行首的强制断行与空白（行首制表符没有意义，一并丢弃）。
+        // Skip forced breaks and whitespace at the line start (a tab at the
+        // line start is meaningless, so it is dropped as well).
         while start < pieces.len()
             && (pieces[start].is_break() || pieces[start].is_space() || pieces[start].is_tab())
         {
@@ -118,16 +126,19 @@ pub(crate) fn break_lines(pieces: &[Piece], first_width: f64, width: f64) -> Vec
             }
         }
 
-        // 能在可断点收尾就收尾，否则按右边界硬断。
+        // End the line at a break opportunity when possible, otherwise break
+        // hard at the right boundary.
         if end < pieces.len() && !pieces[end].is_break() {
             if no_line_start(pieces[end].ch) {
-                // 行首禁则：把标点吞回本行，宁可略微超宽。
+                // Line-start prohibition: pull the punctuation back into this
+                // line, accepting a slight overflow.
                 end += 1;
                 while end < pieces.len() && no_line_start(pieces[end].ch) {
                     end += 1;
                 }
             } else if pieces[end].is_space() {
-                // 空白前可以直接断行，空白留给下一行并跳过。
+                // We can break directly before whitespace; the whitespace is
+                // left for the next line and skipped.
             } else if let Some(candidate) = last_break
                 && candidate > start
             {
@@ -135,7 +146,8 @@ pub(crate) fn break_lines(pieces: &[Piece], first_width: f64, width: f64) -> Vec
             }
         }
 
-        // 行尾禁则：不在开引号/开括号后断行。
+        // Line-end prohibition: do not break after an opening quote / opening
+        // bracket.
         while end > start + 1 && end < pieces.len() && no_line_end(pieces[end - 1].ch) {
             end += 1;
         }
@@ -156,7 +168,7 @@ pub(crate) fn break_lines(pieces: &[Piece], first_width: f64, width: f64) -> Vec
     lines
 }
 
-/// 两个单元之间是否允许断行。
+/// Whether a break is allowed between two pieces.
 fn can_break_between(pieces: &[Piece], index: usize) -> bool {
     if index == 0 || index >= pieces.len() {
         return false;
@@ -175,7 +187,7 @@ fn can_break_between(pieces: &[Piece], index: usize) -> bool {
     false
 }
 
-/// 行首禁则：这些字符不能出现在行首。
+/// Line-start prohibition: these characters may not appear at the line start.
 fn no_line_start(ch: char) -> bool {
     matches!(
         ch,
@@ -210,7 +222,7 @@ fn no_line_start(ch: char) -> bool {
     )
 }
 
-/// 行尾禁则：这些字符不能留在行尾。
+/// Line-end prohibition: these characters may not stay at the line end.
 fn no_line_end(ch: char) -> bool {
     matches!(
         ch,
@@ -218,7 +230,7 @@ fn no_line_end(ch: char) -> bool {
     )
 }
 
-/// 是否按 CJK 处理（可在字符间断行）。
+/// Whether the character is treated as CJK (breakable between characters).
 fn is_cjk(ch: char) -> bool {
     matches!(
         u32::from(ch),
@@ -246,7 +258,8 @@ mod tests {
 
     #[test]
     fn breaks_latin_on_spaces() {
-        // "ab cd ef"，每字符 1，行宽 5：第一行 "ab cd"，第二行 "ef"。
+        // "ab cd ef", 1 per character, line width 5: first line "ab cd", second
+        // line "ef".
         let pieces = text(&[
             ('a', 1.0),
             ('b', 1.0),
@@ -265,11 +278,15 @@ mod tests {
 
     #[test]
     fn trims_trailing_spaces() {
-        // 行尾空格不进入行区间。
+        // Trailing spaces do not enter the line range.
         let pieces = text(&[('a', 1.0), ('b', 1.0), (' ', 1.0)]);
         let lines = break_lines(&pieces, 10.0, 10.0);
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].end - lines[0].start, 2, "行尾空格不参与排版");
+        assert_eq!(
+            lines[0].end - lines[0].start,
+            2,
+            "trailing spaces are not typeset"
+        );
     }
 
     #[test]
@@ -281,7 +298,8 @@ mod tests {
 
     #[test]
     fn keeps_closing_punctuation_with_previous_line() {
-        // 行宽 2：若按宽度硬断会把「。」甩到行首，应回吞一位。
+        // Line width 2: a hard break by width would push "。" to the line
+        // start, so one piece is taken back.
         let pieces = text(&[('中', 1.0), ('文', 1.0), ('。', 1.0)]);
         let lines = break_lines(&pieces, 2.0, 2.0);
         assert_eq!(lines.len(), 1);

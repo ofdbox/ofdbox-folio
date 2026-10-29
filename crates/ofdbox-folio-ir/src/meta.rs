@@ -1,23 +1,24 @@
-//! 元数据、诊断与转换报告。
+//! Metadata, diagnostics, and conversion reports.
 //!
-//! 库保持沉默：可降级的偏差写入 [`Report`]，调用方自行决定记录或展示。
+//! The library stays silent: degradable deviations are written to [`Report`], and
+//! the caller decides whether to log or display them.
 
-/// 不依赖时区的日期时间。
+/// A date and time independent of any time zone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DateTime {
-    /// 年。
+    /// Year.
     pub year: i32,
-    /// 月，1 到 12。
+    /// Month, 1 to 12.
     pub month: u8,
-    /// 日，1 到 31。
+    /// Day, 1 to 31.
     pub day: u8,
-    /// 时。
+    /// Hour.
     pub hour: u8,
-    /// 分。
+    /// Minute.
     pub minute: u8,
-    /// 秒。
+    /// Second.
     pub second: u8,
-    /// 相对 UTC 的偏移分钟数。
+    /// Offset from UTC in minutes.
     pub utc_offset_minutes: i16,
 }
 
@@ -35,112 +36,112 @@ impl Default for DateTime {
     }
 }
 
-/// 文档元数据。
+/// Document metadata.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Metadata {
-    /// 标题。
+    /// Title.
     pub title: Option<String>,
-    /// 作者。
+    /// Author.
     pub author: Option<String>,
-    /// 主题。
+    /// Subject.
     pub subject: Option<String>,
-    /// 关键词。
+    /// Keywords.
     pub keywords: Vec<String>,
-    /// 创建工具。
+    /// Creator tool.
     pub creator: Option<String>,
-    /// 创建时间。
+    /// Creation time.
     pub created: Option<DateTime>,
-    /// 修改时间。
+    /// Modification time.
     pub modified: Option<DateTime>,
-    /// 文档语言标签。
+    /// Document language tag.
     pub language: Option<String>,
 }
 
-/// 附件元数据。
+/// Attachment metadata.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AttachmentInfo {
-    /// 附件标识。
+    /// Attachment identifier.
     pub id: super::asset::AttachmentId,
-    /// 附件名称。
+    /// Attachment name.
     pub name: String,
-    /// 附件格式说明。
+    /// Attachment format description.
     pub format: Option<String>,
-    /// 附件字节数。
+    /// Attachment size in bytes.
     pub size: u64,
-    /// 创建时间。
+    /// Creation time.
     pub created: Option<DateTime>,
 }
 
-/// 诊断严重级别。
+/// Diagnostic severity level.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Severity {
-    /// 提示。
+    /// Informational.
     #[default]
     Info,
-    /// 警告，表示内容被近似或降级。
+    /// Warning, indicating that content was approximated or degraded.
     Warning,
-    /// 错误，表示当前项失败但文档可继续处理。
+    /// Error, indicating that the current item failed but the document can still be processed.
     Error,
 }
 
-/// 诊断分类。
+/// Diagnostic category.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DiagnosticCode {
-    /// 不支持的特性。
+    /// Unsupported feature.
     Unsupported,
-    /// 不支持的图元类型。
+    /// Unsupported object type.
     UnsupportedObject,
-    /// 字体缺失或无法解析。
+    /// Font missing or unparsable.
     MissingFont,
-    /// 字体相关诊断。
+    /// Font-related diagnostic.
     Font,
-    /// 图片缺失或无法解码。
+    /// Image missing or undecodable.
     Image,
-    /// 颜色或画笔暂未实现。
+    /// Color or paint not yet implemented.
     Paint,
-    /// 几何数据无效。
+    /// Invalid geometry data.
     Geometry,
-    /// 内容被近似处理。
+    /// Content was approximated.
     Approximation,
-    /// 字符与字形映射不完整。
+    /// Character-to-glyph mapping is incomplete.
     InvalidMapping,
-    /// 页面损坏。
+    /// Page is corrupt.
     CorruptPage,
-    /// 超过资源或规模限制。
+    /// Resource or size limit exceeded.
     LimitExceeded,
-    /// 其他问题。
+    /// Other problem.
     Other,
 }
 
-/// 诊断位置。
+/// Diagnostic location.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Location {
-    /// 页面索引。
+    /// Page index.
     pub page: Option<usize>,
-    /// 块索引。
+    /// Block index.
     pub block: Option<u32>,
-    /// 文本项或对象索引。
+    /// Text item or object index.
     pub item: Option<u32>,
-    /// 源格式中的对象标识。
+    /// Object identifier in the source format.
     pub object: Option<String>,
 }
 
-/// 一条诊断。
+/// A single diagnostic.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
-    /// 严重级别。
+    /// Severity level.
     pub severity: Severity,
-    /// 分类。
+    /// Category.
     pub code: DiagnosticCode,
-    /// 可读说明。
+    /// Human-readable description.
     pub message: String,
-    /// 可选位置。
+    /// Optional location.
     pub location: Option<Location>,
 }
 
 impl Diagnostic {
-    /// 创建一条诊断。
+    /// Create a diagnostic.
     pub fn new(severity: Severity, code: DiagnosticCode, message: impl Into<String>) -> Self {
         Self {
             severity,
@@ -150,64 +151,64 @@ impl Diagnostic {
         }
     }
 
-    /// 创建提示。
+    /// Create an informational diagnostic.
     pub fn info(code: DiagnosticCode, message: impl Into<String>) -> Self {
         Self::new(Severity::Info, code, message)
     }
 
-    /// 创建警告。
+    /// Create a warning.
     pub fn warning(code: DiagnosticCode, message: impl Into<String>) -> Self {
         Self::new(Severity::Warning, code, message)
     }
 
-    /// 创建错误。
+    /// Create an error.
     pub fn error(code: DiagnosticCode, message: impl Into<String>) -> Self {
         Self::new(Severity::Error, code, message)
     }
 
-    /// 附加位置。
+    /// Attach a location.
     pub fn at(mut self, location: Location) -> Self {
         self.location = Some(location);
         self
     }
 }
 
-/// 诊断集合。
+/// A collection of diagnostics.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Report {
-    /// 诊断列表，按产生顺序保存。
+    /// The diagnostic list, kept in the order produced.
     pub diagnostics: Vec<Diagnostic>,
 }
 
 impl Report {
-    /// 创建空报告。
+    /// Create an empty report.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 报告是否为空。
+    /// Whether the report is empty.
     pub fn is_empty(&self) -> bool {
         self.diagnostics.is_empty()
     }
 
-    /// 添加诊断。
+    /// Add a diagnostic.
     pub fn push(&mut self, diagnostic: Diagnostic) {
         self.diagnostics.push(diagnostic);
     }
 
-    /// 批量添加诊断。
+    /// Add diagnostics in bulk.
     pub fn extend(&mut self, diagnostics: impl IntoIterator<Item = Diagnostic>) {
         self.diagnostics.extend(diagnostics);
     }
 
-    /// 遍历警告。
+    /// Iterate over warnings.
     pub fn warnings(&self) -> impl Iterator<Item = &Diagnostic> {
         self.diagnostics
             .iter()
             .filter(|diagnostic| diagnostic.severity == Severity::Warning)
     }
 
-    /// 遍历错误。
+    /// Iterate over errors.
     pub fn errors(&self) -> impl Iterator<Item = &Diagnostic> {
         self.diagnostics
             .iter()

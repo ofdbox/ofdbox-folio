@@ -1,12 +1,14 @@
-//! 从零构造 Flow IR，同时写出 DOCX 与 OFD 的完整示例。
+//! Complete example that builds a Flow IR from scratch and writes out both DOCX and OFD.
 //!
 //! ```text
 //! cargo run -p ofdbox-folio --example create_document -- out.docx
 //! ```
 //!
-//! 覆盖：标题与正文格式、制表位与点线前导符、表格、图片、脚注、目录域、
-//! 页眉页脚与页码字段、浮动图片。同一份 Flow IR 先写 DOCX，再排版成 Fixed IR
-//! 写 OFD（字体自动子集化），最后回读 DOCX 打印结构。
+//! Covers: heading and body formatting, tab stops with dot leaders, tables, images,
+//! footnotes, TOC fields, headers/footers with page-number fields, and floating images.
+//! The same Flow IR is first written to DOCX, then laid out into Fixed IR and written to
+//! OFD (fonts are subset automatically), and finally the DOCX is read back and its
+//! structure printed.
 
 use std::error::Error;
 use std::sync::Arc;
@@ -26,7 +28,7 @@ mod common;
 
 use common::SystemFonts;
 
-/// 正文字号。
+/// Body text style.
 fn style(size: f64) -> TextStyle {
     TextStyle {
         size: Twips::from_pt(size),
@@ -53,7 +55,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
     flow.sections[0].setup = PageSetup::a4();
 
-    // ---- 标题与正文 ----
+    // ---- Heading and body ----
     let mut title = paragraph("创建 DOCX 示例");
     title.style = ParaStyle {
         align: Align::Center,
@@ -114,12 +116,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     )));
     body.runs
         .push(Inline::Text(TextRun::new("。", style(11.0))));
-    // 脚注引用：正文里插入，脚注正文放在文末的 notes 里。
+    // Footnote reference: inserted in the body; the footnote text lives in the notes at
+    // the end of the document.
     body.runs
         .push(Inline::Note(NoteRef::new(NoteKind::Footnote, 1)));
     flow.push(Block::Paragraph(body));
 
-    // ---- 制表位 + 点线前导符（目录式一行）----
+    // ---- Tab stop + dot leader (a TOC-style line) ----
     let mut leader_line = Paragraph::new(ParaStyle {
         tabs: vec![TabStop::new(
             Twips::from_mm(150.0),
@@ -151,7 +154,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     flow.push(Block::Paragraph(second));
 
-    // ---- 表格 ----
+    // ---- Table ----
     let mut table = Table::new(vec![
         Column {
             width: ColumnWidth::Weight(2),
@@ -187,7 +190,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     ];
     flow.push(Block::Table(table));
 
-    // ---- 图片（行内 + 浮动）----
+    // ---- Images (inline + floating) ----
     let (png, width, height) = sample_png();
     let id = flow.resources.add_image(ImageAsset::new(
         ImageFormat::Png,
@@ -207,14 +210,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     floating.wrap = WrapMode::Square;
     flow.push(Block::Floating(Box::new(floating)));
 
-    // ---- 目录域 ----
+    // ---- TOC field ----
     flow.push(Block::Toc(TocBlock {
         max_level: 3,
         title: Some("目录".to_owned()),
         style: TocStyle::default(),
     }));
 
-    // ---- 脚注正文 ----
+    // ---- Footnote text ----
     flow.notes.push(Note::new(
         NoteKind::Footnote,
         1,
@@ -223,7 +226,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         ))],
     ));
 
-    // ---- 页眉页脚 ----
+    // ---- Header and footer ----
     let mut header = Paragraph::plain("OFDBox Folio 示例", style(9.0));
     header.style.align = Align::Right;
     flow.sections[0].headers.default = Some(HeaderFooter {
@@ -252,16 +255,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         blocks: vec![Block::Paragraph(footer)],
     });
 
-    // ---- 写 DOCX ----
+    // ---- Write DOCX ----
     write_flow_path(&flow, &path, &DocxWriteOptions::default())?;
     let size = std::fs::metadata(&path)?.len();
-    println!("写出 DOCX: {path} ({size} 字节)");
+    println!("Wrote DOCX: {path} ({size} bytes)");
 
-    // ---- 同一份 Flow IR 排成 Fixed IR，再写 OFD ----
+    // ---- Lay out the same Flow IR into Fixed IR, then write OFD ----
     let mut fonts = SystemFonts::new();
     let fixed = layout_with(&flow, &mut fonts, LayoutOptions::default())?;
     for diagnostic in &fixed.report.diagnostics {
-        eprintln!("  排版诊断: {}", diagnostic.message);
+        eprintln!("  layout diagnostic: {}", diagnostic.message);
     }
     let ofd_path = std::path::Path::new(&path)
         .with_extension("ofd")
@@ -270,12 +273,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let ofd = write_fixed(&fixed, &OfdWriteOptions::default())?;
     std::fs::write(&ofd_path, &ofd)?;
     println!(
-        "写出 OFD: {ofd_path} ({} 字节，{} 页)",
+        "Wrote OFD: {ofd_path} ({} bytes, {} pages)",
         ofd.len(),
         fixed.pages.len()
     );
 
-    // ---- 回读 DOCX ----
+    // ---- Read the DOCX back ----
     let back = read_flow_path(&path, &DocxReadOptions::default())?;
     let blocks: usize = back
         .sections
@@ -283,7 +286,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|section| section.blocks.len())
         .sum();
     println!(
-        "回读: {} 节 {} 块，图片 {} 张，注释 {} 条",
+        "Read back: {} sections, {} blocks, {} images, {} notes",
         back.sections.len(),
         blocks,
         back.resources.image_count(),
@@ -292,12 +295,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// 单元格：一个段落。
+/// Cell: one paragraph.
 fn cell(text: &str) -> Cell {
     Cell::new(vec![Block::Paragraph(paragraph(text))])
 }
 
-/// 生成一张带渐变的 240×160 PNG，避免示例依赖外部图片文件。
+/// Generates a 240×160 gradient PNG so the example does not depend on external image files.
 fn sample_png() -> (Vec<u8>, u32, u32) {
     let width = 240_u32;
     let height = 160_u32;

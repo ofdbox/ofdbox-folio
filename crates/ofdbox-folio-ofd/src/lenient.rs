@@ -1,15 +1,17 @@
-//! 宽松 XML 修复。
+//! Lenient XML repair.
 //!
-//! 把真实 OFD 里常见的非标准写法（未绑定命名空间前缀、缺省必选属性/子元素、
-//! 逗号分隔的数值等）规范化成 `ofdbox-core` 的 typed model 能严格解析的形式。
-//! 只做「补缺 + 规范化」，不改写已有语义；未知元素/属性原样保留（model 会跳过）。
+//! Normalizes the non-standard constructs commonly found in real OFD files (unbound namespace
+//! prefixes, missing required attributes/child elements, comma-separated numeric values, and so
+//! on) into a form that the typed model of `ofdbox-core` can parse strictly.
+//! Only "fill in gaps + normalize" is done; existing semantics are not rewritten, and unknown
+//! elements/attributes are kept as-is (the model simply skips them).
 
 use quick_xml::Reader;
 use quick_xml::events::Event;
 
 use crate::{OfdDiagnostic, OfdError, OfdRepair};
 
-/// 规范化一个 XML entry。
+/// Normalizes a single XML entry.
 pub(crate) fn sanitize(
     entry: &str,
     bytes: &[u8],
@@ -22,7 +24,7 @@ pub(crate) fn sanitize(
     let mut diagnostics = Vec::new();
     let Some(root) = repair(root, entry, &mut state, &mut diagnostics)? else {
         return Err(OfdError::InvalidStructure(format!(
-            "{entry}: 宽松解析后根元素被丢弃"
+            "{entry}: root element was dropped after lenient parsing"
         )));
     };
     let mut output = String::with_capacity(text.len() + 64);
@@ -51,7 +53,7 @@ fn parse(text: &str) -> Result<Node, OfdError> {
     loop {
         let event = reader
             .read_event()
-            .map_err(|error| OfdError::InvalidStructure(format!("XML 解析失败: {error}")))?;
+            .map_err(|error| OfdError::InvalidStructure(format!("XML parse failed: {error}")))?;
         match event {
             Event::Start(element) => {
                 stack.push(node_from(&element)?);
@@ -61,7 +63,7 @@ fn parse(text: &str) -> Result<Node, OfdError> {
             }
             Event::End(_) => {
                 let node = stack.pop().ok_or_else(|| {
-                    OfdError::InvalidStructure("XML 结束标签多于开始标签".to_owned())
+                    OfdError::InvalidStructure("XML has more end tags than start tags".to_owned())
                 })?;
                 push_node(&mut stack, &mut root, node);
             }
@@ -69,7 +71,7 @@ fn parse(text: &str) -> Result<Node, OfdError> {
                 if let Some(node) = stack.last_mut() {
                     let raw = value.into_inner();
                     let decoded = quick_xml::escape::unescape(raw.as_ref()).map_err(|error| {
-                        OfdError::InvalidStructure(format!("XML 文本解码失败: {error}"))
+                        OfdError::InvalidStructure(format!("XML text decoding failed: {error}"))
                     })?;
                     node.text.push_str(decoded.as_ref());
                 }
@@ -84,22 +86,25 @@ fn parse(text: &str) -> Result<Node, OfdError> {
             _ => {}
         }
     }
-    root.ok_or_else(|| OfdError::InvalidStructure("XML 没有根元素".to_owned()))
+    root.ok_or_else(|| OfdError::InvalidStructure("XML has no root element".to_owned()))
 }
 
 fn node_from(element: &quick_xml::events::BytesStart<'_>) -> Result<Node, OfdError> {
     let name = local_name(element.name().as_ref());
     let mut attrs = Vec::new();
     for attribute in element.attributes().with_checks(false) {
-        let attribute = attribute
-            .map_err(|error| OfdError::InvalidStructure(format!("XML 属性解析失败: {error}")))?;
+        let attribute = attribute.map_err(|error| {
+            OfdError::InvalidStructure(format!("XML attribute parsing failed: {error}"))
+        })?;
         let key = local_name(attribute.key.as_ref());
         if key == "xmlns" || key.is_empty() {
             continue;
         }
         let value = attribute
             .normalized_value(quick_xml::XmlVersion::Implicit1_0)
-            .map_err(|error| OfdError::InvalidStructure(format!("XML 属性解码失败: {error}")))?
+            .map_err(|error| {
+                OfdError::InvalidStructure(format!("XML attribute decoding failed: {error}"))
+            })?
             .into_owned();
         attrs.push((key, value));
     }
@@ -147,7 +152,7 @@ fn repair(
     clean_numbers(&mut node);
     let name = node.name.clone();
 
-    // 缺资源引用的图片无法渲染，整块丢弃并记诊断。
+    // An image without a resource reference cannot be rendered: drop the whole block and record a diagnostic.
     if name == "ImageObject" && !has_attr(&node, "ResourceID") {
         record(entry, OfdRepair::DropObject, &name, diagnostics);
         return Ok(None);
@@ -175,7 +180,7 @@ fn repair(
             ensure_attr(&mut node, "Boundary", "0 0 0 0", entry, diagnostics);
         }
         "Path" | "Text" => {
-            // 裁剪区里的 Path/Text 没有 ID（XSD 的 CT_Path/CT_Text 不带 ID）。
+            // Path/Text elements inside a clipping area have no ID (CT_Path/CT_Text in the XSD carry no ID).
             ensure_attr(&mut node, "Boundary", "0 0 0 0", entry, diagnostics);
             if name == "Text" {
                 ensure_attr(&mut node, "Font", "0", entry, diagnostics);
@@ -315,7 +320,7 @@ fn record(entry: &str, repair: OfdRepair, element: &str, diagnostics: &mut Vec<O
     diagnostics.push(OfdDiagnostic {
         entry: entry.to_owned(),
         repair,
-        detail: format!("<{element}> 缺少必填内容，已按默认值补齐"),
+        detail: format!("<{element}> is missing required content; default values were filled in"),
     });
 }
 

@@ -1,97 +1,99 @@
-//! 路径与路径构建器。
+//! Paths and path builders.
 //!
-//! 路径段使用页面或元素局部坐标，单位毫米。曲线控制点不保证落在曲线上，
-//! 因此 [`Path::bounds`] 返回的是控制点包围盒，精确边界由渲染后端计算。
+//! Path segments use page or element local coordinates, in millimeters. Curve
+//! control points are not guaranteed to lie on the curve, so [`Path::bounds`]
+//! returns the bounding box of the control points; exact bounds are computed by
+//! the rendering backend.
 
 use crate::geometry::{Point, Rect};
 
-/// 路径指令。
+/// A path instruction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum PathSegment {
-    /// 移动到点。
+    /// Move to a point.
     MoveTo(Point),
-    /// 直线到点。
+    /// Line to a point.
     LineTo(Point),
-    /// 二次贝塞尔曲线。
+    /// Quadratic Bézier curve.
     QuadTo(Point, Point),
-    /// 三次贝塞尔曲线。
+    /// Cubic Bézier curve.
     CubicTo(Point, Point, Point),
-    /// 椭圆弧。
+    /// Elliptical arc.
     ArcTo {
-        /// 横轴半径。
+        /// Horizontal axis radius.
         rx: f64,
-        /// 纵轴半径。
+        /// Vertical axis radius.
         ry: f64,
-        /// 椭圆旋转角，单位弧度。
+        /// Ellipse rotation angle, in radians.
         rotation: f64,
-        /// 是否使用大弧。
+        /// Whether to use the large arc.
         large_arc: bool,
-        /// 是否顺时针。
+        /// Whether the sweep is clockwise.
         sweep: bool,
-        /// 终点。
+        /// End point.
         to: Point,
     },
-    /// 闭合当前子路径。
+    /// Close the current subpath.
     Close,
 }
 
-/// 一组路径指令。
+/// A sequence of path instructions.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Path {
     segments: Vec<PathSegment>,
 }
 
 impl Path {
-    /// 创建空路径。
+    /// Create an empty path.
     pub const fn new() -> Self {
         Self {
             segments: Vec::new(),
         }
     }
 
-    /// 从已有指令创建路径。
+    /// Create a path from existing instructions.
     pub fn from_segments(segments: Vec<PathSegment>) -> Self {
         Self { segments }
     }
 
-    /// 路径是否为空。
+    /// Whether the path is empty.
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty()
     }
 
-    /// 路径指令。
+    /// The path instructions.
     pub fn segments(&self) -> &[PathSegment] {
         &self.segments
     }
 
-    /// 路径指令的可变引用。
+    /// Mutable access to the path instructions.
     pub fn segments_mut(&mut self) -> &mut Vec<PathSegment> {
         &mut self.segments
     }
 
-    /// 添加移动指令。
+    /// Add a move instruction.
     pub fn move_to(&mut self, point: Point) {
         self.segments.push(PathSegment::MoveTo(point));
     }
 
-    /// 添加直线指令。
+    /// Add a line instruction.
     pub fn line_to(&mut self, point: Point) {
         self.segments.push(PathSegment::LineTo(point));
     }
 
-    /// 添加二次曲线指令。
+    /// Add a quadratic curve instruction.
     pub fn quadratic_to(&mut self, control: Point, to: Point) {
         self.segments.push(PathSegment::QuadTo(control, to));
     }
 
-    /// 添加三次曲线指令。
+    /// Add a cubic curve instruction.
     pub fn cubic_to(&mut self, control1: Point, control2: Point, to: Point) {
         self.segments
             .push(PathSegment::CubicTo(control1, control2, to));
     }
 
-    /// 添加椭圆弧指令。
+    /// Add an elliptical arc instruction.
     #[allow(clippy::too_many_arguments)]
     pub fn arc_to(
         &mut self,
@@ -112,12 +114,12 @@ impl Path {
         });
     }
 
-    /// 闭合当前子路径。
+    /// Close the current subpath.
     pub fn close(&mut self) {
         self.segments.push(PathSegment::Close);
     }
 
-    /// 控制点包围盒；空路径返回 `None`。
+    /// Bounding box of the control points; returns `None` for an empty path.
     pub fn bounds(&self) -> Option<Rect> {
         let mut points = self.segments.iter().flat_map(|segment| match segment {
             PathSegment::MoveTo(point) | PathSegment::LineTo(point) => vec![*point],
@@ -141,37 +143,37 @@ impl Path {
     }
 }
 
-/// 逐指令构建 [`Path`]。
+/// Build a [`Path`] instruction by instruction.
 #[derive(Clone, Debug, Default)]
 pub struct PathBuilder {
     path: Path,
 }
 
 impl PathBuilder {
-    /// 创建空构建器。
+    /// Create an empty builder.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 添加移动指令。
+    /// Add a move instruction.
     pub fn move_to(&mut self, point: Point) -> &mut Self {
         self.path.segments.push(PathSegment::MoveTo(point));
         self
     }
 
-    /// 添加直线指令。
+    /// Add a line instruction.
     pub fn line_to(&mut self, point: Point) -> &mut Self {
         self.path.segments.push(PathSegment::LineTo(point));
         self
     }
 
-    /// 添加二次曲线指令。
+    /// Add a quadratic curve instruction.
     pub fn quad_to(&mut self, control: Point, end: Point) -> &mut Self {
         self.path.segments.push(PathSegment::QuadTo(control, end));
         self
     }
 
-    /// 添加三次曲线指令。
+    /// Add a cubic curve instruction.
     pub fn cubic_to(&mut self, control_a: Point, control_b: Point, end: Point) -> &mut Self {
         self.path
             .segments
@@ -179,7 +181,7 @@ impl PathBuilder {
         self
     }
 
-    /// 添加椭圆弧指令。
+    /// Add an elliptical arc instruction.
     #[allow(clippy::too_many_arguments)]
     pub fn arc_to(
         &mut self,
@@ -201,18 +203,18 @@ impl PathBuilder {
         self
     }
 
-    /// 闭合当前子路径。
+    /// Close the current subpath.
     pub fn close(&mut self) -> &mut Self {
         self.path.segments.push(PathSegment::Close);
         self
     }
 
-    /// 完成构建。
+    /// Finish building.
     pub fn build(&self) -> Path {
         self.path.clone()
     }
 
-    /// 取走已构建的路径。
+    /// Take the built path.
     pub fn into_path(self) -> Path {
         self.path
     }

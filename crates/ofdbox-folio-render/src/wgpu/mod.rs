@@ -1,7 +1,8 @@
-//! wgpu compute 后端。
+//! wgpu compute backend.
 //!
-//! W0 覆盖实色填充路径、描边、线性渐变、裁剪与文字轮廓；图片、
-//! 径向渐变与混合模式尚未实现。
+//! W0 covers solid-color fill paths, stroking, linear gradients, clipping and
+//! text outlines; images, radial gradients and blend modes are not implemented
+//! yet.
 
 #[cfg(not(feature = "wgpu"))]
 mod disabled;

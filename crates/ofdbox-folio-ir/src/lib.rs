@@ -1,10 +1,12 @@
-//! OFDBox Folio 的公共 IR 与阅读器契约。
+//! Public IR and reader contracts for OFDBox Folio.
 //!
-//! 本 crate 定义格式中立的 Flow IR、Fixed IR、几何与画笔、资源句柄、文本层
-//! 和 [`DocumentSource`] 等类型，不依赖任何文档格式库，也不做 I/O。
+//! This crate defines format-neutral types such as Flow IR, Fixed IR, geometry and
+//! paint, resource handles, the text layer, and [`DocumentSource`]. It does not
+//! depend on any document format library and performs no I/O.
 //!
-//! 当前实现覆盖数据模型、基础几何运算、资源去重、文本命中/选择/搜索和页面
-//! 校验；布局算法、渲染后端和格式适配器分别位于其他 crate。
+//! The current implementation covers the data model, basic geometry operations,
+//! resource deduplication, text hit-testing/selection/search, and page validation;
+//! layout algorithms, rendering backends, and format adapters live in other crates.
 
 pub mod asset;
 pub mod fixed;

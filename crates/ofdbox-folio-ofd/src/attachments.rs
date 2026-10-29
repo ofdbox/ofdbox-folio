@@ -1,7 +1,8 @@
-//! OFD 附件（`Attachments`）读取。
+//! Reading OFD attachments (`Attachments`).
 //!
-//! GB/T 33190 §7.10：`Document.xml` 用 `Attachments` 指向附件列表文件，
-//! 列表里的 `FileLoc` 是包内路径，相对附件列表文件所在目录解析。
+//! GB/T 33190 §7.10: `Document.xml` uses `Attachments` to point at the attachment list file,
+//! and the `FileLoc` entries in that list are package-internal paths, resolved relative to
+//! the directory containing the attachment list file.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -13,18 +14,18 @@ use ofdbox_folio_ir::{AttachmentId, AttachmentInfo};
 
 use crate::package::{Ctx, Loaded};
 
-/// 解析后的附件集合。
+/// Parsed collection of attachments.
 #[derive(Default)]
 pub(crate) struct OfdAttachments {
-    /// 供 `DocumentInfo` 使用的附件元数据。
+    /// Attachment metadata used by `DocumentInfo`.
     pub info: Vec<AttachmentInfo>,
-    /// 附件 ID 到 `FileLoc` 的映射。
+    /// Mapping from attachment ID to `FileLoc`.
     pub files: Vec<(AttachmentId, StLoc)>,
-    /// 附件索引；读取附件内容时用它解析 `FileLoc`。
+    /// Attachment index; used to resolve `FileLoc` when reading attachment contents.
     index: Option<Rc<Loaded<Attachments>>>,
 }
 
-/// 读取附件列表；没有声明或解析失败时返回空集合。
+/// Reads the attachment list; returns an empty collection when it is not declared or fails to parse.
 pub(crate) fn read(ctx: &Ctx, document: &Document) -> OfdAttachments {
     let Some(loc) = document.attachments.as_ref() else {
         return OfdAttachments::default();
@@ -37,7 +38,7 @@ pub(crate) fn read(ctx: &Ctx, document: &Document) -> OfdAttachments {
         let id = AttachmentId::new(position as u64 + 1);
         let name = attachment.name.trim();
         let name = if name.is_empty() {
-            format!("附件 {}", position + 1)
+            format!("Attachment {}", position + 1)
         } else {
             name.to_owned()
         };
@@ -60,7 +61,7 @@ pub(crate) fn read(ctx: &Ctx, document: &Document) -> OfdAttachments {
     attachments
 }
 
-/// 读取附件内容。
+/// Reads attachment contents.
 pub(crate) fn load(
     attachments: &OfdAttachments,
     id: AttachmentId,
@@ -74,7 +75,7 @@ pub(crate) fn load(
         .iter()
         .find(|(attachment, _)| *attachment == id)
         .map(|(_, file)| file)
-        .ok_or_else(|| crate::OfdError::MissingEntry(format!("附件 {}", id.get())))?;
+        .ok_or_else(|| crate::OfdError::MissingEntry(format!("attachment {}", id.get())))?;
     let bytes = index.context().read_entry(file)?;
     Ok(Arc::from(bytes))
 }

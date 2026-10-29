@@ -1,7 +1,8 @@
-//! 语料回归：批量打开 OFD，可选做「读 → 写 → 再读」往返。
+//! Corpus regression: open OFD files in bulk, optionally performing a read → write → read
+//! round trip.
 //!
 //! ```text
-//! cargo run -p ofdbox-folio --example ofd_corpus -- <目录> [--roundtrip]
+//! cargo run -p ofdbox-folio --example ofd_corpus -- <directory> [--roundtrip]
 //! ```
 
 use std::error::Error;
@@ -12,7 +13,7 @@ use ofdbox_folio::ofd::{OfdDocument, OfdReadOptions, OfdWriteOptions, write_fixe
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
-    let root = args.next().ok_or("缺少目录")?;
+    let root = args.next().ok_or("missing directory")?;
     let roundtrip = args.any(|arg| arg == "--roundtrip");
     let mut files = Vec::new();
     collect(Path::new(&root), &mut files);
@@ -75,14 +76,18 @@ fn run(path: &Path, roundtrip: bool) -> Result<usize, Box<dyn Error>> {
     let bytes = write_fixed(&fixed, &OfdWriteOptions::default())?;
     let mut written = OfdDocument::open_bytes(bytes, OfdReadOptions::default())?;
     if written.page_count() != page_count {
-        return Err(format!("页数不一致: {page_count} -> {}", written.page_count()).into());
+        return Err(format!(
+            "page count mismatch: {page_count} -> {}",
+            written.page_count()
+        )
+        .into());
     }
     for (index, (width, height)) in sizes.iter().enumerate() {
         let page = written.load_page(index)?;
         if (page.content.size.width - width).abs() > 1e-3
             || (page.content.size.height - height).abs() > 1e-3
         {
-            return Err(format!("第 {index} 页尺寸不一致").into());
+            return Err(format!("page {index} size mismatch").into());
         }
     }
     Ok(page_count)

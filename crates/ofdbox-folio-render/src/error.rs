@@ -1,28 +1,28 @@
-//! 渲染错误。
+//! Rendering errors.
 
-/// 位图渲染错误。
+/// Bitmap rendering error.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RenderError {
-    /// 当前实现无法表达的渲染特性。
-    #[error("不支持的渲染特性: {0}")]
+    /// A rendering feature the current implementation cannot express.
+    #[error("unsupported rendering feature: {0}")]
     Unsupported(String),
-    /// 引用的资源缺失。
-    #[error("缺少渲染资源: {0}")]
+    /// A referenced resource is missing.
+    #[error("missing rendering resource: {0}")]
     MissingResource(String),
-    /// 图片解码失败。
-    #[error("图片解码失败: {0}")]
+    /// Image decoding failed.
+    #[error("image decoding failed: {0}")]
     Image(String),
-    /// 字体解析失败。
-    #[error("字体解析失败: {0}")]
+    /// Font parsing failed.
+    #[error("font parsing failed: {0}")]
     Font(String),
-    /// 页面尺寸无效。
-    #[error("页面尺寸无效")]
+    /// Invalid page size.
+    #[error("invalid page size")]
     InvalidPage,
-    /// 后端执行失败。
-    #[error("渲染后端错误: {0}")]
+    /// Backend execution failed.
+    #[error("render backend error: {0}")]
     Backend(String),
-    /// I/O 错误。
-    #[error("I/O 错误: {0}")]
+    /// I/O error.
+    #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }

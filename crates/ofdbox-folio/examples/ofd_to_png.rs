@@ -1,4 +1,4 @@
-//! 把一个 OFD 页面渲染为 PNG。
+//! Renders one OFD page to PNG.
 //!
 //! ```text
 //! cargo run -p ofdbox-folio --example ofd_to_png -- input.ofd output.png [page] [dpi]
@@ -15,7 +15,7 @@ use ofdbox_folio::ir::{FontError, FontProvider, FontRequest};
 use ofdbox_folio::render::{CpuRenderer, RasterTarget, RenderOptions};
 use ofdbox_folio::{Document, OpenOptions};
 
-/// 按字体名从系统字体目录选择字体。
+/// Picks a font by font name from the system font directories.
 type FontCache = Arc<Mutex<HashMap<PathBuf, Option<Arc<[u8]>>>>>;
 
 struct SystemFonts {
@@ -120,8 +120,8 @@ fn select_font(request: &FontRequest<'_>) -> Option<PathBuf> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
-    let input = args.next().ok_or("缺少输入 OFD 路径")?;
-    let output = args.next().ok_or("缺少输出 PNG 路径")?;
+    let input = args.next().ok_or("missing input OFD path")?;
+    let output = args.next().ok_or("missing output PNG path")?;
     let page_index = args
         .next()
         .map(|value| value.parse::<usize>())

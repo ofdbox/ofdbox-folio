@@ -1,12 +1,13 @@
-//! OFD 页面前端：把 OFD 内容转换为 OFDBox Folio 的 Fixed IR。
+//! OFD page frontend: converts OFD content into the Fixed IR of OFDBox Folio.
 //!
-//! 读取基于 ofdbox 0.0.2 的强类型 `model` 与 `Stored<T>` 会话：
-//! 页面内容、模板页与资源都通过 [`crate::loc`] 按需加载，路径解析兼容
-//! 相对路径、包根路径与大小写差异。
+//! Reading is based on the strongly typed `model` and `Stored<T>` session of ofdbox 0.0.2:
+//! page content, template pages and resources are all loaded on demand through [`crate::loc`],
+//! and path resolution tolerates relative paths, package-root paths and case differences.
 //!
-//! 真实文件里很多属性缺失时依赖 XSD 默认值（例如 `LineWidth` 缺省为
-//! 0.353、`Visible` 缺省为 true）。强类型模型把「缺失」折叠成默认值，
-//! 因此这里用「与默认值比较」还原旧 `*View` API 的 `Some`/`None` 语义。
+//! In real files many attributes rely on XSD defaults when absent (for example `LineWidth`
+//! defaults to 0.353 and `Visible` defaults to true). The strongly typed model collapses
+//! "absent" into the default value, so here we compare against the default value to restore the
+//! `Some`/`None` semantics of the old `*View` API.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -32,25 +33,25 @@ use ofdbox_folio_ir::{
 use crate::OfdError;
 use crate::package::Loaded;
 
-/// OFD 中 `LineWidth` 的默认值（毫米）。
+/// Default value of `LineWidth` in OFD (millimeters).
 const DEFAULT_LINE_WIDTH: f64 = 0.353;
-/// OFD 中 `MiterLimit` 的默认值。
+/// Default value of `MiterLimit` in OFD.
 const DEFAULT_MITER_LIMIT: f64 = 4.234;
 
-/// OFD 前端选项。
+/// OFD frontend options.
 #[derive(Clone, Debug)]
 pub struct OfdReadOptions {
-    /// 是否绘制注释。
+    /// Whether annotations are rendered.
     pub draw_annotations: bool,
-    /// 遇到不支持特性时的行为。
+    /// Behavior when an unsupported feature is encountered.
     pub unsupported: UnsupportedPolicy,
-    /// 单张图片允许的最大像素数。
+    /// Maximum number of pixels allowed for a single image.
     pub max_image_pixels: u64,
-    /// 宽松解析模式。
+    /// Lenient parsing mode.
     pub lenient: crate::LenientMode,
-    /// 加密文档的口令。
+    /// Password of an encrypted document.
     pub password: Option<String>,
-    /// 加密文档的证书私钥（32 字节 SM2 标量）。
+    /// Certificate private key of an encrypted document (32-byte SM2 scalar).
     pub certificate_private_key: Option<Vec<u8>>,
 }
 
@@ -67,16 +68,16 @@ impl Default for OfdReadOptions {
     }
 }
 
-/// 不支持特性的处理策略。
+/// Policy for handling unsupported features.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsupportedPolicy {
-    /// 跳过并记录诊断。
+    /// Skip and record a diagnostic.
     Skip,
-    /// 返回错误。
+    /// Return an error.
     Error,
 }
 
-/// 构建一页 Fixed IR。
+/// Builds the Fixed IR of one page.
 pub fn build_page(
     document: &Loaded<Document>,
     page: &Loaded<PageModel>,
@@ -113,8 +114,9 @@ fn build_scene(
 ) -> Result<Scene, OfdError> {
     let common = &document.data.common_data;
 
-    // 模板页：`CommonData/TemplatePage` 按数字 ID 建立索引；页内 `Template`
-    // 用 `TemplateID` 引用，ZOrder 缺省时沿用模板页自身的声明。
+    // Template pages: `CommonData/TemplatePage` is indexed by numeric ID; an in-page `Template`
+    // references it via `TemplateID`, and when ZOrder is absent the template page's own
+    // declaration is used.
     let mut templates = HashMap::new();
     for template in &common.template_pages {
         let id = template.id.to_string();
@@ -173,7 +175,7 @@ fn build_scene(
         builder.diagnostic(
             DiagnosticCode::Geometry,
             page_id.as_deref(),
-            "页面未声明尺寸，使用 A4 默认值",
+            "page declares no size; using the A4 default",
         );
     }
     let mut children = Vec::new();
@@ -217,12 +219,12 @@ fn build_scene(
     })
 }
 
-/// `StBox` 全零等价于「没有声明」（模型用默认值表达属性缺失）。
+/// An all-zero `StBox` is equivalent to "not declared" (the model expresses absent attributes with default values).
 fn declared_box(value: StBox) -> Option<StBox> {
     (value != StBox::default()).then_some(value)
 }
 
-/// 页面区域里声明的物理框。
+/// The physical box declared in the page area.
 fn page_area_box(area: Option<&PageArea>) -> Option<StBox> {
     area.and_then(|area| declared_box(area.physical_box))
 }
@@ -247,7 +249,7 @@ struct FontResource {
     italic: bool,
     serif: bool,
     fixed_width: bool,
-    /// 字体所属的 `Res`，用于读取 `FontFile`。
+    /// The `Res` the font belongs to, used to read `FontFile`.
     res: Rc<Loaded<Res>>,
 }
 
@@ -272,13 +274,13 @@ pub(crate) struct ResolvedFont {
 struct MediaResource {
     format: ImageFormat,
     file: StLoc,
-    /// 媒体资源所属的 `Res`，用于读取 `MediaFile`。
+    /// The `Res` the media resource belongs to, used to read `MediaFile`.
     res: Rc<Loaded<Res>>,
 }
 
 struct ColorSpaceResource {
     kind: String,
-    /// 每分量位数，标准允许 1/2/4/8/16，默认 8。
+    /// Bits per component; the standard allows 1/2/4/8/16, defaulting to 8.
     bits: u32,
     palette: Vec<StArray>,
 }
@@ -329,7 +331,7 @@ impl ResourceSet {
                             .as_ref()
                             .map(|family| family.trim().to_owned())
                             .filter(|family| !family.is_empty()),
-                        // 默认字符集是 unicode，按「缺省」处理以保持旧行为。
+                        // The default charset is unicode; treat it as "absent" to preserve the old behavior.
                         charset: (font.charset != Charset::Unicode)
                             .then(|| font.charset.to_string()),
                         bold: font.bold,
@@ -416,8 +418,9 @@ fn apply_draw_param(style: &mut StrokeStyle, param: &DrawParamResource) {
     }
 }
 
-/// `DrawParam` 的强类型属性始终带 XSD 默认值；与默认值相等时视为「未声明」，
-/// 这样 `Relative` 继承链的行为与旧 `*View` 的属性读取一致。
+/// The strongly typed attributes of `DrawParam` always carry XSD default values; a value equal
+/// to the default is treated as "not declared", so that the `Relative` inheritance chain behaves
+/// like attribute reads in the old `*View` API.
 fn draw_param(param: &DrawParam) -> DrawParamResource {
     DrawParamResource {
         relative: param.relative,
@@ -461,12 +464,12 @@ fn object_common(object: &GraphicObject) -> Option<&GraphicUnit> {
     }
 }
 
-/// 图元诊断里的对象标识；ID 缺省（0）时不带 location。
+/// Object identifier used in graphic unit diagnostics; when the ID is absent (0) no location is attached.
 fn id_label(id: StId) -> Option<String> {
     (id.0 != 0).then(|| id.to_string())
 }
 
-/// 图元对象的 ID。
+/// ID of a graphic unit object.
 fn object_id(object: &GraphicObject) -> StId {
     match object {
         GraphicObject::Text(object) => object.id,
@@ -499,7 +502,7 @@ impl Builder<'_> {
                 self.diagnostic(
                     DiagnosticCode::UnsupportedObject,
                     label.as_deref(),
-                    "对象嵌套过深",
+                    "objects nested too deeply",
                 );
                 return;
             }
@@ -519,15 +522,19 @@ impl Builder<'_> {
         let label = id_label(object_id(object));
         let id = label.as_deref();
         if self.depth > 8 {
-            self.diagnostic(DiagnosticCode::UnsupportedObject, id, "对象嵌套过深");
+            self.diagnostic(
+                DiagnosticCode::UnsupportedObject,
+                id,
+                "objects nested too deeply",
+            );
             return;
         }
         let boxed = common.boundary;
         if boxed.width <= 0.0 || boxed.height <= 0.0 {
             let message = if boxed == StBox::default() {
-                "缺少有效 Boundary"
+                "missing a valid Boundary"
             } else {
-                "Boundary 尺寸无效"
+                "Boundary has invalid size"
             };
             self.diagnostic(DiagnosticCode::Geometry, id, message);
             return;
@@ -537,7 +544,7 @@ impl Builder<'_> {
             Some(values) => match matrix_from_array(values) {
                 Some(matrix) => matrix,
                 None => {
-                    self.diagnostic(DiagnosticCode::Geometry, id, "CTM 无效");
+                    self.diagnostic(DiagnosticCode::Geometry, id, "invalid CTM");
                     return;
                 }
             },
@@ -568,20 +575,20 @@ impl Builder<'_> {
             return;
         }
 
-        // 裁剪区位于对象空间（Boundary 局部坐标），不能被对象 CTM 缩放；
-        // 先做对象空间裁剪，再对内容应用 CTM。
+        // The clipping area lives in object space (Boundary-local coordinates) and must not be
+        // scaled by the object CTM; apply the object-space clip first, then the CTM to the content.
         let mut content = Group::new(ctm);
         content.children = elements;
         let mut clipped = vec![Element::Group(content)];
         for path in self.object_clips(object) {
             clipped = vec![Element::Group(clip_group(path, Matrix::IDENTITY, clipped))];
         }
-        // Boundary 左上角把对象空间映射到父空间。
+        // The top-left corner of the Boundary maps object space into parent space.
         let mut object_group = Group::new(Matrix::translate(boundary.x, boundary.y));
         object_group.opacity = (common.alpha.clamp(0, 255) as f32) / 255.0;
         object_group.children = clipped;
 
-        // Boundary 是父空间中的外接矩形，超出部分裁剪。
+        // The Boundary is the bounding rectangle in parent space; anything outside is clipped.
         let mut wrapper = Group::new(Matrix::IDENTITY);
         wrapper.clip = Some(Arc::new(Clip {
             path: Arc::new(boundary.to_path()),
@@ -609,7 +616,7 @@ impl Builder<'_> {
 
     fn build_image_border(&mut self, object: &ImageObject, boundary: &Rect) -> Option<Element> {
         let border = object.content.border.as_ref()?;
-        // `Border.LineWidth` 缺省为 0.353；显式给 0 表示不画边框。
+        // `Border.LineWidth` defaults to 0.353; an explicit 0 means no border is drawn.
         let line_width = border.line_width;
         if line_width <= 0.0 {
             return None;
@@ -653,7 +660,7 @@ impl Builder<'_> {
         let id = label.as_deref();
         let mut paths = Vec::new();
         for clip in &clips.clips {
-            // 同一 Clip 下的多个 Area 是并集，合并为一条路径；多个 Clip 之间再取交集。
+            // Multiple Areas under the same Clip are a union, merged into one path; multiple Clips are then intersected.
             let mut union = Path::new();
             let mut has_area = false;
             for area in &clip.areas {
@@ -672,7 +679,7 @@ impl Builder<'_> {
                         }
                     }
                     ClipContent::Text(content) => {
-                        // 标准允许文字轮廓作为裁剪区；当前按外接矩形近似。
+                        // The standard allows text outlines as a clipping area; currently approximated by the bounding box.
                         let boxed = content.content.graphic.boundary;
                         if boxed != StBox::default() {
                             let boundary = Rect::new(boxed.x, boxed.y, boxed.width, boxed.height);
@@ -681,7 +688,7 @@ impl Builder<'_> {
                             self.diagnostic(
                                 DiagnosticCode::UnsupportedObject,
                                 id,
-                                "文本裁剪按外接矩形近似",
+                                "text clipping approximated by the bounding box",
                             );
                         }
                     }
@@ -705,7 +712,7 @@ impl Builder<'_> {
         let path = match parse_path_data(data) {
             Some(path) => path,
             None => {
-                self.diagnostic(DiagnosticCode::Geometry, id, "路径数据无效");
+                self.diagnostic(DiagnosticCode::Geometry, id, "invalid path data");
                 return None;
             }
         };
@@ -814,7 +821,7 @@ impl Builder<'_> {
         }))
     }
 
-    /// 把底纹展开为按 XStep/YStep 排列的单元，再按填充路径裁剪。
+    /// Expands the pattern into cells laid out by XStep/YStep, then clips them to the fill path.
     fn build_pattern_fill(
         &mut self,
         boundary: &Rect,
@@ -827,7 +834,7 @@ impl Builder<'_> {
         let width = pattern.width;
         let height = pattern.height;
         if !(width > 0.0 && height > 0.0) {
-            self.diagnostic(DiagnosticCode::Paint, object_id, "底纹尺寸无效");
+            self.diagnostic(DiagnosticCode::Paint, object_id, "pattern has invalid size");
             return None;
         }
         let x_step = pattern.x_step.unwrap_or(width).max(width);
@@ -847,7 +854,7 @@ impl Builder<'_> {
         }
         let count = i128::from(columns) * i128::from(rows);
         if count > 4096 {
-            self.diagnostic(DiagnosticCode::Paint, object_id, "底纹单元过多");
+            self.diagnostic(DiagnosticCode::Paint, object_id, "too many pattern cells");
             return None;
         }
 
@@ -871,7 +878,8 @@ impl Builder<'_> {
             PatternReflect::Row | PatternReflect::RowAndColumn
         ) || matches!(&pattern.reflect_method, PatternReflect::Other(value)
                 if value.eq_ignore_ascii_case("Row") || value.eq_ignore_ascii_case("RowAndColumn"));
-        // 相邻单元在公共边各自抗锯齿会留下白缝，放大单元并向外扩一点制造重叠。
+        // Adjacent cells each antialias on their shared edge, leaving white seams; enlarge the
+        // cell and expand it outward slightly to create overlap.
         const PATTERN_OVERLAP: f64 = 0.25;
         let factor_x = (width + PATTERN_OVERLAP * 2.0) / width;
         let factor_y = (height + PATTERN_OVERLAP * 2.0) / height;
@@ -931,10 +939,11 @@ impl Builder<'_> {
         Some(Element::Group(fill))
     }
 
-    /// 把高洛德/网格高洛德渐变细分并展开为纯色三角形。
+    /// Subdivides Gouraud/mesh Gouraud shading and expands it into flat-colored triangles.
     ///
-    /// vello_cpu/peniko 没有网格渐变画笔，这里按控制点做重心细分，
-    /// 用每个子三角形的平均色近似渐变；网格高洛德按 `VerticesPerRow` 切分四边形。
+    /// vello_cpu/peniko has no mesh-gradient brush, so here we do barycentric subdivision over the
+    /// control points and approximate the shading with the average color of each sub-triangle;
+    /// mesh Gouraud splits quads according to `VerticesPerRow`.
     fn build_mesh_fill(
         &mut self,
         path: &Path,
@@ -1002,7 +1011,11 @@ impl Builder<'_> {
             }
             _ => {
                 if points.len() < 3 {
-                    self.diagnostic(DiagnosticCode::Paint, object_id, "网格渐变控制点不足");
+                    self.diagnostic(
+                        DiagnosticCode::Paint,
+                        object_id,
+                        "mesh gradient has too few control points",
+                    );
                     return None;
                 }
                 for index in 1..points.len() - 1 {
@@ -1015,7 +1028,11 @@ impl Builder<'_> {
         }
         const MAX_TRIANGLES: usize = 8192;
         if triangles.len() > MAX_TRIANGLES {
-            self.diagnostic(DiagnosticCode::Paint, object_id, "网格渐变单元过多");
+            self.diagnostic(
+                DiagnosticCode::Paint,
+                object_id,
+                "too many mesh gradient cells",
+            );
             triangles.truncate(MAX_TRIANGLES);
         }
         let mut depth = 3u8;
@@ -1043,7 +1060,8 @@ impl Builder<'_> {
                 transform: Matrix::IDENTITY,
             }));
         }
-        // 先铺一层原始三角形的平均色，细分块之间的抗锯齿缝隙不会再露出背景色。
+        // Lay down the average color of each original triangle first, so that the antialiasing
+        // gaps between subdivided pieces no longer show the background color.
         for triangle in &triangles {
             fill.children.push(Element::Path(PathElement {
                 path: Arc::new(triangle_path(triangle)),
@@ -1080,17 +1098,17 @@ impl Builder<'_> {
         let label = id_label(object.id);
         let id = label.as_deref();
         if object.content.font.0 == 0 {
-            self.diagnostic(DiagnosticCode::Font, id, "文字缺少 Font");
+            self.diagnostic(DiagnosticCode::Font, id, "text is missing Font");
             return Vec::new();
         }
         let font_id = object.content.font.to_string();
         let size = object.content.size;
         if size == 0.0 {
-            self.diagnostic(DiagnosticCode::Geometry, id, "文字缺少有效 Size");
+            self.diagnostic(DiagnosticCode::Geometry, id, "text is missing a valid Size");
             return Vec::new();
         }
         if size < 0.0 {
-            self.diagnostic(DiagnosticCode::Geometry, id, "字号必须为正");
+            self.diagnostic(DiagnosticCode::Geometry, id, "font size must be positive");
             return Vec::new();
         }
         let mut read_direction = object.content.read_direction;
@@ -1098,7 +1116,7 @@ impl Builder<'_> {
             self.diagnostic(
                 DiagnosticCode::UnsupportedObject,
                 id,
-                format!("不支持的 ReadDirection: {read_direction}"),
+                format!("unsupported ReadDirection: {read_direction}"),
             );
             read_direction = 0;
         }
@@ -1107,7 +1125,7 @@ impl Builder<'_> {
             self.diagnostic(
                 DiagnosticCode::UnsupportedObject,
                 id,
-                format!("不支持的 CharDirection: {char_direction}"),
+                format!("unsupported CharDirection: {char_direction}"),
             );
             char_direction = 0;
         }
@@ -1122,7 +1140,11 @@ impl Builder<'_> {
         let (font, used_fallback) = match self.font(&font_id) {
             Some(resolved) => (resolved.asset, resolved.fallback),
             None => {
-                self.diagnostic(DiagnosticCode::Font, id, "字体资源缺失，文本层使用估算布局");
+                self.diagnostic(
+                    DiagnosticCode::Font,
+                    id,
+                    "font resource is missing; the text layer uses an estimated layout",
+                );
                 let asset = match self.resources.fonts.get(&font_id) {
                     Some(resource) => font_asset(Arc::from(&b""[..]), resource),
                     None => FontAsset::new(Arc::from(&b""[..]), 0),
@@ -1165,7 +1187,7 @@ impl Builder<'_> {
         } else {
             None
         };
-        // Weight >= 600 且没有显式描边时，用细描边模拟粗体。
+        // When Weight >= 600 and there is no explicit stroke, simulate bold with a thin stroke.
         let synthetic_bold = if weight >= 600 && stroke_paint.is_none() {
             fill_paint.as_ref().map(|paint| {
                 let style = StrokeStyle {
@@ -1185,7 +1207,7 @@ impl Builder<'_> {
 
         let mut slots = glyph_slots(object, all_chars.len());
         if used_fallback {
-            // 回退字体无法复用原字体的 glyph index，按 Unicode 重新取字形。
+            // The fallback font cannot reuse the glyph indices of the original font, so look glyphs up again by Unicode.
             slots.fill(None);
         }
 
@@ -1204,8 +1226,8 @@ impl Builder<'_> {
             let mut y = run.y;
             let mut glyphs = Vec::with_capacity(run.chars.len());
             let mut clusters = Vec::with_capacity(run.chars.len());
-            // CGTransform 之后 DeltaX/DeltaY 按“字形”给偏移，而不是按字符；
-            // 多对一/一对多/多对多的簇只消耗一个偏移。
+            // After CGTransform, DeltaX/DeltaY give the offset per "glyph" rather than per character;
+            // a many-to-one/one-to-many/many-to-many cluster consumes only one offset.
             let mut delta_index = 0usize;
             for (index, character) in run.chars.iter().enumerate() {
                 let slot = offset + index;
@@ -1218,8 +1240,9 @@ impl Builder<'_> {
                         .unwrap_or_else(|| vec![0]),
                 };
                 let cluster_glyph_start = glyphs.len() as u32;
-                // DeltaX 是排版者给出的实际步进，必须保留到 IR；否则写出时
-                // 用字体度量重算会累积偏差，行尾被裁剪。
+                // DeltaX is the actual advance supplied by the typesetter and must be preserved into
+                // the IR; otherwise recomputing it from font metrics on write-out accumulates drift
+                // and the end of the line gets clipped.
                 let delta_x = run.delta_x.get(delta_index).copied();
                 let delta_y = run.delta_y.get(delta_index).copied();
                 for glyph_id in slot_glyphs.iter().copied() {
@@ -1351,13 +1374,13 @@ impl Builder<'_> {
             let bytes = match media.res.context().read_res_file(&media.res, &media.file) {
                 Ok(bytes) => Arc::<[u8]>::from(bytes),
                 Err(error) => {
-                    last_error = Some(format!("读取图片失败: {error}"));
+                    last_error = Some(format!("failed to read image: {error}"));
                     continue;
                 }
             };
             let format = detect_image_format(&bytes).unwrap_or(media.format);
             let Some((width, height)) = image_dimensions(&bytes) else {
-                last_error = Some("无法识别图片尺寸".to_owned());
+                last_error = Some("could not determine image dimensions".to_owned());
                 continue;
             };
             let mut asset = ImageAsset::new(format, bytes, width, height);
@@ -1382,7 +1405,7 @@ impl Builder<'_> {
             self.diagnostic(
                 DiagnosticCode::Image,
                 id,
-                last_error.unwrap_or_else(|| "图片资源缺失".to_owned()),
+                last_error.unwrap_or_else(|| "image resource is missing".to_owned()),
             );
             return None;
         };
@@ -1401,19 +1424,27 @@ impl Builder<'_> {
         let label = id_label(object.id);
         let id = label.as_deref();
         if object.content.resource_id.0 == 0 {
-            self.diagnostic(DiagnosticCode::Geometry, id, "复合对象缺少 ResourceID");
+            self.diagnostic(
+                DiagnosticCode::Geometry,
+                id,
+                "composite object is missing ResourceID",
+            );
             return Vec::new();
         }
         let resource_id = object.content.resource_id.to_string();
         let Some(unit) = self.resources.composites.get(&resource_id).cloned() else {
-            self.diagnostic(DiagnosticCode::UnsupportedObject, id, "复合对象资源缺失");
+            self.diagnostic(
+                DiagnosticCode::UnsupportedObject,
+                id,
+                "composite object resource is missing",
+            );
             return Vec::new();
         };
         if !self.composites.insert(resource_id.clone()) {
             self.diagnostic(
                 DiagnosticCode::UnsupportedObject,
                 id,
-                "复合对象存在循环引用",
+                "composite object has a cyclic reference",
             );
             return Vec::new();
         }
@@ -1447,7 +1478,7 @@ impl Builder<'_> {
             self.diagnostic(
                 DiagnosticCode::UnsupportedObject,
                 page_id.as_deref(),
-                "注释索引读取失败".to_owned(),
+                "failed to read the annotation index".to_owned(),
             );
             return;
         };
@@ -1488,11 +1519,11 @@ impl Builder<'_> {
                 self.diagnostic(
                     DiagnosticCode::UnsupportedObject,
                     Some(&id),
-                    format!("模板页缺失: {id}"),
+                    format!("template page is missing: {id}"),
                 );
                 continue;
             };
-            // 页内 `Template` 的 ZOrder 缺省（Background）时沿用模板页声明。
+            // When the in-page `Template` has its default ZOrder (Background), the template page's declaration is used.
             let reference_order = match &reference.z_order {
                 TemplateZOrder::Background => template_page_order(&template.z_order),
                 other => template_ref_order(other),
@@ -1513,7 +1544,7 @@ impl Builder<'_> {
             self.diagnostic(
                 DiagnosticCode::UnsupportedObject,
                 Some(&template.id),
-                "模板页存在循环引用",
+                "template page has a cyclic reference",
             );
             return;
         }
@@ -1661,7 +1692,7 @@ impl Builder<'_> {
         if let Some(param) = self.object_draw_param(common) {
             apply_draw_param(&mut style, &param);
         }
-        // 与 XSD 默认值相等视为「未声明」，保持旧行为（默认宽度 1.0）。
+        // A value equal to the XSD default is treated as "not declared", preserving the old behavior (default width 1.0).
         if common.line_width != DEFAULT_LINE_WIDTH {
             style.width = common.line_width;
         }
@@ -1720,7 +1751,7 @@ impl Builder<'_> {
                 self.diagnostic(
                     DiagnosticCode::Paint,
                     object_id,
-                    format!("暂不支持的颜色形态: {}", color_kind_name(other)),
+                    format!("color kind not supported yet: {}", color_kind_name(other)),
                 );
                 None
             }
@@ -1806,7 +1837,7 @@ fn clip_group(path: Arc<Path>, transform: Matrix, children: Vec<Element>) -> Gro
     group
 }
 
-/// 颜色形态的短名，用于诊断文本。
+/// Short name of a color kind, used in diagnostic text.
 fn color_kind_name(kind: &ColorKind) -> &'static str {
     match kind {
         ColorKind::Pattern(_) => "Pattern",
@@ -1854,11 +1885,11 @@ fn collect_code_runs(object: &TextObject) -> Vec<CodeRun> {
     runs
 }
 
-/// 每个字符位置的显式字形。
+/// Explicit glyphs for each character position.
 ///
-/// - `None`：没有 CGTransform，按字符 CMAP 取字形；
-/// - `Some(vec![])`：被簇覆盖但不产生字形（多对一的后续字符）；
-/// - `Some(glyphs)`：一个或多个字形，整个簇锚定在该编码位置。
+/// - `None`: no CGTransform, take the glyph via the character CMAP;
+/// - `Some(vec![])`: covered by a cluster but produces no glyph (the trailing characters of a many-to-one mapping);
+/// - `Some(glyphs)`: one or more glyphs, with the whole cluster anchored at this code position.
 fn glyph_slots(object: &TextObject, count: usize) -> Vec<Option<Vec<u32>>> {
     let mut slots = vec![None; count];
     for transform in &object.content.cg_transforms {
@@ -1938,7 +1969,7 @@ fn decode_text(text: &str) -> Vec<char> {
             output.push(character);
             continue;
         }
-        // 只有完整的 `\XXXX` 才消费后续字符，否则保留反斜杠本身。
+        // Only a complete `\XXXX` consumes the following characters; otherwise the backslash itself is kept.
         let mut lookahead = chars.clone();
         let mut hex = String::with_capacity(4);
         for _ in 0..4 {
@@ -2064,7 +2095,7 @@ fn parse_path_data(data: &str) -> Option<Path> {
         }
         let command = command?;
         match command {
-            // S 定义子路径起点，M 移动当前点：两者都开始新的子路径。
+            // S defines the start of a subpath and M moves the current point: both begin a new subpath.
             'S' | 'M' => {
                 let x = number(tokens.get(index)?)?;
                 let y = number(tokens.get(index + 1)?)?;
@@ -2119,11 +2150,12 @@ enum PathToken {
     Number(f64),
 }
 
-/// 紧缩路径数据的词法切分。
+/// Lexical tokenization of abbreviated path data.
 ///
-/// 标准只说明 `AbbreviatedData` 是“紧缩的操作符和操作数”，并未规定分隔符；
-/// 真实文件里既有 `M 0 0 L 1 0` 也有 `M 0 0L 1 0`。这里按字母/数字边界扫描，
-/// 同时接受空格、逗号、正负号和小数点作为隐式分隔符。
+/// The standard only says that `AbbreviatedData` is "abbreviated operators and operands" and does
+/// not prescribe separators; real files contain both `M 0 0 L 1 0` and `M 0 0L 1 0`. Here we scan
+/// along letter/digit boundaries and also accept spaces, commas, signs and decimal points as
+/// implicit separators.
 fn tokenize_path(data: &str) -> Option<Vec<PathToken>> {
     let bytes = data.as_bytes();
     let mut tokens = Vec::new();
@@ -2240,10 +2272,11 @@ fn join_from(join: &Join) -> Option<LineJoin> {
     }
 }
 
-/// 解析颜色各通道值并归一化到 `[0, 1]`。
+/// Parses the per-channel color values and normalizes them to `[0, 1]`.
 ///
-/// 标准允许十进制或 `#` 开头的十六进制，取值范围 `[0, 2^BitsPerComponent - 1]`；
-/// 真实文件里也能见到 `0.0 0.0 0.0` 这类已归一化的写法，按小数处理。
+/// The standard allows decimal values or `#`-prefixed hexadecimal values in the range
+/// `[0, 2^BitsPerComponent - 1]`; real files also contain already-normalized forms such as
+/// `0.0 0.0 0.0`, which are treated as decimals.
 fn parse_color_components(value: &str, bits: u32) -> Vec<f64> {
     let bits = bits.clamp(1, 16);
     let max = f64::from((1u32 << bits) - 1);
@@ -2319,8 +2352,9 @@ fn scale_alpha(color: Rgba, alpha: f32) -> Rgba {
     }
 }
 
-/// `MapType` 决定渐变区间内如何重复；`Extend` 的 0/1/2/3 是端点延伸，
-/// 后端只有 Pad/Repeat/Reflect 三种模式，这里对 Direct 统一用 Pad 近似。
+/// `MapType` decides how a gradient interval repeats; `Extend`'s 0/1/2/3 is the end-point
+/// extension. The backend only has the three modes Pad/Repeat/Reflect, so Direct is uniformly
+/// approximated with Pad.
 fn gradient_extend(map_type: &MapType) -> GradientExtend {
     let repeating = match map_type {
         MapType::Repeat => Some(GradientExtend::Repeat),
@@ -2337,8 +2371,9 @@ fn gradient_extend(map_type: &MapType) -> GradientExtend {
     repeating.unwrap_or(GradientExtend::Pad)
 }
 
-/// 非 Direct 时，一个渐变区间的长度由 `MapUnit` 决定（默认轴线长度），
-/// 因此把终点缩放到距起点 `MapUnit` 的位置，再交给后端的 Repeat/Reflect。
+/// For non-Direct modes, the length of one gradient interval is determined by `MapUnit` (the axis
+/// length by default), so the end point is scaled to a distance of `MapUnit` from the start point
+/// and then handed to the backend's Repeat/Reflect.
 fn gradient_axis(
     start: Point,
     end: Point,
@@ -2360,8 +2395,8 @@ fn gradient_axis(
     (start, Point::new(start.x + dx * unit, start.y + dy * unit))
 }
 
-/// Direct 渐变在 `Extend` 不允许延伸的方向上不应继续绘制。
-/// 返回一个裁剪路径，用于把填充限制在渐变实际覆盖的区域内。
+/// A Direct gradient must not keep painting in directions where `Extend` does not allow extension.
+/// Returns a clipping path that restricts the fill to the area the gradient actually covers.
 fn gradient_fill_clip(color: &Color) -> Option<Path> {
     match &color.kind {
         ColorKind::AxialShd(shd) => {
@@ -2474,7 +2509,7 @@ fn radial_clip_path(
         }
         2 => {
             if start_rx <= 0.0 || start_ry <= 0.0 {
-                // 起始半径为 0 时，“起始椭圆之外”就是整个平面。
+                // When the start radius is 0, "outside the start ellipse" is the whole plane.
                 return None;
             }
             const BIG: f64 = 1.0e5;
@@ -2608,7 +2643,8 @@ fn subdivide_mesh(triangle: [MeshPoint; 3], depth: u8, output: &mut Vec<[MeshPoi
     subdivide_mesh([ab, bc, ca], depth - 1, output);
 }
 
-/// 相邻纯色三角形各自抗锯齿会在公共边留下白缝，渲染时把顶点向外扩一点制造重叠。
+/// Adjacent flat-color triangles each antialias on their shared edge, leaving white seams; vertices
+/// are expanded outward slightly at render time to create overlap.
 const MESH_OVERLAP: f64 = 0.25;
 
 fn triangle_path(triangle: &[MeshPoint; 3]) -> Path {
@@ -2819,7 +2855,7 @@ mod tests {
 
     #[test]
     fn parses_numbers_without_separators() {
-        // 负号和小数点作为数字之间的隐式分隔符。
+        // Signs and decimal points act as implicit separators between numbers.
         let path = parse_path_data("M1-2L3.5.5").expect("path");
         assert_eq!(
             path.segments(),
@@ -2874,7 +2910,7 @@ mod tests {
         );
         assert_eq!(end, Point::new(25.0, 0.0));
 
-        // Direct 不使用 MapUnit。
+        // Direct does not use MapUnit.
         let (_, end) = gradient_axis(
             Point::new(0.0, 0.0),
             Point::new(0.0, 100.0),
@@ -2884,7 +2920,7 @@ mod tests {
         assert_eq!(end, Point::new(0.0, 100.0));
     }
 
-    /// `DeltaX`/`DeltaY` 的 `g <次数> <值>` 压缩写法由 `DeltaArray` 解析。
+    /// The `g <count> <value>` compressed form of `DeltaX`/`DeltaY` is parsed by `DeltaArray`.
     #[test]
     fn expands_grouped_deltas() {
         assert_eq!(

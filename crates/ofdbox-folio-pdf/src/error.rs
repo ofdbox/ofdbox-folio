@@ -1,34 +1,34 @@
-//! PDF 适配层错误。
+//! PDF adapter layer errors.
 
 use ofdbox_folio_ir::PageError;
 
-/// PDF 适配层错误。
+/// PDF adapter layer error.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PdfError {
-    /// PDF 结构解析失败。
-    #[error("PDF 解析失败: {0}")]
+    /// PDF structure parsing failed.
+    #[error("PDF parse failed: {0}")]
     Parse(String),
-    /// 文档已加密，需要密码。
-    #[error("PDF 已加密，需要密码")]
+    /// The document is encrypted and requires a password.
+    #[error("PDF is encrypted and requires a password")]
     PasswordRequired,
-    /// 提供的密码不正确。
-    #[error("PDF 密码不正确")]
+    /// The supplied password is incorrect.
+    #[error("PDF password is incorrect")]
     PasswordIncorrect,
-    /// 页面索引越界。
-    #[error("页面索引越界: {0}")]
+    /// Page index out of bounds.
+    #[error("page index out of bounds: {0}")]
     InvalidPage(usize),
-    /// 当前实现不支持的特性。
-    #[error("不支持的 PDF 特性: {0}")]
+    /// A feature the current implementation does not support.
+    #[error("unsupported PDF feature: {0}")]
     Unsupported(String),
-    /// 字体处理失败。
-    #[error("字体处理失败: {0}")]
+    /// Font processing failed.
+    #[error("font processing failed: {0}")]
     Font(String),
-    /// 图片处理失败。
-    #[error("图片处理失败: {0}")]
+    /// Image processing failed.
+    #[error("image processing failed: {0}")]
     Image(String),
-    /// I/O 错误。
-    #[error("I/O 错误: {0}")]
+    /// I/O error.
+    #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
 

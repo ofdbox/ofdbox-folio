@@ -1,4 +1,5 @@
-//! 逐字形字体回退：主字体缺字形时换兜底字体。
+//! Per-glyph font fallback: switch to the fallback font when the primary font
+//! lacks a glyph.
 
 use std::sync::Arc;
 
@@ -8,7 +9,8 @@ use ofdbox_folio_ir::{
 };
 use ofdbox_folio_layout::layout;
 
-/// 指定族名时给拉丁字体，不指定族名时给 CJK 兜底字体。
+/// Return the Latin font when a family name is given, and the CJK fallback font
+/// when none is given.
 struct SplitFonts {
     latin: Arc<[u8]>,
     cjk: Option<Arc<[u8]>>,
@@ -33,7 +35,7 @@ fn read_font(candidates: &[&str]) -> Option<Arc<[u8]>> {
     None
 }
 
-/// 拉丁字体（一定存在）。
+/// Latin font (always present).
 fn latin_font() -> Option<Arc<[u8]>> {
     read_font(&[
         "C:/Windows/Fonts/arial.ttf",
@@ -41,7 +43,7 @@ fn latin_font() -> Option<Arc<[u8]>> {
     ])
 }
 
-/// 带 CJK 字形的字体；机器上没有就跳过测试。
+/// Font with CJK glyphs; skip the test when the machine has none.
 fn cjk_font() -> Option<Arc<[u8]>> {
     read_font(&[
         "C:/Windows/Fonts/simhei.ttf",
@@ -62,7 +64,8 @@ fn missing_glyphs_use_the_fallback_font() {
     };
 
     let mut flow = FlowDocument::new(Metadata::default());
-    // 样式指定 Arial（拉丁字体），文字却是中文：只能靠兜底字体出字形。
+    // The style specifies Arial (a Latin font) but the text is Chinese: glyphs
+    // can only come from the fallback font.
     let mut paragraph = Paragraph::plain(
         "中文字形回退",
         TextStyle {
@@ -81,7 +84,7 @@ fn missing_glyphs_use_the_fallback_font() {
     let fixed = layout(&flow, &mut fonts).expect("layout");
     let page = &fixed.pages[0];
 
-    // 文本层里每个字符都有字形（不是 .notdef）。
+    // Every character in the text layer has a glyph (not .notdef).
     let glyphs: Vec<(char, u32)> = page
         .text
         .items
@@ -98,8 +101,11 @@ fn missing_glyphs_use_the_fallback_font() {
             .iter()
             .find(|(candidate, _)| *candidate == ch)
             .map(|(_, id)| *id)
-            .unwrap_or_else(|| panic!("字符 {ch} 缺失"));
-        assert_ne!(id, 0, "字符 {ch} 应来自兜底字体，而不是 .notdef");
+            .unwrap_or_else(|| panic!("character {ch} is missing"));
+        assert_ne!(
+            id, 0,
+            "character {ch} should come from the fallback font, not .notdef"
+        );
     }
     assert!(
         !fixed
@@ -107,7 +113,7 @@ fn missing_glyphs_use_the_fallback_font() {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == DiagnosticCode::MissingFont),
-        "回退成功时不应报缺字形: {:?}",
+        "a successful fallback should not report missing glyphs: {:?}",
         fixed.report.diagnostics
     );
 }
@@ -117,7 +123,8 @@ fn both_fonts_missing_keeps_text_layer_and_reports() {
     let Some(latin) = latin_font() else {
         return;
     };
-    // 兜底字体也没有这些字符（拉丁字体排中文）。
+    // The fallback font lacks these characters too (laying out Chinese with a
+    // Latin font).
     let mut flow = FlowDocument::new(Metadata::default());
     flow.push(Block::Paragraph(Paragraph::plain(
         "中文",
@@ -129,7 +136,8 @@ fn both_fonts_missing_keeps_text_layer_and_reports() {
     )));
     let mut fonts = SplitFonts { latin, cjk: None };
     let fixed = layout(&flow, &mut fonts).expect("layout");
-    // 文本层仍然保留字符（字形号 0），并有一条缺字形诊断。
+    // The text layer still keeps the characters (glyph id 0) and one missing-glyph
+    // diagnostic is reported.
     let text: String = fixed.pages[0]
         .text
         .items
@@ -143,6 +151,6 @@ fn both_fonts_missing_keeps_text_layer_and_reports() {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == DiagnosticCode::MissingFont),
-        "两者都缺字形时应报诊断"
+        "a diagnostic should be reported when both fonts lack the glyphs"
     );
 }

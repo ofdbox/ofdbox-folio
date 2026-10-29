@@ -1,4 +1,4 @@
-//! 分页控制：keep_with_next、keep_lines_together、孤行/寡行。
+//! Pagination control: keep_with_next, keep_lines_together, widows/orphans.
 
 use std::sync::Arc;
 
@@ -41,7 +41,7 @@ fn paragraph(text: &str) -> Paragraph {
     Paragraph::plain(text, style())
 }
 
-/// 每页的行文字。
+/// The line text of each page.
 fn page_lines(page: &ofdbox_folio_ir::Page) -> Vec<String> {
     page.text
         .lines
@@ -57,7 +57,7 @@ fn page_lines(page: &ofdbox_folio_ir::Page) -> Vec<String> {
         .collect()
 }
 
-/// 某个标记出现在第几页。
+/// Which page a given marker appears on.
 fn page_of(fixed: &ofdbox_folio_ir::FixedDocument, needle: &str) -> Option<usize> {
     fixed
         .pages
@@ -65,7 +65,8 @@ fn page_of(fixed: &ofdbox_folio_ir::FixedDocument, needle: &str) -> Option<usize
         .position(|page| page_lines(page).iter().any(|line| line.contains(needle)))
 }
 
-/// 以一段足够长的文字把页面填到接近页底，再返回文档。
+/// Fill the page to near the bottom with a long enough run of text, then return
+/// the document.
 fn fill_page(flow: &mut FlowDocument, count: usize, prefix: &str) {
     for index in 0..count {
         flow.push(Block::Paragraph(paragraph(&format!(
@@ -79,7 +80,8 @@ fn keep_with_next_keeps_heading_with_its_paragraph() {
     let Some(mut fonts) = fonts() else {
         return;
     };
-    // 扫一遍填充量：只要有一处标题正好落到页尾，没有 keep_with_next 就会被拆开。
+    // Sweep the fill amount: whenever a heading lands exactly at the page bottom,
+    // it would be split off without keep_with_next.
     for fill in 30..=52 {
         let mut flow = FlowDocument::new(Metadata::default());
         fill_page(&mut flow, fill, "填充");
@@ -91,9 +93,12 @@ fn keep_with_next_keeps_heading_with_its_paragraph() {
         )));
 
         let fixed = layout(&flow, &mut fonts).expect("layout");
-        let heading_page = page_of(&fixed, "标题不能孤零零").expect("标题");
-        let body_page = page_of(&fixed, "标题后面的正文").expect("正文");
-        assert_eq!(heading_page, body_page, "填充 {fill}：标题与后续正文应同页");
+        let heading_page = page_of(&fixed, "标题不能孤零零").expect("heading");
+        let body_page = page_of(&fixed, "标题后面的正文").expect("body");
+        assert_eq!(
+            heading_page, body_page,
+            "fill {fill}: the heading and the following body should be on the same page"
+        );
     }
 }
 
@@ -124,7 +129,11 @@ fn keep_lines_together_moves_the_whole_paragraph() {
         })
         .map(|(index, _)| index)
         .collect();
-    assert_eq!(pages.len(), 1, "整段应只出现在一页: {pages:?}");
+    assert_eq!(
+        pages.len(),
+        1,
+        "the whole paragraph should appear on one page only: {pages:?}"
+    );
 }
 
 #[test]
@@ -132,7 +141,8 @@ fn split_paragraph_keeps_at_least_two_lines_per_page() {
     let Some(mut fonts) = fonts() else {
         return;
     };
-    // 填充量按字体不同会有偏差，这里扫一遍，只要出现跨页就检查每页行数。
+    // The fill amount varies with the font, so sweep it here and check the line
+    // count per page as soon as a page break occurs.
     let long = (0..30)
         .map(|index| format!("拆分标记第{index}行文字，用来确认孤行寡行。"))
         .collect::<Vec<_>>()
@@ -159,12 +169,15 @@ fn split_paragraph_keeps_at_least_two_lines_per_page() {
             for count in &per_page {
                 assert!(
                     *count >= 2,
-                    "每页至少两行（填充 {fill}），实际: {per_page:?}"
+                    "at least two lines per page (fill {fill}), got: {per_page:?}"
                 );
             }
         }
     }
-    assert!(checked, "至少要有一组填充量让段落跨页");
+    assert!(
+        checked,
+        "at least one fill amount should make the paragraph span pages"
+    );
 }
 
 #[test]
@@ -176,7 +189,8 @@ fn keep_with_next_chain_moves_together() {
         let mut flow = FlowDocument::new(Metadata::default());
         fill_page(&mut flow, fill, "填充");
 
-        // 两级标题都 keep_with_next：要么一起留在本页，要么一起挪到下一页。
+        // Both heading levels have keep_with_next: either they both stay on this
+        // page or they both move to the next one.
         let mut first = paragraph("一级标题链");
         first.style.keep_with_next = true;
         let mut second = paragraph("二级标题链");
@@ -186,11 +200,17 @@ fn keep_with_next_chain_moves_together() {
         flow.push(Block::Paragraph(paragraph("链尾正文")));
 
         let fixed = layout(&flow, &mut fonts).expect("layout");
-        let first_page = page_of(&fixed, "一级标题链").expect("一级");
-        let second_page = page_of(&fixed, "二级标题链").expect("二级");
-        let body_page = page_of(&fixed, "链尾正文").expect("正文");
-        assert_eq!(first_page, second_page, "填充 {fill}：两级标题应同页");
-        assert_eq!(second_page, body_page, "填充 {fill}：二级标题应与正文同页");
+        let first_page = page_of(&fixed, "一级标题链").expect("level 1");
+        let second_page = page_of(&fixed, "二级标题链").expect("level 2");
+        let body_page = page_of(&fixed, "链尾正文").expect("body");
+        assert_eq!(
+            first_page, second_page,
+            "fill {fill}: both heading levels should be on the same page"
+        );
+        assert_eq!(
+            second_page, body_page,
+            "fill {fill}: the level-2 heading should be on the same page as the body"
+        );
     }
 }
 
@@ -211,7 +231,7 @@ fn measuring_for_keep_with_next_does_not_duplicate_headings() {
     assert_eq!(
         fixed.outline.len(),
         1,
-        "大纲不应重复登记: {:?}",
+        "the outline should not be registered twice: {:?}",
         fixed.outline
     );
 }

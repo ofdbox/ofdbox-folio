@@ -1,10 +1,12 @@
-//! Flow IR 到 DOCX（OPC）包的写出。
+//! Writing Flow IR out as a DOCX (OPC) package.
 //!
-//! 只覆盖 Flow IR 能表达的内容：分节与页面设置、段落与字符格式、制表位、表格、
-//! 行内与浮动图片、页眉页脚、页码字段、超链接、脚注尾注、自动目录域、元数据。
-//! 图片蒙版与附件暂不支持，写了会在文档里留下可解释的缺失（不静默）。
+//! Only covers what Flow IR can express: sections and page setup, paragraph and
+//! character formatting, tab stops, tables, inline and floating images, headers and
+//! footers, page number fields, hyperlinks, footnotes/endnotes, automatic TOC fields and
+//! metadata. Image masks and attachments are not supported yet; writing them leaves a
+//! documented gap in the document (nothing is dropped silently).
 //!
-//! 输出使用固定 ZIP 时间戳，相同输入产生相同字节。
+//! Output uses fixed ZIP timestamps, so identical input produces identical bytes.
 
 use std::collections::HashMap;
 use std::io::{Cursor, Write};
@@ -19,12 +21,12 @@ use ofdbox_folio_ir::{
 
 use crate::DocxError;
 
-/// DOCX 写出选项。
+/// DOCX write options.
 #[derive(Clone, Debug)]
 pub struct DocxWriteOptions {
-    /// 生成工具名称。
+    /// Name of the generating tool.
     pub creator: String,
-    /// 固定 ZIP 时间戳，保证可复现输出。
+    /// Fixed ZIP timestamp, which keeps the output reproducible.
     pub deterministic: bool,
 }
 
@@ -37,7 +39,7 @@ impl Default for DocxWriteOptions {
     }
 }
 
-/// 把 Flow IR 写成 DOCX 包。
+/// Write Flow IR into a DOCX package.
 pub fn write_flow(
     document: &FlowDocument,
     options: &DocxWriteOptions,
@@ -45,7 +47,8 @@ pub fn write_flow(
     Ok(write_flow_with_report(document, options)?.0)
 }
 
-/// 写出 DOCX，并返回写出过程中的降级诊断（例如无法写入的图片蒙版）。
+/// Write a DOCX and return the downgrade diagnostics collected during the write (for
+/// example an image mask that cannot be written).
 pub fn write_flow_with_report(
     document: &FlowDocument,
     options: &DocxWriteOptions,
@@ -53,7 +56,7 @@ pub fn write_flow_with_report(
     Writer::new(document, options).run()
 }
 
-/// 把 Flow IR 写成 DOCX 文件。
+/// Write Flow IR into a DOCX file.
 pub fn write_flow_path(
     document: &FlowDocument,
     path: impl AsRef<std::path::Path>,
@@ -63,7 +66,7 @@ pub fn write_flow_path(
     std::fs::write(path, bytes).map_err(|error| DocxError::Io(error.to_string()))
 }
 
-/// 一条关系。
+/// A relationship.
 struct Relationship {
     id: u32,
     kind: String,
@@ -71,15 +74,15 @@ struct Relationship {
     external: bool,
 }
 
-/// 一个页眉/页脚部件。
+/// A header/footer part.
 struct AreaPart {
     name: String,
-    /// `header` 或 `footer`。
+    /// `header` or `footer`.
     kind: &'static str,
     xml: String,
 }
 
-/// 写出过程中的状态。
+/// State of the write process.
 struct Writer<'a> {
     document: &'a FlowDocument,
     options: &'a DocxWriteOptions,
@@ -87,19 +90,20 @@ struct Writer<'a> {
     relationships: Vec<Relationship>,
     next_rel: u32,
     next_doc_pr: u32,
-    /// 图片资源 → (rId, 包内路径)。
+    /// Image asset → (rId, package path).
     images: HashMap<u64, (u32, String)>,
-    /// 媒体文件：包内路径 + 字节。
+    /// Media files: package path plus bytes.
     media: Vec<(String, Arc<[u8]>)>,
-    /// 页眉页脚部件。
+    /// Header/footer parts.
     areas: Vec<AreaPart>,
     next_area: u32,
-    /// 已登记的书签名。
+    /// Registered bookmark names.
     anchors: HashMap<u64, String>,
     next_anchor: u32,
-    /// 当前分节的正文宽度（twips），表格权重列宽按它换算。
+    /// Body width of the current section (twips); weighted table column widths are
+    /// computed from it.
     content_width: i64,
-    /// 写出过程中的降级诊断。
+    /// Downgrade diagnostics collected during the write.
     report: Report,
 }
 
@@ -125,7 +129,9 @@ impl<'a> Writer<'a> {
 
     fn run(mut self) -> Result<(Vec<u8>, Report), DocxError> {
         if self.document.sections.is_empty() {
-            return Err(DocxError::Structure("没有可分节的内容".to_owned()));
+            return Err(DocxError::Structure(
+                "no content to split into sections".to_owned(),
+            ));
         }
         self.write_body();
         let notes = self.notes_xml()?;
@@ -134,7 +140,7 @@ impl<'a> Writer<'a> {
         Ok((bytes, report))
     }
 
-    // ---- 正文 ----
+    // ---- Body ----
 
     fn write_body(&mut self) {
         let sections = &self.document.sections;
@@ -151,7 +157,7 @@ impl<'a> Writer<'a> {
                 let sect = self.section_props(section.setup, &section.headers, &section.footers);
                 self.body.push_str(&sect);
             } else {
-                // 分节符挂在段落的 pPr 里。
+                // The section break hangs off the paragraph's pPr.
                 let sect = self.section_props(section.setup, &section.headers, &section.footers);
                 self.body
                     .push_str(&format!("<w:p><w:pPr>{sect}</w:pPr></w:p>"));
@@ -213,7 +219,7 @@ impl<'a> Writer<'a> {
         xml
     }
 
-    /// 登记页眉/页脚部件，返回关系 ID。
+    /// Register a header/footer part and return its relationship ID.
     fn area_part(&mut self, kind: &'static str, area: &HeaderFooter) -> u32 {
         let index = self.next_area;
         self.next_area += 1;
@@ -276,7 +282,7 @@ impl<'a> Writer<'a> {
         }
     }
 
-    // ---- 段落与行内 ----
+    // ---- Paragraphs and inlines ----
 
     fn paragraph_xml(&mut self, paragraph: &Paragraph) -> String {
         let mut xml = String::from("<w:p>");
@@ -316,7 +322,7 @@ impl<'a> Writer<'a> {
         if style.keep_lines_together {
             props.push_str("<w:keepLines/>");
         }
-        // 制表位。
+        // Tab stops.
         if !style.tabs.is_empty() {
             let mut tabs = String::from("<w:tabs>");
             for stop in &style.tabs {
@@ -383,7 +389,7 @@ impl<'a> Writer<'a> {
             props.push_str(&ind);
         }
         if let Some(level) = heading {
-            // 标题层级：OOXML 的 outlineLvl 是 0 基。
+            // Heading level: OOXML's outlineLvl is 0-based.
             props.push_str(&format!(
                 "<w:outlineLvl w:val=\"{}\"/>",
                 level.saturating_sub(1)
@@ -543,7 +549,7 @@ impl<'a> Writer<'a> {
         name
     }
 
-    // ---- 表格 ----
+    // ---- Tables ----
 
     fn table_xml(&mut self, table: &ofdbox_folio_ir::Table, out: &mut String) {
         let widths = self.column_widths(table);
@@ -564,7 +570,8 @@ impl<'a> Writer<'a> {
         out.push_str("</w:tbl>");
     }
 
-    /// 表格每列的绝对宽度（twips）：固定列取原值，权重列按正文宽度均分。
+    /// Absolute width of each table column (twips): fixed columns keep their value and
+    /// weighted columns share the body width.
     fn column_widths(&self, table: &ofdbox_folio_ir::Table) -> Vec<i64> {
         let mut widths = Vec::with_capacity(table.columns.len());
         let mut weights = 0_u32;
@@ -642,14 +649,14 @@ impl<'a> Writer<'a> {
                 .last()
                 .is_some_and(|block| matches!(block, Block::Paragraph(_)))
         {
-            // OOXML 要求单元格以段落结尾。
+            // OOXML requires a cell to end with a paragraph.
             content.push_str("<w:p/>");
         }
         out.push_str(&content);
         out.push_str("</w:tc>");
     }
 
-    /// 生成一个 `w:r`，内含行内或浮动图片。
+    /// Build a `w:r` containing an inline or floating image.
     fn drawing_xml(
         &mut self,
         image: ofdbox_folio_ir::AssetId,
@@ -693,7 +700,7 @@ impl<'a> Writer<'a> {
         format!("<w:r>{drawing}</w:r>")
     }
 
-    /// 登记图片资源，返回 (rId, name, extension)。
+    /// Register an image asset and return (rId, name, extension).
     fn image_relationship(
         &mut self,
         asset: ofdbox_folio_ir::AssetId,
@@ -703,14 +710,15 @@ impl<'a> Writer<'a> {
             return Some((*rid, name, ""));
         }
         let image = self.document.resources.image(asset)?;
-        // 有蒙版时先尝试把透明度烘进 PNG；不支持的组合降级为底图并记诊断。
+        // With a mask, first try to bake the transparency into PNG; unsupported
+        // combinations fall back to the base image and record a diagnostic.
         let (format, encoded) = match crate::image::composite_masked_png(image) {
             Some(png) => (ImageFormat::Png, Arc::from(png.as_slice())),
             None => {
                 if image.mask.is_some() {
                     self.report.push(Diagnostic::warning(
                         DiagnosticCode::Image,
-                        "图片蒙版无法写入 DOCX（只支持 PNG 底图 + PNG 蒙版），已写底图",
+                        "Cannot write the image mask into DOCX (only a PNG base with a PNG mask is supported); wrote the base image",
                     ));
                 }
                 (image.format, Arc::clone(&image.encoded))
@@ -733,7 +741,7 @@ impl<'a> Writer<'a> {
         Some((rid, name, extension))
     }
 
-    /// 图片在文档里的显示尺寸（EMU）。
+    /// Display size of the image in the document (EMU).
     fn image_extent(
         &self,
         asset: ofdbox_folio_ir::AssetId,
@@ -759,7 +767,7 @@ impl<'a> Writer<'a> {
         let (image, size, alt) = match floating.block.as_ref() {
             Block::Image(block) => (block.image, block.size, block.alt.as_deref()),
             _ => {
-                // 非图片的浮动块降级成普通块。
+                // A floating block that is not an image degrades to an ordinary block.
                 let mut inner = String::new();
                 self.block_xml(&floating.block, &mut inner);
                 out.push_str(&inner);
@@ -785,7 +793,7 @@ impl<'a> Writer<'a> {
         out.push_str("</w:p>");
     }
 
-    // ---- 目录 ----
+    // ---- Table of contents ----
 
     fn toc_xml(&mut self, toc: &TocBlock, out: &mut String) {
         if let Some(title) = &toc.title
@@ -807,9 +815,9 @@ impl<'a> Writer<'a> {
         ));
     }
 
-    // ---- 注释 ----
+    // ---- Notes ----
 
-    /// 生成 `word/footnotes.xml` 与 `word/endnotes.xml`（各自独立成部件）。
+    /// Build `word/footnotes.xml` and `word/endnotes.xml` (each a separate part).
     fn notes_xml(&mut self) -> Result<(Option<String>, Option<String>), DocxError> {
         let has_footnote = self
             .document
@@ -886,7 +894,7 @@ impl<'a> Writer<'a> {
         Ok((footnotes, endnotes))
     }
 
-    // ---- 打包 ----
+    // ---- Packaging ----
 
     fn package(mut self, notes: (Option<String>, Option<String>)) -> Result<Vec<u8>, DocxError> {
         let content_types = self.content_types_xml(&notes);
@@ -902,7 +910,7 @@ impl<'a> Writer<'a> {
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\"><Application>{}</Application></Properties>",
             esc(&self.options.creator)
         );
-        // 样式关系。
+        // Style relationship.
         let style_rel = self.next_rel_id();
         self.relationships.push(Relationship {
             id: style_rel,
@@ -911,7 +919,8 @@ impl<'a> Writer<'a> {
             target: "styles.xml".to_owned(),
             external: false,
         });
-        // 附件：清单部件 + 原文件部件（DOCX 没有标准附件概念，这是本库的约定）。
+        // Attachments: a manifest part plus the original file parts (DOCX has no
+        // standard attachment concept; this is a convention of this library).
         let attachments: Vec<(String, String, Arc<[u8]>)> = self
             .document
             .attachments
@@ -1149,10 +1158,11 @@ impl<'a> Writer<'a> {
     }
 }
 
-/// OOXML 命名空间（元素上需要声明）。
+/// OOXML namespaces (they must be declared on the element).
 const NAMESPACES: &str = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"";
 
-/// `w:document` 上的命名空间（`wp`/`a`/`pic` 在绘图元素里就地声明）。
+/// Namespaces on `w:document` (`wp`/`a`/`pic` are declared in place on the drawing
+/// elements).
 const NAMESPACES_NODECL: &str = "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"";
 
 fn strip_wrapper(xml: &str) -> &str {
@@ -1273,7 +1283,7 @@ fn core_xml(metadata: &Metadata) -> String {
     xml
 }
 
-/// `relativeFrom` 属性的取值。
+/// Values of the `relativeFrom` attribute.
 fn relative_from(value: PositionFrom) -> &'static str {
     match value {
         PositionFrom::Page => "page",
@@ -1283,7 +1293,7 @@ fn relative_from(value: PositionFrom) -> &'static str {
     }
 }
 
-/// XML 转义。
+/// XML escaping.
 fn esc(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {

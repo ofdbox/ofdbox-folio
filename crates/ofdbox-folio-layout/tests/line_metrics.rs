@@ -1,4 +1,4 @@
-//! 行高与基线按字体度量计算。
+//! Line height and baseline are computed from font metrics.
 
 use std::sync::Arc;
 
@@ -42,7 +42,7 @@ fn single_line_height_matches_font_metrics() {
     let Some(bytes) = font_bytes() else {
         return;
     };
-    let face = ttf_parser::Face::parse(&bytes, 0).expect("解析字体");
+    let face = ttf_parser::Face::parse(&bytes, 0).expect("parse font");
     let units = f64::from(face.units_per_em()).max(1.0);
     let expected_em = (f64::from(face.ascender()) - f64::from(face.descender())
         + f64::from(face.line_gap()))
@@ -59,23 +59,24 @@ fn single_line_height_matches_font_metrics() {
     let fixed = layout(&flow, &mut fonts).expect("layout");
     let page = &fixed.pages[0];
     let baselines: Vec<f64> = page.text.lines.iter().map(|line| line.baseline).collect();
-    assert_eq!(baselines.len(), 2, "应有两行");
+    assert_eq!(baselines.len(), 2, "there should be two lines");
 
     let size_mm = 11.0 * 25.4 / 72.0;
     let line_height = baselines[1] - baselines[0];
     let expected = size_mm * expected_em;
     assert!(
         (line_height - expected).abs() < 0.15,
-        "行高应等于字体度量 {expected:.3}mm，实际 {line_height:.3}mm（1.2 倍字号是 {:.3}）",
+        "line height should equal the font metric {expected:.3}mm, got {line_height:.3}mm (1.2x the font size is {:.3})",
         size_mm * 1.2
     );
 
-    // 基线按 ascent 下移，而不是固定的 0.8 行盒。
+    // The baseline is shifted down by the ascent rather than a fixed 0.8 line
+    // box.
     let first_baseline = baselines[0];
     let expected_baseline = 25.4 + size_mm * ascender_em;
     assert!(
         (first_baseline - expected_baseline).abs() < 0.2,
-        "首行基线应在 {expected_baseline:.3}mm 附近，实际 {first_baseline:.3}mm"
+        "the first baseline should be near {expected_baseline:.3}mm, got {first_baseline:.3}mm"
     );
 }
 
@@ -84,7 +85,7 @@ fn multiple_spacing_scales_font_line_height() {
     let Some(bytes) = font_bytes() else {
         return;
     };
-    let face = ttf_parser::Face::parse(&bytes, 0).expect("解析字体");
+    let face = ttf_parser::Face::parse(&bytes, 0).expect("parse font");
     let units = f64::from(face.units_per_em()).max(1.0);
     let expected_em = (f64::from(face.ascender()) - f64::from(face.descender())
         + f64::from(face.line_gap()))
@@ -111,13 +112,13 @@ fn multiple_spacing_scales_font_line_height() {
     let expected = size_mm * expected_em * 1.5;
     assert!(
         (gap - expected).abs() < 0.2,
-        "1.5 倍行距应为 {expected:.3}mm，实际 {gap:.3}mm"
+        "1.5x line spacing should be {expected:.3}mm, got {gap:.3}mm"
     );
 }
 
 #[test]
 fn document_without_any_font_still_lays_out() {
-    /// 永远返回 None 的字体提供者。
+    /// Font provider that always returns None.
     struct NoFonts;
 
     impl FontProvider for NoFonts {
@@ -130,7 +131,8 @@ fn document_without_any_font_still_lays_out() {
     flow.push(Block::Paragraph(paragraph("第一行")));
     flow.push(Block::Paragraph(paragraph("第二行")));
     let mut fonts = NoFonts;
-    // 没有可用字体时退回经验度量，不 panic、照样产出页面。
+    // With no usable font, fall back to empirical metrics: no panic, pages are
+    // still produced.
     let fixed = layout(&flow, &mut fonts).expect("layout");
     assert_eq!(fixed.pages.len(), 1);
     assert!(fixed.report.diagnostics.iter().any(|diagnostic| {

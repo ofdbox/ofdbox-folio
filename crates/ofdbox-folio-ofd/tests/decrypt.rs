@@ -1,4 +1,4 @@
-//! 加密 OFD 的读取测试。
+//! Reading tests for encrypted OFD files.
 
 use std::io::{Cursor, Write};
 
@@ -79,7 +79,7 @@ fn encrypted_without_credentials_is_rejected() {
         Err(error) => error,
     };
     assert!(
-        error.to_string().contains("加密"),
+        error.to_string().contains("encrypted"),
         "unexpected error: {error}"
     );
 }

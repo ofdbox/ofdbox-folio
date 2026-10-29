@@ -1,29 +1,31 @@
-//! 固定版式几何类型。
+//! Fixed-layout geometry types.
 //!
-//! Fixed IR 的长度统一为毫米，坐标原点在页面左上角，x 向右、y 向下。
-//! 旋转已经由前端应用到内容，`Rotation` 仅保留原始页面信息供导出使用。
+//! Fixed IR lengths are uniformly in millimeters; the coordinate origin is at the
+//! top-left corner of the page, with x pointing right and y pointing down.
+//! Rotation has already been applied to content by the front end; `Rotation` only
+//! retains the original page information for use by export.
 
-/// 页面上的一个点，单位毫米。
+/// A point on the page, in millimeters.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Point {
-    /// 横坐标。
+    /// Horizontal coordinate.
     pub x: f64,
-    /// 纵坐标。
+    /// Vertical coordinate.
     pub y: f64,
 }
 
 impl Point {
-    /// 创建点。
+    /// Create a point.
     pub const fn new(x: f64, y: f64) -> Self {
         Self { x, y }
     }
 
-    /// 坐标是否都是有限值。
+    /// Whether both coordinates are finite.
     pub fn is_finite(self) -> bool {
         self.x.is_finite() && self.y.is_finite()
     }
 
-    /// 到另一点的欧氏距离。
+    /// Euclidean distance to another point.
     pub fn distance(self, other: Self) -> f64 {
         let dx = self.x - other.x;
         let dy = self.y - other.y;
@@ -31,47 +33,47 @@ impl Point {
     }
 }
 
-/// 尺寸，单位毫米。
+/// A size, in millimeters.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Size {
-    /// 宽度。
+    /// Width.
     pub width: f64,
-    /// 高度。
+    /// Height.
     pub height: f64,
 }
 
 impl Size {
-    /// 创建尺寸。
+    /// Create a size.
     pub const fn new(width: f64, height: f64) -> Self {
         Self { width, height }
     }
 
-    /// 宽或高是否为零。
+    /// Whether the width or height is zero.
     pub fn is_empty(self) -> bool {
         self.width == 0.0 || self.height == 0.0
     }
 
-    /// 尺寸是否都是有限值且非负。
+    /// Whether both dimensions are finite and non-negative.
     pub fn is_valid(self) -> bool {
         self.width.is_finite() && self.height.is_finite() && self.width >= 0.0 && self.height >= 0.0
     }
 }
 
-/// 轴对齐矩形，单位毫米。
+/// An axis-aligned rectangle, in millimeters.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rect {
-    /// 左上角横坐标。
+    /// Left edge coordinate.
     pub x: f64,
-    /// 左上角纵坐标。
+    /// Top edge coordinate.
     pub y: f64,
-    /// 宽度。
+    /// Width.
     pub width: f64,
-    /// 高度。
+    /// Height.
     pub height: f64,
 }
 
 impl Rect {
-    /// 创建矩形。
+    /// Create a rectangle.
     pub const fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
         Self {
             x,
@@ -81,29 +83,29 @@ impl Rect {
         }
     }
 
-    /// 从两个对角点创建矩形。
+    /// Create a rectangle from two opposite corner points.
     pub fn from_points(a: Point, b: Point) -> Self {
         let x = a.x.min(b.x);
         let y = a.y.min(b.y);
         Self::new(x, y, (a.x - b.x).abs(), (a.y - b.y).abs())
     }
 
-    /// 右边界。
+    /// Right edge.
     pub fn right(self) -> f64 {
         self.x + self.width
     }
 
-    /// 下边界。
+    /// Bottom edge.
     pub fn bottom(self) -> f64 {
         self.y + self.height
     }
 
-    /// 中心点。
+    /// Center point.
     pub fn center(self) -> Point {
         Point::new(self.x + self.width / 2.0, self.y + self.height / 2.0)
     }
 
-    /// 是否包含点。
+    /// Whether the rectangle contains a point.
     pub fn contains(self, point: Point) -> bool {
         point.x >= self.x
             && point.x <= self.right()
@@ -111,7 +113,7 @@ impl Rect {
             && point.y <= self.bottom()
     }
 
-    /// 是否与另一个矩形相交。
+    /// Whether the rectangle intersects another rectangle.
     pub fn intersects(self, other: Self) -> bool {
         self.x <= other.right()
             && other.x <= self.right()
@@ -119,7 +121,7 @@ impl Rect {
             && other.y <= self.bottom()
     }
 
-    /// 坐标是否都是有限值。
+    /// Whether all coordinates are finite.
     pub fn is_finite(self) -> bool {
         self.x.is_finite()
             && self.y.is_finite()
@@ -127,7 +129,7 @@ impl Rect {
             && self.height.is_finite()
     }
 
-    /// 转换为矩形路径，方向为左上、右上、右下、左下。
+    /// Convert to a rectangular path, going top-left, top-right, bottom-right, bottom-left.
     pub fn to_path(self) -> crate::path::Path {
         let mut path = crate::path::Path::new();
         path.move_to(Point::new(self.x, self.y));
@@ -139,27 +141,27 @@ impl Rect {
     }
 }
 
-/// 二维仿射矩阵。
+/// A two-dimensional affine matrix.
 ///
-/// 变换公式为 `x' = a*x + c*y + e`、`y' = b*x + d*y + f`。
+/// The transform formula is `x' = a*x + c*y + e`, `y' = b*x + d*y + f`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Matrix {
-    /// x 方向的 x 系数。
+    /// x coefficient for x.
     pub a: f64,
-    /// y 方向的 x 系数。
+    /// x coefficient for y.
     pub b: f64,
-    /// x 方向的 y 系数。
+    /// y coefficient for x.
     pub c: f64,
-    /// y 方向的 y 系数。
+    /// y coefficient for y.
     pub d: f64,
-    /// x 方向平移。
+    /// Translation along x.
     pub e: f64,
-    /// y 方向平移。
+    /// Translation along y.
     pub f: f64,
 }
 
 impl Matrix {
-    /// 单位矩阵。
+    /// Identity matrix.
     pub const IDENTITY: Self = Self {
         a: 1.0,
         b: 0.0,
@@ -169,28 +171,28 @@ impl Matrix {
         f: 0.0,
     };
 
-    /// 创建矩阵。
+    /// Create a matrix.
     pub const fn new(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> Self {
         Self { a, b, c, d, e, f }
     }
 
-    /// 平移矩阵。
+    /// Translation matrix.
     pub const fn translate(tx: f64, ty: f64) -> Self {
         Self::new(1.0, 0.0, 0.0, 1.0, tx, ty)
     }
 
-    /// 缩放矩阵。
+    /// Scaling matrix.
     pub const fn scale(sx: f64, sy: f64) -> Self {
         Self::new(sx, 0.0, 0.0, sy, 0.0, 0.0)
     }
 
-    /// 旋转矩阵，角度为弧度。
+    /// Rotation matrix; the angle is in radians.
     pub fn rotate(radians: f64) -> Self {
         let (sin, cos) = radians.sin_cos();
         Self::new(cos, sin, -sin, cos, 0.0, 0.0)
     }
 
-    /// 先应用 `self`，再应用 `other`。
+    /// Apply `self` first, then `other`.
     pub fn then(self, other: Self) -> Self {
         Self {
             a: other.a * self.a + other.c * self.b,
@@ -202,12 +204,12 @@ impl Matrix {
         }
     }
 
-    /// 变换一个点。
+    /// Transform a point.
     pub fn apply(self, point: Point) -> Point {
         self.transform_point(point)
     }
 
-    /// 变换一个点。
+    /// Transform a point.
     pub fn transform_point(self, point: Point) -> Point {
         Point::new(
             self.a * point.x + self.c * point.y + self.e,
@@ -215,7 +217,7 @@ impl Matrix {
         )
     }
 
-    /// 变换矩形，返回四个角点的包围盒。
+    /// Transform a rectangle, returning the bounding box of the four corners.
     pub fn transform_rect(self, rect: Rect) -> Rect {
         let p0 = self.transform_point(Point::new(rect.x, rect.y));
         let p1 = self.transform_point(Point::new(rect.right(), rect.y));
@@ -228,7 +230,7 @@ impl Matrix {
         Rect::new(min_x, min_y, max_x - min_x, max_y - min_y)
     }
 
-    /// 求逆矩阵；不可逆时返回 `None`。
+    /// Compute the inverse matrix; returns `None` if not invertible.
     pub fn invert(self) -> Option<Self> {
         let det = self.a * self.d - self.b * self.c;
         if !det.is_finite() || det.abs() < f64::EPSILON {
@@ -244,7 +246,7 @@ impl Matrix {
         })
     }
 
-    /// 矩阵元素是否都是有限值。
+    /// Whether all matrix elements are finite.
     pub fn is_finite(self) -> bool {
         self.a.is_finite()
             && self.b.is_finite()
@@ -261,27 +263,27 @@ impl Default for Matrix {
     }
 }
 
-/// 页面的顺时针旋转。
+/// Clockwise page rotation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Rotation {
-    /// 不旋转。
+    /// No rotation.
     #[default]
     None,
-    /// 顺时针 90 度。
+    /// 90 degrees clockwise.
     Cw90,
-    /// 顺时针 180 度。
+    /// 180 degrees clockwise.
     Cw180,
-    /// 顺时针 270 度。
+    /// 270 degrees clockwise.
     Cw270,
 }
 
 impl Rotation {
-    /// 旋转 90 或 270 度时，宽高互换。
+    /// Whether width and height swap at 90 or 270 degrees.
     pub const fn swaps_axes(self) -> bool {
         matches!(self, Self::Cw90 | Self::Cw270)
     }
 
-    /// 应用旋转后的显示尺寸。
+    /// The display size after applying the rotation.
     pub const fn apply_to_size(self, size: Size) -> Size {
         if self.swaps_axes() {
             Size::new(size.height, size.width)

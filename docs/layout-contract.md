@@ -1,231 +1,245 @@
-# Flow → Fixed 布局契约（A0）
+# Flow → Fixed Layout Contract (A0)
 
-更新日期：2026-10-24
-范围：`ofdbox-folio-layout` 的输入输出边界、排版规则与 DOCX 映射范围。本文冻结
-A1 实现的范围；标记「A2」的条目留给后续里程碑。
+Updated: 2026-10-24
+Scope: the input/output boundary, typesetting rules, and DOCX mapping coverage of `ofdbox-folio-layout`. This document freezes the scope of
+the A1 implementation; items marked "A2" are left to later milestones.
 
-## 1. 方向与职责
+## 1. Direction and responsibilities
 
-- 只提供 `FlowDocument → FixedDocument`，不反向、不提供 Fixed IR 编辑 API。
-- 布局只消费 IR：不解析文件、不访问文件系统、不渲染位图。字体通过
-  `FontProvider` 注入，容器与格式差异留在各自的适配层。
-- 布局结果必须是确定的：相同输入 + 相同字体字节 → 相同输出字节。
-- 内建诊断走 `Report`：缺字体、无法断行、图片超宽、字段无法解析等都要记录，
-  不允许静默产生错误坐标。
+- Only `FlowDocument → FixedDocument` is provided; no reverse direction and no Fixed IR editing API.
+- Layout consumes IR only: it does not parse files, access the file system, or render bitmaps. Fonts are injected via
+  `FontProvider`, and container and format differences stay in their respective adapter layers.
+- Layout results must be deterministic: same input + same font bytes → same output bytes.
+- Built-in diagnostics go through `Report`: missing fonts, lines that cannot be broken, oversized images, fields that
+  cannot be resolved, etc. must all be recorded; silently producing wrong coordinates is not allowed.
 
-## 2. 单位与坐标
+## 2. Units and coordinates
 
-| 项目 | 约定 |
+| Item | Convention |
 | --- | --- |
-| 输入长度 | twip（1/1440 英寸） |
-| 输出长度 | 毫米（`f64`） |
-| 原点 | 页面左上角，y 向下 |
-| 文本 | 字形坐标以基线为原点；`Glyph::x/y` 为局部坐标，`advance` 为到下一字形的步进 |
-| 页面盒 | `PageInfo.media_box == crop_box == (0, 0, w, h)`，`rotation = None` |
+| Input length | twip (1/1440 inch) |
+| Output length | millimeter (`f64`) |
+| Origin | top-left corner of the page, y down |
+| Text | glyph coordinates are relative to the baseline; `Glyph::x/y` are local coordinates and `advance` is the step to the next glyph |
+| Page box | `PageInfo.media_box == crop_box == (0, 0, w, h)`, `rotation = None` |
 
-换算：`mm = twip * 25.4 / 1440`。布局内部用毫米浮点计算，只在写回 IR 时取整到
-`1e-4 mm`，避免累积误差。
+Conversion: `mm = twip * 25.4 / 1440`. Layout computes internally with millimeter floats and rounds to
+`1e-4 mm` only when writing back to IR, to avoid accumulated error.
 
-## 3. 盒模型
+## 3. Box model
 
 ```text
-页面 ─ 页边距 ─► 内容区（宽 W）
-  块级元素依次纵向排布：段落 / 图片 / 分页符
-  段落 = 左缩进 + 可用宽度 + 右缩进
-  行盒 = 行内盒水平排列，行高由行距规则决定
+page ─ margins ─► content area (width W)
+  block-level elements are laid out vertically in order: paragraph / image / page break
+  paragraph = left indent + available width + right indent
+  line box = inline boxes arranged horizontally; the line height is determined by the line-spacing rule
 ```
 
-- 内容区宽度 `W = page.width - margins.left - margins.right`（负值按 0 处理并记诊断）。
-- 段落可用宽度 `Wp = W - left_indent - right_indent`；首行额外减去 `first_line_indent`。
-- 竖直游标 `y` 从 `margins.top` 开始；`y + 行高 > page.height - margins.bottom`
-  时换页（A1 不做页脚占位）。
-- 段前/段后间距：只在同一页内生效；换页丢弃段前间距（避免页首空白）。
+- Content area width `W = page.width - margins.left - margins.right` (negative values are treated as 0 and recorded as a diagnostic).
+- Paragraph available width `Wp = W - left_indent - right_indent`; the first line additionally subtracts `first_line_indent`.
+- The vertical cursor `y` starts at `margins.top`; when `y + line height > page.height - margins.bottom`,
+  a page break occurs (A1 does not reserve space for footers).
+- Space before/after: only takes effect within the same page; space-before is dropped at a page break (to avoid a blank top of page).
 
-## 4. 行布局
+## 4. Line layout
 
-1. 把段落的行内内容展开成「测量单元」序列：每个字符一个单元，记录宽度、样式、
-   来源 run 索引；行内图片是一个不可断单元，制表符是宽度为 0 的可断单元。
-2. 测量：`glyph_index(ch)` 取不到字形时记诊断并按 .notdef 宽度处理；宽度 =
-   `advance_units * size / units_per_em`，不含字距调整（A1 不做 kerning/ligature）。
-3. 断行优先级：
-   - 显式换行 `\n` 强制断行；
-   - CJK（含全角标点）在任意字符之间可断；
-   - 拉丁文本在空格、连字符后可断，空格悬挂在行尾、不计入行宽；
-   - 禁止行首字符（`，。、；：？！）》」』%` 等）向前吞一个字符；禁止行尾字符
-     （`（《「『`）向后带一个字符；
-   - 单个单元宽度超过行宽时独占一行、不缩放也不溢出裁剪（A2 再定缩放规则）。
-4. 行高（毫米）：
-   - `LineSpacing::Single` → `1.2 * 行内最大字号`；
-   - `Multiple(f)` → `f * 1.2 * 最大字号`；
-   - `Exact(t)` → `t`；
-   - `AtLeast(t)` → `max(t, 1.2 * 最大字号)`。
-   基线在行盒内位置：`baseline = top + 0.8 * 最大字号`（首行不再额外抬高）。
-5. 制表符：测量阶段宽度记 0，落版时按当前 x 找下一个制表位（ParaStyle::tabs，
-   位置相对版心左边界），按 Left/Center/Right/Decimal 摆放制表符之后的文字；
-   没有显式制表位时前进 12.5 mm 的整数倍格点。前导符（点线/虚线/实线）用一条
-   描边线画在基线上，跟随文字颜色。
-6. 对齐：
-   - Left/Center/Right 按整行宽度平移；
-   - Justify 优先拉伸行内空格；整行没有空格时把余量均摊到字间（中文行）；
-     最后一行按 Left；
-   - 拉伸后允许单词间距为负到 0（不压缩字形）。
+1. Expand the paragraph's inline content into a sequence of "measurement units": one unit per character, recording width,
+   style, and source run index; an inline image is a single unbreakable unit, and a tab is a zero-width breakable unit.
+2. Measurement: when `glyph_index(ch)` cannot resolve a glyph, record a diagnostic and use the .notdef width; width =
+   `advance_units * size / units_per_em`, without kerning adjustments (A1 does no kerning/ligatures).
+3. Line-breaking priority:
+   - an explicit newline `\n` forces a break;
+   - CJK (including full-width punctuation) may break between any characters;
+   - Latin text may break after spaces and hyphens, with the space hanging at the end of the line and not counted in the line width;
+   - line-start prohibition characters (`，。、；：？！）》」』%`, etc.) pull one preceding character forward; line-end
+     prohibition characters (`（《「『`) drag one following character back;
+   - when a single unit is wider than the line, it occupies a line of its own without scaling or overflow clipping (scaling rules are deferred to A2).
+4. Line height (mm):
+   - `LineSpacing::Single` → `1.2 * max font size in line`;
+   - `Multiple(f)` → `f * 1.2 * max font size`;
+   - `Exact(t)` → `t`;
+   - `AtLeast(t)` → `max(t, 1.2 * max font size)`.
+   Baseline position within the line box: `baseline = top + 0.8 * max font size` (the first line is not raised further).
+5. Tabs: width is recorded as 0 during measurement; during placement, the next tab stop is found from the current x (ParaStyle::tabs,
+   positions relative to the left edge of the text block), and the text after the tab is placed according to Left/Center/Right/Decimal;
+   with no explicit tab stop, advance on integer multiples of a 12.5 mm grid. Leaders (dot/dash/solid) are drawn as one
+   stroked line on the baseline, following the text color.
+6. Alignment:
+   - Left/Center/Right shift the whole line;
+   - Justify stretches inline spaces first; when the whole line has no spaces, the remainder is distributed evenly between
+     characters (for Chinese lines); the last line is aligned Left;
+   - after stretching, word spacing may range from negative to 0 (glyphs are not compressed).
 
-## 5. 分页与分栏
+## 5. Pagination and columns
 
-- 段落按行跨页：一行放不下就换栏/换页续排；默认保证每页至少两行（孤行/寡行控制，等价 Word 的 widow/orphan）。
-- 分栏：`PageSetup::columns` 与 `column_gap` 把版心等分成 N 栏；正文先灌满当前栏，
-  再流到下一栏，最后一栏排满才换页。页眉页脚仍横跨整页宽度。
-- `Block::PageBreak` 立即换页；页尾空白保留。
-- 段落在页首时省略 `space_before`。
-- 表格按行跨页：整行放不下就换页，换页后重排 `Table::header_rows` 指定的表头行。
-- 表格行内拆分：一行高于本页剩余空间时，单元格内容按行排到页底，剩余部分在下一页
-  继续（每页都重排表头），并记 `DiagnosticCode::Geometry` 诊断。
-- A1 未实现的块（`Toc`/未知类型）跳过并记 `DiagnosticCode::Geometry` 诊断。
-- 分页控制：keep_with_next（含连续链）与 keep_lines_together 已实现；分页时的孤行/寡行按「每页至少两行」处理。
+- Paragraphs break across pages by line: a line that does not fit moves to the next column/page to continue; by default at least
+  two lines are guaranteed per page (widow/orphan control, equivalent to Word's widow/orphan).
+- Columns: `PageSetup::columns` and `column_gap` divide the text block evenly into N columns; the body fills the current column first,
+  then flows to the next column, and only starts a new page when the last column is full. Headers and footers still span the full page width.
+- `Block::PageBreak` breaks the page immediately; trailing whitespace on the page is preserved.
+- A paragraph at the top of a page omits `space_before`.
+- Tables break across pages by row: a row that does not fit moves to the next page, and after the break the header rows specified by
+  `Table::header_rows` are laid out again.
+- Splitting within a table row: when a row is taller than the remaining space on the page, cell content is laid out down to the page
+  bottom and the remainder continues on the next page (with header rows laid out again on each page), and a
+  `DiagnosticCode::Geometry` diagnostic is recorded.
+- Blocks not implemented in A1 (`Toc`/unknown types) are skipped and a `DiagnosticCode::Geometry` diagnostic is recorded.
+- Pagination control: keep_with_next (including chained keep_with_next) and keep_lines_together are implemented; widows/orphans at page
+  breaks are handled as "at least two lines per page".
 
-### 5.1 表格
+### 5.1 Tables
 
-- 列宽：`ColumnWidth::Twips` 固定值，`ColumnWidth::Weight` 按剩余宽度分配；总和超过
-  版心时等比缩到版心宽。
-- 合并单元格：`Cell.span`（gridSpan）占多列宽度，`Cell.v_merge`（vMerge）的延续格内容为空、
-  由上方起始格覆盖并跳过顶部边框；纵向合并的高度按起始格所在行计算（不跨行撑高，已知近似）。
-- 单元格：内容在「列宽 − 左右内边距」的子框里排版，子框以页底为下边界；行高取各
-  单元格内容高度与 `Row::height` 的较大值（固定行高只在整行排完时生效）。
-- 边框：每个单元格画四条边。表格最外圈用 `TableBorders::outer`，内部横线用
-  `horizontal`、竖线用 `vertical`；相邻单元格的公共边会重画一次（同色同宽，视觉无差异）。
-- 单元格内可以有嵌套表格，递归使用同一套子框逻辑。
+- Column widths: `ColumnWidth::Twips` is a fixed value, and `ColumnWidth::Weight` distributes the remaining width; when the total exceeds
+  the text block width, all widths scale proportionally down to the text block width.
+- Merged cells: `Cell.span` (gridSpan) occupies the width of multiple columns; continuation cells of `Cell.v_merge` (vMerge) have empty
+  content, are covered by the starting cell above, and skip the top border; the height of a vertical merge is computed from the row
+  containing the starting cell (rows are not stretched across boundaries; a known approximation).
+- Cells: content is laid out in a sub-box of "column width − left/right padding", with the page bottom as the lower boundary; row height
+  is the larger of each cell's content height and `Row::height` (a fixed row height only takes effect once the whole row has been laid out).
+- Borders: each cell draws four sides. The outermost ring of the table uses `TableBorders::outer`, internal horizontal lines use
+  `horizontal`, and vertical lines use `vertical`; shared edges between adjacent cells are drawn again (same color and width, so
+  there is no visual difference).
+- Cells may contain nested tables, recursively using the same sub-box logic.
 
-### 5.2 页眉页脚
+### 5.2 Headers and footers
 
-- 页眉从上边距上方的 `header_distance` 处向下排，底边界是上边距；内容超出上边距时
-  记诊断（会与正文重叠）。
-- 页脚先量高度，再贴着「页高 − `footer_distance`」向上排，因此页脚内容多高都贴底。
-- 页眉页脚取当前分节的 `HeaderFooterSet`：分节首页用 `first`（存在时），偶数页用
-  `even`（存在时），其余用 `default`。
-- 页眉页脚里的 `PAGE`/`NUMPAGES` 字段与正文用同一套页码；引用总页数时整篇排两遍，
-  第二遍代入第一遍的页数。
-- 只有正文的页面才产出：空页（例如连续两个分页符）不留空白页，也不单独产出页眉页脚。
+- The header is laid out downward starting at `header_distance` above the top margin, with the top margin as its lower boundary; when content exceeds
+  the top margin, a diagnostic is recorded (it will overlap the body).
+- The footer's height is measured first, then it is laid out upward against "page height − `footer_distance`", so the footer is pinned to
+  the bottom no matter how tall its content is.
+- Headers and footers use the `HeaderFooterSet` of the current section: the section's first page uses `first` (when present), even pages use
+  `even` (when present), and the rest use `default`.
+- `PAGE`/`NUMPAGES` fields inside headers and footers use the same page numbering as the body; when the total page count is referenced, the whole
+  document is laid out twice, with the second pass substituting the page count from the first.
+- Only pages with body content are produced: empty pages (for example, two consecutive page breaks) do not leave a blank page
+  and do not produce headers or footers on their own.
 
-### 5.3 自动目录
+### 5.3 Automatic table of contents
 
-- `Block::Toc` 展开成「标题 + 每条一个段落」：条目文字、制表符、页码。段落按层级
-  左缩进，右制表位定在版心右边界，页码因此右对齐。
-- 条目与页码来自上一遍排版登记的标题；`layout_with` 先空跑一遍拿到标题页码，
-  再代入目录重排，直到目录条目与总页数稳定（最多 4 遍）。
-- 目录条目文字用的是排版时生成的段落，字体在 `prepare_fonts` 里按全文字符集预解析，
-  目录标题的字符也会被算进去。
-- 条目与页码之间是一个制表符：右制表位放在版心右边界，TocStyle::dot_leader
-  打开时用点线前导符填满空隙（与 Word 的目录观感一致）。
+- `Block::Toc` expands into "a heading + one paragraph per entry": entry text, tab, page number. Paragraphs are left-indented
+  by level, and the right tab stop is set at the right edge of the text block, so page numbers are right-aligned.
+- Entries and page numbers come from headings registered in the previous layout pass; `layout_with` first runs an empty pass to obtain
+  heading page numbers, then substitutes them into the TOC and re-lays out until the TOC entries and total page count are stable (at most 4 passes).
+- TOC entry text uses the paragraphs generated during layout; fonts are pre-resolved in `prepare_fonts` against the full document
+  character set, which also includes characters from TOC headings.
+- Between the entry and the page number is a tab: the right tab stop sits at the right edge of the text block, and when TocStyle::dot_leader
+  is enabled a dot leader fills the gap (matching the look of Word's TOC).
 
-### 5.4 脚注与尾注
+### 5.4 Footnotes and endnotes
 
-- `Inline::Note` 是正文里的引用；排版时按出现顺序编号（脚注 1、2…，尾注 1、2…），
-  标记用小号数字排在同一行里。
-- 脚注：引用所在行落下后，按全页宽度测量注释正文高度，立刻抬高本页正文的下边界
-  （`bottom_inset`），并把注释正文记到待排队列；页面结束时在页脚之上、正文之下
-  画一条三分之一宽的短横线，再按编号顺序排注释（`NOTE_INDENT` 左缩进）。
-- 注释把正文挤出页底时，已经落下的那一行不回退，后续行自动换栏/换页。
-- 尾注：不占页底，收集到文档末尾单独起一页排，先一行「尾注」标题再按顺序排。
-- 找不到注释正文时记 `DiagnosticCode::Unsupported` 诊断并跳过。
+- `Inline::Note` is the reference in the body; during layout it is numbered in order of appearance (footnotes 1, 2…, endnotes 1, 2…),
+  and the mark is set as a small number in the same line.
+- Footnotes: after the line containing the reference has been placed, the note body is measured across the full page width, the lower boundary
+  of the body on this page is raised immediately (`bottom_inset`), and the note body is queued; at page end, a short horizontal rule one
+  third of the width is drawn above the footer and below the body, and then the notes are laid out in numeric order (with a `NOTE_INDENT` left indent).
+- When a note pushes body content past the bottom of the page, the line already placed does not roll back, and subsequent lines
+  automatically move to the next column/page.
+- Endnotes: they do not occupy the page bottom; they are collected at the end of the document and laid out starting on a separate page, first with
+  an "Endnotes" heading line and then in order.
+- When the note body cannot be found, a `DiagnosticCode::Unsupported` diagnostic is recorded and the note is skipped.
 
-### 5.5 浮动对象
+### 5.5 Floating objects
 
-- `Block::Floating` 按页面坐标绝对定位（相对版心左上角，毫米），不参与正文游标，
-  不分页、不换栏。
-- 位置基准取 `position_from`：`Page` 相对页面原点、`Margin`/`Column` 相对版心（单栏时相同）、`Paragraph` 暂按版心处理（已知近似）。
-- 宽度取 `FloatingObject::width`，缺省占满版心；内容按该宽度在有界框里排（不分页）。
-- 绕排：
-  - `WrapMode::None`：直接覆盖，正文不变；
-  - `WrapMode::TopBottom`：正文从对象下方继续；
-  - `WrapMode::Square`：与对象垂直重叠的段落**逐行**绕排：每行按当时的可用宽度重新断行，
-    行落在绕排带里就让到对象另一侧，越过对象后自动恢复整宽；对象在右半页时缩右边距；
-- 嵌在表格单元格或页眉页脚里的浮动对象按普通块处理并记诊断。
+- `Block::Floating` is absolutely positioned in page coordinates (relative to the top-left corner of the text block, in mm), does not participate
+  in the body cursor, and does not paginate or change columns.
+- The position reference comes from `position_from`: `Page` is relative to the page origin, `Margin`/`Column` are relative to the text block
+  (identical in a single-column layout), and `Paragraph` is currently treated as the text block (a known approximation).
+- The width comes from `FloatingObject::width`, defaulting to the full text block; content is laid out within that width inside a bounded box (without pagination).
+- Wrapping:
+  - `WrapMode::None`: overlay directly, body unchanged;
+  - `WrapMode::TopBottom`: the body continues below the object;
+  - `WrapMode::Square`: paragraphs that vertically overlap the object wrap **line by line**: each line is re-broken using the available width
+    at that moment, lines falling inside the wrap band move to the other side of the object, and the full width is restored once past the object;
+    when the object is in the right half of the page, the right margin is reduced;
+- Floating objects embedded in a table cell or in a header/footer are treated as ordinary blocks and a diagnostic is recorded.
 
-## 6. 样式解析
-### 5.6 行高与字体回退
+## 6. Style resolution
+### 5.6 Line height and font fallback
 
-- 行高：单倍行距 = 字号 × (ascent − descent + lineGap)，取自字体 `hhea`（经 `ttf-parser`）；
-  倍数行距在此基础上乘系数，固定/最小值行距照旧。字体解析失败时退回 `1.2 × 字号`。
-- 基线：行盒顶部 + 字号 × ascent（行内有图片时贴图片底部），不再固定取行盒 0.8 处。
-- 逐字形回退：主字体缺字形时改用「不指定族名」请求得到的兜底字体（通常带 CJK 字形），
-  宽度与字形都取兜底字体；两者都缺时仍写 `.notdef` 保留文本层，并汇总一条缺字形诊断。
+- Line height: single spacing = font size × (ascent − descent + lineGap), taken from the font's `hhea` (via `ttf-parser`);
+  multiple spacing multiplies that by the factor, and exact/at-least spacing work as before. If font resolution fails, fall back to `1.2 × font size`.
+- Baseline: top of the line box + font size × ascent (aligned to the bottom of an image when the line contains one); it is no longer
+  fixed at 0.8 of the line box.
+- Per-glyph fallback: when the primary font lacks a glyph, use the fallback font obtained by requesting "no family specified" (usually
+  carrying CJK glyphs), taking both width and glyph from the fallback font; when both are missing, still write `.notdef` to preserve
+  the text layer and summarize a single missing-glyph diagnostic.
 
 
-- 段落：`style_id` 命中的命名样式沿 `based_on` 链（最多 8 层、检测环）作为底，
-  `Paragraph.style` 里**非默认值**作为直接格式覆盖；没有 `style_id` 时底是
-  `StyleSheet.default_paragraph`。基础样式里显式写成默认值的字段会被直接格式
-  覆盖，这是已知的近似。
-- 字符：`TextRun.style` + `TextRun.style_id` 同理，底来自 `StyleSheet.character`
-  或 `StyleSheet.default_character`。
-- A1 不做「段落样式继承字符样式」的组合规则，A3 接入 DOCX 时再定。
+- Paragraph: the named style matched by `style_id` along the `based_on` chain (at most 8 levels, cycle-detected) forms the base,
+  and **non-default values** in `Paragraph.style` act as direct formatting overrides; without a `style_id` the base is
+  `StyleSheet.default_paragraph`. Fields explicitly written as default values in the base style are overridden by direct
+  formatting — a known approximation.
+- Characters: `TextRun.style` + `TextRun.style_id` work the same way, with the base coming from `StyleSheet.character`
+  or `StyleSheet.default_character`.
+- A1 does not implement the combination rule "paragraph style inherits character style"; this will be decided in A3 when DOCX is integrated.
 
-## 7. 字段
+## 7. Fields
 
-- `FieldKind::PageNumber`：所在页的页码（1 基）。
-- `FieldKind::TotalPages`：两遍布局——第一遍统计总页数，第二遍代入。
-- `FieldKind::Date`：用 `cached_text`，缺失时渲染为空并记诊断。
-- `FieldKind::Ref`：A1 渲染 `cached_text`；锚点解析用文档顺序中的标题锚点。
+- `FieldKind::PageNumber`: the page number of the containing page (1-based).
+- `FieldKind::TotalPages`: two-pass layout — the first pass counts total pages and the second substitutes the value.
+- `FieldKind::Date`: uses `cached_text`; when missing, it renders as empty and a diagnostic is recorded.
+- `FieldKind::Ref`: A1 renders `cached_text`; anchor resolution uses heading anchors in document order.
 
-## 8. 图片
+## 8. Images
 
-- 固有尺寸（毫米）= 像素 / dpi × 25.4；`ImageAsset.dpi` 缺省 96。
-- `ImageBlock`：宽度取 `size` 或固有宽度；超过内容区宽度时等比缩到内容区宽并记诊断。
-  高度超过可用区域时同样等比缩放（A1），仍放不下则换页。
-- `InlineImage`：作为不可断单元参与行布局，按行高基线对齐（底部贴基线）。
-- 行内图片的高度不计入行高（A1）；高于行高时记诊断。
+- Intrinsic size (mm) = pixels / dpi × 25.4; `ImageAsset.dpi` defaults to 96.
+- `ImageBlock`: width comes from `size` or the intrinsic width; when it exceeds the content area width, scale proportionally to the content
+  area width and record a diagnostic. When the height exceeds the available area, scale proportionally as well (A1); if it still does not fit, break the page.
+- `InlineImage`: participates in line layout as an unbreakable unit, aligned to the line baseline (bottom on the baseline).
+- The height of an inline image is not counted in the line height (A1); when it is taller than the line height, record a diagnostic.
 
-## 9. 标题与大纲
+## 9. Headings and outline
 
-- `Paragraph.heading_level = Some(level)` 在布局完成后生成 `OutlineItem`：
-  标题文本取段落纯文本，层级按 `level` 嵌套（同层或更浅时回退到对应父级）。
-- 标题被分页时，大纲目标指向该标题首行所在页。
-- `anchor` 锚点记入文档顺序索引，供 `FieldKind::Ref` 与链接使用（A1 只有解析）。
+- `Paragraph.heading_level = Some(level)` generates an `OutlineItem` after layout completes:
+  the heading text is the paragraph's plain text, and nesting follows `level` (falling back to the corresponding parent when the level is the same or shallower).
+- When a heading spans a page break, the outline target points to the page containing the heading's first line.
+- The `anchor` is recorded in the document-order index for use by `FieldKind::Ref` and links (A1 only resolves it).
 
-## 10. 输出映射
+## 10. Output mapping
 
-| Flow 概念 | Fixed IR 落点 |
+| Flow concept | Fixed IR target |
 | --- | --- |
-| 段落行 | `Element::Text(TextElement)`，一段一个 run（样式相同可合并） |
-| 文本层 | `TextItem`（run + 变换 + bbox + 字体 + 字号）与 `TextLine`（items 范围 + bbox + baseline） |
-| 行内/块级图片 | `Element::Image(ImageElement)`，`transform` 为毫米缩放 |
-| 分页 | 一页一个 `Page`，`PageInfo` 用页面设置 |
-| 分页符 | 结束当前页，开始新页 |
-| 超链接 | `Page.links`（A1 记录 URI 与锚点区域） |
-| 大纲 | `FixedDocument.outline` |
+| Paragraph line | `Element::Text(TextElement)`, one run per paragraph (merged when styles are identical) |
+| Text layer | `TextItem` (run + transform + bbox + font + font size) and `TextLine` (items range + bbox + baseline) |
+| Inline/block image | `Element::Image(ImageElement)`, with `transform` as a millimeter scale |
+| Pagination | one `Page` per page, with `PageInfo` from the page setup |
+| Page break | ends the current page and starts a new one |
+| Hyperlink | `Page.links` (A1 records the URI and anchor region) |
+| Outline | `FixedDocument.outline` |
 
-字体资源：每个用到的字体字节在 `FixedDocument.resources` 中登记为 `FontAsset`，
-`TextItem.font` 与 `TextElement.font` 引用同一个 `Arc`。
+Font resources: the bytes of every font used are registered as a `FontAsset` in `FixedDocument.resources`, and
+`TextItem.font` and `TextElement.font` reference the same `Arc`.
 
-## 11. DOCX 支持矩阵（A3 目标）
+## 11. DOCX support matrix (A3 target)
 
-| DOCX 特性 | A3 | 说明 |
+| DOCX feature | A3 | Notes |
 | --- | --- | --- |
-| 段落 / 字符样式、加粗斜体下划线删除线、颜色、字号 | 是 | `styles.xml` + `basedOn`，读入时拍平成直接格式 |
-| 对齐、缩进、行距、段前段后 | 是 | |
-| 分节（页面大小/边距/分栏） | 是 | 分栏已落版（等宽栏、先灌满当前栏再换栏） |
-| 表格（列宽、边框、表头行、合并单元格） | 读入是，落版是 | 纵向合并的高度按起始行计算（近似） |
-| 表格（列宽、边框、表头行、合并单元格） | 是 | 合并单元格 gridSpan/Merge 读写；纵向合并高度按起始行近似 |
-| 图片（内联/浮动） | 是 | 浮动图进 Block::Floating，支持 page/margin/column 基准与三种绕排；带蒙版图片写出时烘进 alpha |
-| 页眉页脚、页码字段 | 是 | 进 HeaderFooterSet 并落版（贴顶/贴底、PAGE/NUMPAGES 字段） |
-| 自动目录（TOC 域） | 是 | 内容控件映射成 TocBlock，排版时按标题回填页码 |
-| 列表 | 部分 | 标记文本 + 悬挂缩进；多级编号与自定义符号是近似 |
-| 脚注/尾注 | 是 | 独立部件读写，页底注释区/文末尾注均落版 |
-| 批注、表单控件、SmartArt、VML、嵌入对象 | 否 | 记 Unsupported 诊断 |
-A3 的样式策略：读入时按 XML 的**出现与否**逐字段层叠（`docDefaults` → 默认样式 →
-`basedOn` 链 → 直接格式），结果拍平进 `Paragraph.style` / `TextStyle`，不依赖 IR 的
-命名样式链。这样 `<w:ind w:firstLine="0"/>` 这类「显式写回默认值」也能覆盖样式
-里的非零值，代价是 `FlowDocument.styles` 为空——只有代码构造的 Flow 文档才会用到
-命名样式。
+| Paragraph / character styles, bold italic underline strikethrough, color, font size | Yes | `styles.xml` + `basedOn`, flattened into direct formatting on read |
+| Alignment, indentation, line spacing, space before/after | Yes | |
+| Sections (page size/margins/columns) | Yes | Columns are laid out (equal-width columns; fill the current column before switching) |
+| Tables (column widths, borders, header rows, merged cells) | Read yes, layout yes | Vertical merge height is computed from the starting row (approximate) |
+| Tables (column widths, borders, header rows, merged cells) | Yes | Merged cells gridSpan/vMerge are read and written; vertical merge height approximates from the starting row |
+| Images (inline/floating) | Yes | Floating images go into Block::Floating, supporting page/margin/column references and three wrap modes; masked images are baked into alpha when written |
+| Headers and footers, page-number fields | Yes | Go into HeaderFooterSet and are laid out (top-pinned/bottom-pinned, PAGE/NUMPAGES fields) |
+| Automatic table of contents (TOC field) | Yes | Content controls map to TocBlock, and page numbers are filled in from headings during layout |
+| Lists | Partial | Marker text + hanging indent; multi-level numbering and custom bullets are approximations |
+| Footnotes/endnotes | Yes | Read and written as separate parts; page-bottom note areas and end-of-document endnotes are both laid out |
+| Comments, form controls, SmartArt, VML, embedded objects | No | Recorded as Unsupported diagnostics |
+A3 style policy: on read, cascade field by field according to **presence or absence** in the XML (`docDefaults` → default styles →
+`basedOn` chain → direct formatting), and flatten the result into `Paragraph.style` / `TextStyle`, without relying on the IR's
+named-style chain. This way, constructs such as `<w:ind w:firstLine="0"/>` that "explicitly write back a default value" can also override non-zero
+values in the style, at the cost of `FlowDocument.styles` being empty — only code-constructed Flow documents use
+named styles.
 
-## 12. 验收
+## 12. Acceptance
 
-- A1：构造一个含标题、正文、两端对齐、行内图片与分页的 Flow 文档，
-  `layout` 输出 N 页；`ofd_to_png` 渲染结果与预期一致；文本层可被搜索与选择；
-  标题生成大纲且页码正确。
-- A2：表格跨页重复表头、自动目录页码回填。当前状态：表格（列宽、单元格子框、边框、
-  跨页重排表头）、页眉页脚（含页码字段、贴底页脚）与自动目录（两遍回填页码）均已完成。
-- A3：真实 DOCX 转 OFD 后逐页渲染对比 Word 导出 PDF。当前状态：`sample.docx`（标题、多格式正文、列表、表格、图片、页脚页码）读入 17 块、排版 2 页、0 条缺字诊断；表格、页眉页脚、脚注、合并单元格均已落版。
-- A4：DOCX → Flow IR → 排版 → OFD/PDF/位图，CLI `ofdbox convert` 已打通；DOCX 写出（含合并单元格、图片蒙版、附件）与 `write_flow_with_report` 已完成。
-  （标题、多格式正文、列表、表格、图片、页脚页码）读入 17 块、排版 2 页、0 条缺字
-  诊断，页内文字与 Word 版式一致；表格（A2）、页眉页脚落版仍是空白。
-
+- A1: build a Flow document containing a heading, body text, justification, an inline image, and a page break;
+  `layout` outputs N pages; the `ofd_to_png` render matches expectations; the text layer can be searched and selected;
+  the heading generates an outline with correct page numbers.
+- A2: repeated header rows across table page breaks, automatic TOC page-number fill-in. Current status: tables (column widths, cell sub-boxes, borders,
+  header-row repetition across pages), headers and footers (including page-number fields and bottom-pinned footers), and the automatic TOC (two-pass page-number fill-in) are all complete.
+- A3: convert real DOCX to OFD and compare page-by-page renders against PDFs exported from Word. Current status: `sample.docx` (headings, multi-format body text, lists, tables, images, footer page numbers) reads 17 blocks, lays out 2 pages, with 0 missing-glyph diagnostics; tables, headers and footers, footnotes, and merged cells are all laid out.
+- A4: DOCX → Flow IR → layout → OFD/PDF/bitmap, with the CLI `ofdbox convert` wired up; DOCX writing (including merged cells, image masks, and attachments) and
+  `write_flow_with_report` are complete.
+  (headings, multi-format body text, lists, tables, images, footer page numbers) reads 17 blocks, lays out 2 pages, with 0 missing-glyph
+  diagnostics, and the text within pages matches Word's layout; tables (A2) and header/footer placement are still blank.

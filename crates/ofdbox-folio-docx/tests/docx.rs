@@ -1,14 +1,15 @@
-//! DOCX → Flow IR 的端到端测试。
+//! End-to-end tests for DOCX → Flow IR.
 //!
-//! 测试在内存里拼一个最小 DOCX，覆盖段落样式链、直接格式、列表编号、表格、
-//! 行内图片、页眉页脚与页码域。
+//! The tests assemble a minimal DOCX in memory, covering the paragraph style chain,
+//! direct formatting, list numbering, tables, inline images, headers/footers and page
+//! number fields.
 
 use std::io::{Cursor, Write};
 
 use ofdbox_folio_docx::{DocxReadOptions, read_flow};
 use ofdbox_folio_ir::{Block, FieldKind, Inline};
 
-/// 1×1 的 RGBA PNG。
+/// A 1×1 RGBA PNG.
 const TINY_PNG: &[u8] = &[
     0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
     0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
@@ -20,7 +21,7 @@ const TINY_PNG: &[u8] = &[
 const W_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 const R_NS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
-/// 拼一个最小 DOCX。
+/// Assemble a minimal DOCX.
 fn build(parts: &[(&str, &[u8])]) -> Vec<u8> {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     let options =
@@ -33,7 +34,7 @@ fn build(parts: &[(&str, &[u8])]) -> Vec<u8> {
     cursor.into_inner()
 }
 
-/// 拼一个带完整正文的 DOCX。
+/// Assemble a DOCX with a complete body.
 fn sample() -> Vec<u8> {
     let document = format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -209,9 +210,9 @@ fn maps_heading_paragraphs_and_run_formatting() {
         })
         .collect();
 
-    let heading = paragraphs.first().expect("标题段");
+    let heading = paragraphs.first().expect("heading paragraph");
     assert_eq!(heading.heading_level, Some(1));
-    // Heading1 继承 Normal 的字体，字号来自 Heading1 自己的 rPr。
+    // Heading1 inherits Normal's font, while the size comes from Heading1's own rPr.
     match &heading.runs[0] {
         Inline::Text(run) => {
             assert_eq!(run.text, "标题一");
@@ -219,22 +220,22 @@ fn maps_heading_paragraphs_and_run_formatting() {
             assert_eq!(run.style.size.to_pt(), 14.0);
             assert_eq!(run.style.family.name, "SimSun");
         }
-        other => panic!("期望文本 run: {other:?}"),
+        other => panic!("expected text run: {other:?}"),
     }
 
-    let body = paragraphs.get(1).expect("正文段");
+    let body = paragraphs.get(1).expect("body paragraph");
     assert_eq!(body.style.align, ofdbox_folio_ir::Align::Justify);
     assert_eq!(body.style.first_line_indent.0, 420);
     assert_eq!(body.style.space_before.0, 120);
     assert_eq!(body.style.space_after.0, 240);
-    // 正文两段文字 + 一个脚注引用。
+    // Two body text runs plus one footnote reference.
     assert_eq!(body.runs.len(), 3);
     match &body.runs[0] {
         Inline::Text(run) => {
             assert!(run.style.bold);
             assert_eq!(run.style.size.to_pt(), 12.0);
         }
-        other => panic!("期望文本 run: {other:?}"),
+        other => panic!("expected text run: {other:?}"),
     }
     match &body.runs[1] {
         Inline::Text(run) => {
@@ -244,7 +245,7 @@ fn maps_heading_paragraphs_and_run_formatting() {
                 ofdbox_folio_ir::Rgba::from_rgb(0xC8, 0x1E, 0x1E)
             );
         }
-        other => panic!("期望文本 run: {other:?}"),
+        other => panic!("expected text run: {other:?}"),
     }
 }
 
@@ -264,12 +265,12 @@ fn turns_numbering_into_marker_and_hanging_indent() {
                 .iter()
                 .any(|inline| matches!(inline, Inline::Text(run) if run.text.contains('•')))
         })
-        .expect("列表段");
+        .expect("list paragraph");
     assert_eq!(bullet.style.left_indent.0, 720);
     assert_eq!(bullet.style.first_line_indent.0, -360);
     match &bullet.runs[0] {
         Inline::Text(run) => assert!(run.text.starts_with('•')),
-        other => panic!("期望标记 run: {other:?}"),
+        other => panic!("expected marker run: {other:?}"),
     }
 }
 
@@ -283,7 +284,7 @@ fn reads_tables_with_header_rows_and_borders() {
             Block::Table(table) => Some(table),
             _ => None,
         })
-        .expect("表格");
+        .expect("table");
     assert_eq!(table.columns.len(), 2);
     assert_eq!(table.rows.len(), 2);
     assert_eq!(table.header_rows, 1);
@@ -309,14 +310,14 @@ fn reads_inline_pictures_with_display_size() {
             Inline::Image(image) => Some(image),
             _ => None,
         })
-        .expect("行内图片");
-    // 360000 EMU = 10 mm。
-    let (width, height) = image.size.expect("显示尺寸");
+        .expect("inline image");
+    // 360000 EMU = 10 mm.
+    let (width, height) = image.size.expect("display size");
     assert_eq!(width.to_pt(), 28.35);
     assert_eq!(height.to_pt(), 28.35);
     assert_eq!(image.alt.as_deref(), Some("示例图"));
     assert_eq!(flow.resources.image_count(), 1);
-    let asset = flow.resources.image(image.image).expect("图片资源");
+    let asset = flow.resources.image(image.image).expect("image asset");
     assert_eq!((asset.pixel_width, asset.pixel_height), (1, 1));
 }
 
@@ -330,10 +331,10 @@ fn reads_page_break_and_footer_fields() {
         .count();
     assert_eq!(breaks, 1);
 
-    let footer = flow.sections[0].footers.default.as_ref().expect("页脚");
+    let footer = flow.sections[0].footers.default.as_ref().expect("footer");
     assert_eq!(footer.blocks.len(), 1);
     let Block::Paragraph(paragraph) = &footer.blocks[0] else {
-        panic!("页脚应是段落");
+        panic!("the footer should be a paragraph");
     };
     let kinds: Vec<_> = paragraph
         .runs
@@ -345,14 +346,14 @@ fn reads_page_break_and_footer_fields() {
         .collect();
     assert_eq!(kinds, vec![FieldKind::PageNumber, FieldKind::TotalPages]);
 
-    let header = flow.sections[0].headers.default.as_ref().expect("页眉");
+    let header = flow.sections[0].headers.default.as_ref().expect("header");
     assert_eq!(header.blocks.len(), 1);
 }
 
 #[test]
 fn reads_footnote_bodies_and_references() {
     let flow = read();
-    assert_eq!(flow.notes.len(), 1, "注释: {:?}", flow.notes);
+    assert_eq!(flow.notes.len(), 1, "notes: {:?}", flow.notes);
     let note = &flow.notes[0];
     assert_eq!(note.kind, ofdbox_folio_ir::NoteKind::Footnote);
     assert_eq!(note.id, 1);
@@ -367,7 +368,7 @@ fn reads_footnote_bodies_and_references() {
         })
         .flat_map(|paragraph| paragraph.runs.iter())
         .any(|inline| matches!(inline, Inline::Note(note) if note.id == 1));
-    assert!(referenced, "正文里应有脚注引用");
+    assert!(referenced, "the body should contain a footnote reference");
 }
 
 #[test]
@@ -380,8 +381,8 @@ fn reads_anchored_drawings_as_floating_objects() {
             Block::Floating(object) => Some(object),
             _ => None,
         })
-        .expect("浮动对象");
-    // 720000 EMU = 20mm，360000 EMU = 10mm。
+        .expect("floating object");
+    // 720000 EMU = 20mm, 360000 EMU = 10mm.
     assert!(
         (floating.position.x - 20.0).abs() < 0.1,
         "x={}",
@@ -393,7 +394,7 @@ fn reads_anchored_drawings_as_floating_objects() {
         floating.position.y
     );
     assert_eq!(floating.wrap, ofdbox_folio_ir::WrapMode::Square);
-    // positionH 是 column，positionV 是 paragraph。
+    // positionH is column, positionV is paragraph.
     assert_eq!(
         floating.position_from,
         (

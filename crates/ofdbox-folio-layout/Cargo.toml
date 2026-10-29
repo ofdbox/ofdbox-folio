@@ -7,7 +7,7 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 license.workspace = true
-description = "OFDBox Folio 的 Flow IR 到 Fixed IR 单向排版引擎。"
+description = "One-way typesetting engine from Flow IR to Fixed IR for OFDBox Folio."
 keywords = ["layout", "typesetting", "document", "pagination"]
 categories = ["text-processing", "graphics"]
 

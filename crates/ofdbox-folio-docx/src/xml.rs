@@ -1,28 +1,31 @@
-//! quick-xml 小工具：本地名匹配、属性取值与字符引用还原。
+//! quick-xml helpers: local-name matching, attribute access, and character reference
+//! resolution.
 //!
-//! OOXML 用命名空间前缀区分词汇表（`w:`、`a:`、`wp:`、`r:`），这里一律按本地名
-//! 匹配：同一份文档里同一个本地名不会同时属于两个互不相干的词汇表，按本地名
-//! 取值比维护前缀映射更稳。
+//! OOXML uses namespace prefixes to separate vocabularies (`w:`, `a:`, `wp:`, `r:`), but
+//! everything here is matched by local name: a single local name never belongs to two
+//! unrelated vocabularies within one document, so matching by local name is more robust
+//! than maintaining a prefix map.
 
 use quick_xml::events::BytesStart;
 use quick_xml::reader::Reader;
 
 use crate::DocxError;
 
-/// 统一的事件reader类型：从 `&str` 读，事件借用输入，不分配缓冲区。
+/// Unified event reader type: reads from `&str`, events borrow the input, no buffer
+/// allocation.
 pub(crate) type XmlReader<'a> = Reader<&'a [u8]>;
 
-/// 元素的本地名（去掉命名空间前缀）。
+/// Local name of an element (namespace prefix removed).
 pub(crate) fn local_name(element: &BytesStart<'_>) -> String {
     element.local_name().as_ref().to_owned()
 }
 
-/// 元素本地名是否等于 `name`。
+/// Whether an element's local name equals `name`.
 pub(crate) fn is_element(element: &BytesStart<'_>, name: &str) -> bool {
     element.local_name().as_ref() == name
 }
 
-/// 取属性值（按本地名匹配），已还原字符引用。
+/// Get an attribute value (matched by local name) with character references resolved.
 pub(crate) fn attr(element: &BytesStart<'_>, name: &str) -> Option<String> {
     element.attributes().flatten().find_map(|attribute| {
         if attribute.key.local_name().as_ref() == name {
@@ -36,24 +39,25 @@ pub(crate) fn attr(element: &BytesStart<'_>, name: &str) -> Option<String> {
     })
 }
 
-/// 取整数属性。
+/// Get an integer attribute.
 pub(crate) fn attr_i32(element: &BytesStart<'_>, name: &str) -> Option<i32> {
     attr(element, name)?.trim().parse().ok()
 }
 
-/// 取无符号整数属性。
+/// Get an unsigned integer attribute.
 pub(crate) fn attr_u32(element: &BytesStart<'_>, name: &str) -> Option<u32> {
     attr(element, name)?.trim().parse().ok()
 }
 
-/// 取浮点属性。
+/// Get a floating-point attribute.
 pub(crate) fn attr_f64(element: &BytesStart<'_>, name: &str) -> Option<f64> {
     attr(element, name)?.trim().parse().ok()
 }
 
-/// 按 OOXML 的 `ST_OnOff` 规则解释开关元素。
+/// Interpret an on/off element per the OOXML `ST_OnOff` rules.
 ///
-/// 没有 `val` 属性就是打开；`0/false/off` 是关闭；其余（含 `1/true/on`）是打开。
+/// No `val` attribute means on; `0/false/off` means off; anything else (including
+/// `1/true/on`) means on.
 pub(crate) fn attr_on_off(element: &BytesStart<'_>) -> Option<bool> {
     Some(match attr(element, "val").as_deref() {
         None => true,
@@ -64,7 +68,8 @@ pub(crate) fn attr_on_off(element: &BytesStart<'_>) -> Option<bool> {
     })
 }
 
-/// 还原 `&name;` 或 `&#123;` 形式的字符引用；不认识的实体返回 `None`。
+/// Resolve a character reference of the form `&name;` or `&#123;`; unknown entities
+/// return `None`.
 pub(crate) fn resolve_reference(raw: &str) -> Option<char> {
     match raw {
         "amp" => Some('&'),
@@ -83,10 +88,11 @@ pub(crate) fn resolve_reference(raw: &str) -> Option<char> {
     }
 }
 
-/// 跳过一个完整元素（含子树）。
+/// Skip a complete element (including its subtree).
 ///
-/// 调用方应已读到该元素的 `Start`；本函数一直消费到与之配对的 `End`。计数必须
-/// 覆盖所有嵌套的开始标签，否则会在第一个子元素的结束处提前返回。
+/// The caller should already have read the element's `Start`; this function consumes up
+/// to the matching `End`. The count must cover every nested start tag, otherwise it
+/// would return early at the first child element's end.
 pub(crate) fn skip_element(
     reader: &mut XmlReader<'_>,
     start: &BytesStart<'_>,
@@ -103,14 +109,16 @@ pub(crate) fn skip_element(
                 depth -= 1;
             }
             quick_xml::events::Event::Eof => {
-                return Err(DocxError::Structure(format!("元素 {name} 没有结束标签")));
+                return Err(DocxError::Structure(format!(
+                    "element {name} has no end tag"
+                )));
             }
             _ => {}
         }
     }
 }
 
-/// 把 quick-xml 错误转成 crate 错误。
+/// Convert a quick-xml error into a crate error.
 pub(crate) fn xml_error(error: quick_xml::Error) -> DocxError {
     DocxError::Xml(error.to_string())
 }

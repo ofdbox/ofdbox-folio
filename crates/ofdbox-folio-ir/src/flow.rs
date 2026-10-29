@@ -1,7 +1,8 @@
-//! 流式文档模型（Flow IR）。
+//! Flow document model (Flow IR).
 //!
-//! Flow IR 只描述语义和样式，不含绝对坐标。长度统一使用 twip；布局阶段
-//! 把它换算为毫米并计算分页。DOCX 适配器与创建 API 都直接构造本模型。
+//! Flow IR describes only semantics and styles, without absolute coordinates. Lengths
+//! are uniformly in twips; the layout stage converts them to millimeters and computes
+//! pagination. The DOCX adapter and the authoring API both build this model directly.
 
 use std::sync::Arc;
 
@@ -11,27 +12,27 @@ use crate::meta::{AttachmentInfo, Metadata};
 use crate::paint::Rgba;
 use crate::units::Twips;
 
-/// 流式文档。
+/// A flow document.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FlowDocument {
-    /// 文档元数据。
+    /// Document metadata.
     pub metadata: Metadata,
-    /// 命名样式表。
+    /// Named style sheet.
     pub styles: StyleSheet,
-    /// 分节列表；至少应有一个分节。
+    /// Section list; there should be at least one section.
     pub sections: Vec<Section>,
-    /// 图片等文档级资源。
+    /// Document-level resources such as images.
     pub resources: crate::asset::ResourceStore,
-    /// 附件。
+    /// Attachments.
     pub attachments: Vec<Attachment>,
-    /// 脚注与尾注。
+    /// Footnotes and endnotes.
     pub notes: Vec<Note>,
-    /// 导入或构建过程中产生的诊断。
+    /// Diagnostics produced during import or construction.
     pub report: crate::meta::Report,
 }
 
 impl FlowDocument {
-    /// 创建带默认 A4 分节的文档。
+    /// Create a document with a default A4 section.
     pub fn new(metadata: Metadata) -> Self {
         Self {
             metadata,
@@ -44,7 +45,7 @@ impl FlowDocument {
         }
     }
 
-    /// 向最后一个分节追加块；没有分节时创建默认分节。
+    /// Append a block to the last section; create a default section if there is none.
     pub fn push(&mut self, block: Block) {
         if self.sections.is_empty() {
             self.sections.push(Section::default());
@@ -54,7 +55,7 @@ impl FlowDocument {
         }
     }
 
-    /// 当前分节的可变引用。
+    /// Mutable access to the current section.
     pub fn current_section_mut(&mut self) -> &mut Section {
         if self.sections.is_empty() {
             self.sections.push(Section::default());
@@ -64,21 +65,21 @@ impl FlowDocument {
     }
 }
 
-/// 一个分节。
+/// A section.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Section {
-    /// 页面设置。
+    /// Page setup.
     pub setup: PageSetup,
-    /// 页眉。
+    /// Headers.
     pub headers: HeaderFooterSet,
-    /// 页脚。
+    /// Footers.
     pub footers: HeaderFooterSet,
-    /// 正文块。
+    /// Body blocks.
     pub blocks: Vec<Block>,
 }
 
 impl Section {
-    /// 创建空分节。
+    /// Create an empty section.
     pub fn new(setup: PageSetup) -> Self {
         Self {
             setup,
@@ -95,27 +96,27 @@ impl Default for Section {
     }
 }
 
-/// 页面设置，单位 twip。
+/// Page setup, in twips.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageSetup {
-    /// 页面宽度。
+    /// Page width.
     pub width: Twips,
-    /// 页面高度。
+    /// Page height.
     pub height: Twips,
-    /// 页边距。
+    /// Page margins.
     pub margins: Margins,
-    /// 页眉到页面顶边的距离。
+    /// Distance from the header to the top edge of the page.
     pub header_distance: Twips,
-    /// 页脚到页面底边的距离。
+    /// Distance from the footer to the bottom edge of the page.
     pub footer_distance: Twips,
-    /// 分栏数；1 表示单栏。
+    /// Number of columns; 1 means a single column.
     pub columns: u16,
-    /// 栏间距。
+    /// Spacing between columns.
     pub column_gap: Twips,
 }
 
 impl PageSetup {
-    /// A4 页面，页边距 1 英寸。
+    /// A4 page with 1-inch margins.
     pub fn a4() -> Self {
         Self {
             width: Twips(11906),
@@ -135,21 +136,21 @@ impl Default for PageSetup {
     }
 }
 
-/// 四边边距，单位 twip。
+/// Margins for all four sides, in twips.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Margins {
-    /// 上边距。
+    /// Top margin.
     pub top: Twips,
-    /// 右边距。
+    /// Right margin.
     pub right: Twips,
-    /// 下边距。
+    /// Bottom margin.
     pub bottom: Twips,
-    /// 左边距。
+    /// Left margin.
     pub left: Twips,
 }
 
 impl Margins {
-    /// 四边使用相同边距。
+    /// Use the same margin on all four sides.
     pub const fn uniform(value: Twips) -> Self {
         Self {
             top: value,
@@ -160,87 +161,87 @@ impl Margins {
     }
 }
 
-/// 默认、首页和偶数页页眉页脚。
+/// Default, first-page, and even-page headers and footers.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HeaderFooterSet {
-    /// 默认页眉或页脚。
+    /// Default header or footer.
     pub default: Option<HeaderFooter>,
-    /// 首页页眉或页脚。
+    /// First-page header or footer.
     pub first: Option<HeaderFooter>,
-    /// 偶数页页眉或页脚。
+    /// Even-page header or footer.
     pub even: Option<HeaderFooter>,
 }
 
-/// 一页页眉或页脚内容。
+/// The header or footer content of one page.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HeaderFooter {
-    /// 内容块。
+    /// Content blocks.
     pub blocks: Vec<Block>,
 }
 
-/// 流式文档的块。
+/// A block in a flow document.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Block {
-    /// 段落。
+    /// A paragraph.
     Paragraph(Paragraph),
-    /// 表格。
+    /// A table.
     Table(Table),
-    /// 块级图片。
+    /// A block-level image.
     Image(ImageBlock),
-    /// 自动目录。
+    /// An automatic table of contents.
     Toc(TocBlock),
-    /// 分页符。
+    /// A page break.
     PageBreak,
-    /// 浮动对象：脱离正文流、按页面坐标定位。
+    /// A floating object: detached from the body flow and positioned by page coordinates.
     Floating(Box<FloatingObject>),
 }
 
-/// 浮动对象的绕排方式。
+/// The text wrapping mode of a floating object.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum WrapMode {
-    /// 不绕排：正文照原样排，对象覆盖在上面。
+    /// No wrapping: body text flows as usual and the object overlaps it.
     #[default]
     None,
-    /// 上下型：正文排在对象上方与下方。
+    /// Top and bottom: body text flows above and below the object.
     TopBottom,
-    /// 四周型：与对象重叠的段落让到对象一侧（整段让开，不逐行绕排）。
+    /// Square: paragraphs overlapping the object make way to one side of it (the whole paragraph moves aside, without line-by-line wrapping).
     Square,
 }
 
-/// 浮动对象位置的参考基准。
+/// The reference basis for the position of a floating object.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PositionFrom {
-    /// 相对页面左上角。
+    /// Relative to the top-left corner of the page.
     Page,
-    /// 相对版心（正文区域）左上角。
+    /// Relative to the top-left corner of the text area (body region).
     #[default]
     Margin,
-    /// 相对当前栏左上角（单栏时等同版心）。
+    /// Relative to the top-left corner of the current column (identical to the text area for a single column).
     Column,
-    /// 相对锚定段落（排版时按版心处理，属于已知近似）。
+    /// Relative to the anchoring paragraph (treated as the text area during layout; this is a known approximation).
     Paragraph,
 }
 
-/// 一个浮动对象。
+/// A floating object.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FloatingObject {
-    /// 左上角位置，单位毫米。
+    /// Top-left position, in millimeters.
     pub position: Point,
-    /// 水平/垂直位置的参考基准。
+    /// Reference basis for the horizontal/vertical position.
     pub position_from: (PositionFrom, PositionFrom),
-    /// 宽度；None 表示占满版心。
+    /// Width; `None` means span the whole text area.
     pub width: Option<Twips>,
-    /// 内容。
+    /// Content.
     pub block: Box<Block>,
-    /// 绕排方式。
+    /// Wrapping mode.
     pub wrap: WrapMode,
 }
 
 impl FloatingObject {
-    /// 创建浮动对象（位置相对版心左上角）。
+    /// Create a floating object (position relative to the top-left corner of the text area).
     pub fn new(position: Point, block: Block) -> Self {
         Self {
             position,
@@ -252,21 +253,21 @@ impl FloatingObject {
     }
 }
 
-/// 段落。
+/// A paragraph.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Paragraph {
-    /// 段落样式。
+    /// Paragraph style.
     pub style: ParaStyle,
-    /// 行内内容。
+    /// Inline content.
     pub runs: Vec<Inline>,
-    /// 标题层级；`Some` 时会进入目录与大纲。
+    /// Heading level; when `Some`, the paragraph enters the table of contents and outline.
     pub heading_level: Option<u8>,
-    /// 可选锚点。
+    /// Optional anchor.
     pub anchor: Option<crate::asset::AnchorId>,
 }
 
 impl Paragraph {
-    /// 创建空段落。
+    /// Create an empty paragraph.
     pub fn new(style: ParaStyle) -> Self {
         Self {
             style,
@@ -276,7 +277,7 @@ impl Paragraph {
         }
     }
 
-    /// 创建只有一个文本 run 的段落。
+    /// Create a paragraph with a single text run.
     pub fn plain(text: impl Into<String>, style: TextStyle) -> Self {
         Self {
             style: ParaStyle::default(),
@@ -287,46 +288,46 @@ impl Paragraph {
     }
 }
 
-/// 段落样式。
+/// Paragraph style.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ParaStyle {
-    /// 水平对齐。
+    /// Horizontal alignment.
     pub align: Align,
-    /// 行距。
+    /// Line spacing.
     pub line_spacing: LineSpacing,
-    /// 段前间距。
+    /// Space before the paragraph.
     pub space_before: Twips,
-    /// 段后间距。
+    /// Space after the paragraph.
     pub space_after: Twips,
-    /// 首行缩进。
+    /// First-line indent.
     pub first_line_indent: Twips,
-    /// 左缩进。
+    /// Left indent.
     pub left_indent: Twips,
-    /// 右缩进。
+    /// Right indent.
     pub right_indent: Twips,
-    /// 与下一段保持同页。
+    /// Keep with the next paragraph on the same page.
     pub keep_with_next: bool,
-    /// 段内各行保持同页。
+    /// Keep all lines of the paragraph on the same page.
     pub keep_lines_together: bool,
-    /// 制表位（相对版心左边界），按 `position` 升序使用。
+    /// Tab stops (relative to the left edge of the text area), used in ascending `position` order.
     pub tabs: Vec<TabStop>,
-    /// 命名样式 ID。
+    /// Named style ID.
     pub style_id: Option<String>,
 }
 
-/// 一个制表位。
+/// A tab stop.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TabStop {
-    /// 位置：相对版心左边界，单位 twip。
+    /// Position: relative to the left edge of the text area, in twips.
     pub position: Twips,
-    /// 对齐方式。
+    /// Alignment.
     pub align: TabAlign,
-    /// 前导符。
+    /// Leader.
     pub leader: TabLeader,
 }
 
 impl TabStop {
-    /// 创建一个制表位。
+    /// Create a tab stop.
     pub fn new(position: Twips, align: TabAlign, leader: TabLeader) -> Self {
         Self {
             position,
@@ -336,94 +337,94 @@ impl TabStop {
     }
 }
 
-/// 制表位对齐方式：决定制表符之后那截文字相对制表位怎么放。
+/// Tab stop alignment: determines how the text after the tab character is placed relative to the tab stop.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TabAlign {
-    /// 左对齐：文字从制表位开始。
+    /// Left-aligned: the text starts at the tab stop.
     #[default]
     Left,
-    /// 居中：文字以制表位为中心。
+    /// Centered: the text is centered on the tab stop.
     Center,
-    /// 右对齐：文字以制表位为右边界。
+    /// Right-aligned: the text ends at the tab stop.
     Right,
-    /// 小数点对齐：小数点落在制表位上；没有小数点时按右对齐。
+    /// Decimal-aligned: the decimal point falls on the tab stop; without a decimal point, right-aligned.
     Decimal,
 }
 
-/// 制表位前导符：填充制表符留下的空白。
+/// Tab stop leader: fills the blank space left by the tab character.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum TabLeader {
-    /// 不填充。
+    /// No fill.
     #[default]
     None,
-    /// 点线（目录常用）。
+    /// Dotted line (common in tables of contents).
     Dot,
-    /// 虚线。
+    /// Dashed line.
     Dash,
-    /// 实线。
+    /// Solid line.
     Line,
 }
 
-/// 水平对齐。
+/// Horizontal alignment.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Align {
-    /// 左对齐。
+    /// Left-aligned.
     #[default]
     Left,
-    /// 居中。
+    /// Centered.
     Center,
-    /// 右对齐。
+    /// Right-aligned.
     Right,
-    /// 两端对齐。
+    /// Justified.
     Justify,
 }
 
-/// 行距。
+/// Line spacing.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub enum LineSpacing {
-    /// 单倍行距。
+    /// Single spacing.
     #[default]
     Single,
-    /// 多倍行距。
+    /// Multiple spacing.
     Multiple(f64),
-    /// 固定行距。
+    /// Exact spacing.
     Exact(Twips),
-    /// 最小行距。
+    /// Minimum spacing.
     AtLeast(Twips),
 }
 
-/// 行内内容。
+/// Inline content.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Inline {
-    /// 文本。
+    /// Text.
     Text(TextRun),
-    /// 行内图片。
+    /// An inline image.
     Image(InlineImage),
-    /// 字段。
+    /// A field.
     Field(Field),
-    /// 超链接。
+    /// A hyperlink.
     Link(Link),
-    /// 脚注或尾注引用。
+    /// A footnote or endnote reference.
     Note(NoteRef),
 }
 
-/// 一段带样式的文本。
+/// A run of styled text.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TextRun {
-    /// 文本内容。
+    /// Text content.
     pub text: String,
-    /// 文本样式。
+    /// Text style.
     pub style: TextStyle,
-    /// 命名字符样式 ID。
+    /// Named character style ID.
     pub style_id: Option<String>,
 }
 
 impl TextRun {
-    /// 创建文本 run。
+    /// Create a text run.
     pub fn new(text: impl Into<String>, style: TextStyle) -> Self {
         Self {
             text: text.into(),
@@ -433,26 +434,26 @@ impl TextRun {
     }
 }
 
-/// 文本样式。
+/// Text style.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextStyle {
-    /// 字体栈。
+    /// Font stack.
     pub family: FontFamily,
-    /// 字号。
+    /// Font size.
     pub size: Twips,
-    /// 粗体。
+    /// Bold.
     pub bold: bool,
-    /// 斜体。
+    /// Italic.
     pub italic: bool,
-    /// 下划线。
+    /// Underline.
     pub underline: bool,
-    /// 删除线。
+    /// Strikethrough.
     pub strike: bool,
-    /// 文本颜色。
+    /// Text color.
     pub color: Rgba,
-    /// 上标。
+    /// Superscript.
     pub superscript: bool,
-    /// 下标。
+    /// Subscript.
     pub subscript: bool,
 }
 
@@ -472,17 +473,17 @@ impl Default for TextStyle {
     }
 }
 
-/// 字体家族与回退链。
+/// A font family and its fallback chain.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FontFamily {
-    /// 首选字体家族名。
+    /// Preferred font family name.
     pub name: String,
-    /// 按顺序回退的字体家族名。
+    /// Font family names to fall back to, in order.
     pub fallback: Vec<String>,
 }
 
 impl FontFamily {
-    /// 创建字体家族。
+    /// Create a font family.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -491,21 +492,21 @@ impl FontFamily {
     }
 }
 
-/// 块级图片。
+/// A block-level image.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImageBlock {
-    /// 图片资源 ID。
+    /// Image resource ID.
     pub image: AssetId,
-    /// 显示尺寸；`None` 表示使用固有尺寸。
+    /// Display size; `None` means use the intrinsic size.
     pub size: Option<(Twips, Twips)>,
-    /// 水平对齐。
+    /// Horizontal alignment.
     pub align: Align,
-    /// 替代文本。
+    /// Alternative text.
     pub alt: Option<String>,
 }
 
 impl ImageBlock {
-    /// 创建块级图片。
+    /// Create a block-level image.
     pub fn new(image: AssetId) -> Self {
         Self {
             image,
@@ -516,19 +517,19 @@ impl ImageBlock {
     }
 }
 
-/// 行内图片。
+/// An inline image.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InlineImage {
-    /// 图片资源 ID。
+    /// Image resource ID.
     pub image: AssetId,
-    /// 显示尺寸；`None` 表示使用固有尺寸。
+    /// Display size; `None` means use the intrinsic size.
     pub size: Option<(Twips, Twips)>,
-    /// 替代文本。
+    /// Alternative text.
     pub alt: Option<String>,
 }
 
 impl InlineImage {
-    /// 创建行内图片。
+    /// Create an inline image.
     pub fn new(image: AssetId) -> Self {
         Self {
             image,
@@ -538,17 +539,17 @@ impl InlineImage {
     }
 }
 
-/// 可解析字段。
+/// A resolvable field.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Field {
-    /// 字段类型。
+    /// Field kind.
     pub kind: FieldKind,
-    /// 源文件中的缓存结果。
+    /// Cached result from the source file.
     pub cached_text: Option<String>,
 }
 
 impl Field {
-    /// 创建字段。
+    /// Create a field.
     pub fn new(kind: FieldKind) -> Self {
         Self {
             kind,
@@ -557,97 +558,97 @@ impl Field {
     }
 }
 
-/// 字段类型。
+/// Field kind.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FieldKind {
-    /// 当前页码。
+    /// Current page number.
     PageNumber,
-    /// 总页数。
+    /// Total page count.
     TotalPages,
-    /// 当前日期。
+    /// Current date.
     Date,
-    /// 引用书签。
+    /// Reference to a bookmark.
     Ref(crate::asset::AnchorId),
 }
 
-/// 注释类型。
+/// Note kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NoteKind {
-    /// 脚注：排在引用所在页的页底。
+    /// Footnote: placed at the bottom of the page containing the reference.
     Footnote,
-    /// 尾注：排在文档末尾。
+    /// Endnote: placed at the end of the document.
     Endnote,
 }
 
-/// 注释引用。
+/// A note reference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NoteRef {
-    /// 注释类型。
+    /// Note kind.
     pub kind: NoteKind,
-    /// 文档内唯一的注释 ID。
+    /// Note ID unique within the document.
     pub id: u32,
 }
 
 impl NoteRef {
-    /// 创建引用。
+    /// Create a reference.
     pub fn new(kind: NoteKind, id: u32) -> Self {
         Self { kind, id }
     }
 }
 
-/// 一条注释的内容。
+/// The content of a note.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Note {
-    /// 注释 ID，与 [NoteRef::id] 对应。
+    /// Note ID, corresponding to [NoteRef::id].
     pub id: u32,
-    /// 注释类型。
+    /// Note kind.
     pub kind: NoteKind,
-    /// 注释正文。
+    /// Note body.
     pub blocks: Vec<Block>,
 }
 
 impl Note {
-    /// 创建注释。
+    /// Create a note.
     pub fn new(kind: NoteKind, id: u32, blocks: Vec<Block>) -> Self {
         Self { id, kind, blocks }
     }
 }
 
-/// 超链接。
+/// A hyperlink.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Link {
-    /// 链接目标。
+    /// Link target.
     pub target: LinkTarget,
-    /// 链接文本或其他行内内容。
+    /// Link text or other inline content.
     pub runs: Vec<Inline>,
 }
 
 impl Link {
-    /// 创建超链接。
+    /// Create a hyperlink.
     pub fn new(target: LinkTarget, runs: Vec<Inline>) -> Self {
         Self { target, runs }
     }
 }
 
-/// 链接目标。
+/// A link target.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum LinkTarget {
-    /// 外部 URI。
+    /// An external URI.
     Uri(String),
-    /// 文档内锚点。
+    /// An anchor within the document.
     Anchor(crate::asset::AnchorId),
 }
 
-/// 自动目录块。
+/// An automatic table-of-contents block.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TocBlock {
-    /// 收集的最大标题层级。
+    /// Maximum heading level to collect.
     pub max_level: u8,
-    /// 目录标题；`None` 表示不显示标题。
+    /// Table-of-contents title; `None` means do not display a title.
     pub title: Option<String>,
-    /// 目录样式。
+    /// Table-of-contents style.
     pub style: TocStyle,
 }
 
@@ -661,18 +662,18 @@ impl Default for TocBlock {
     }
 }
 
-/// 目录样式。
+/// Table-of-contents style.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TocStyle {
-    /// 目录标题样式。
+    /// Table-of-contents title style.
     pub title_style: TextStyle,
-    /// 条目文本样式。
+    /// Entry text style.
     pub entry_style: TextStyle,
-    /// 页码样式。
+    /// Page number style.
     pub page_number_style: TextStyle,
-    /// 是否使用点线引导。
+    /// Whether to use a dotted leader.
     pub dot_leader: bool,
-    /// 每级缩进。
+    /// Indent per level.
     pub indent_per_level: Twips,
 }
 
@@ -688,23 +689,23 @@ impl Default for TocStyle {
     }
 }
 
-/// 表格。
+/// A table.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Table {
-    /// 列定义。
+    /// Column definitions.
     pub columns: Vec<Column>,
-    /// 行。
+    /// Rows.
     pub rows: Vec<Row>,
-    /// 前多少行是跨页重复的表头。
+    /// How many leading rows are headers repeated across pages.
     pub header_rows: u32,
-    /// 表格边框。
+    /// Table borders.
     pub borders: TableBorders,
-    /// 单元格内边距。
+    /// Cell padding.
     pub cell_padding: Margins,
 }
 
 impl Table {
-    /// 创建空表格。
+    /// Create an empty table.
     pub fn new(columns: Vec<Column>) -> Self {
         Self {
             columns,
@@ -716,36 +717,36 @@ impl Table {
     }
 }
 
-/// 列宽定义。
+/// A column width definition.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum ColumnWidth {
-    /// 固定宽度。
+    /// A fixed width.
     Twips(Twips),
-    /// 按剩余宽度分配权重。
+    /// A weight for distributing the remaining width.
     Weight(u16),
 }
 
-/// 表格列。
+/// A table column.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Column {
-    /// 列宽。
+    /// Column width.
     pub width: ColumnWidth,
 }
 
-/// 表格行。
+/// A table row.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Row {
-    /// 单元格。
+    /// Cells.
     pub cells: Vec<Cell>,
-    /// 可选固定行高。
+    /// Optional fixed row height.
     pub height: Option<Twips>,
-    /// 是否表头行。
+    /// Whether this is a header row.
     pub is_header: bool,
 }
 
 impl Row {
-    /// 创建行。
+    /// Create a row.
     pub fn new(cells: Vec<Cell>) -> Self {
         Self {
             cells,
@@ -755,19 +756,19 @@ impl Row {
     }
 }
 
-/// 表格单元格。
+/// A table cell.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Cell {
-    /// 单元格内容。
+    /// Cell content.
     pub blocks: Vec<Block>,
-    /// 横向合并的列数（gridSpan），至少 1。
+    /// Number of columns spanned horizontally (gridSpan), at least 1.
     pub span: u32,
-    /// 纵向合并状态（Merge）。
+    /// Vertical merge state (`vMerge`).
     pub v_merge: VMerge,
 }
 
 impl Cell {
-    /// 创建普通单元格。
+    /// Create a normal cell.
     pub fn new(blocks: Vec<Block>) -> Self {
         Self {
             blocks,
@@ -776,54 +777,54 @@ impl Cell {
         }
     }
 
-    /// 设置横向合并列数。
+    /// Set the number of horizontally spanned columns.
     pub fn with_span(mut self, span: u32) -> Self {
         self.span = span.max(1);
         self
     }
 
-    /// 设置纵向合并状态。
+    /// Set the vertical merge state.
     pub fn with_v_merge(mut self, v_merge: VMerge) -> Self {
         self.v_merge = v_merge;
         self
     }
 }
 
-/// 单元格的纵向合并状态。
+/// The vertical merge state of a cell.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum VMerge {
-    /// 不参与纵向合并。
+    /// Not part of a vertical merge.
     #[default]
     None,
-    /// 合并组的起始单元格（Merge restart），内容写在这里。
+    /// The starting cell of a merge group (`vMerge restart`); the content is written here.
     Restart,
-    /// 合并组的延续单元格（Merge continue），内容为空、由上方单元格覆盖。
+    /// A continuation cell of a merge group (`vMerge continue`); its content is empty and is covered by the cell above.
     Continue,
 }
 
-/// 边框线型。
+/// Border line style.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum BorderStyle {
-    /// 实线。
+    /// Solid line.
     #[default]
     Solid,
-    /// 虚线。
+    /// Dashed line.
     Dashed,
-    /// 点线。
+    /// Dotted line.
     Dotted,
-    /// 双线。
+    /// Double line.
     Double,
 }
 
-/// 单条边框。
+/// A single border.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Border {
-    /// 线宽。
+    /// Line width.
     pub width: Twips,
-    /// 颜色。
+    /// Color.
     pub color: Rgba,
-    /// 线型。
+    /// Line style.
     pub style: BorderStyle,
 }
 
@@ -837,49 +838,49 @@ impl Default for Border {
     }
 }
 
-/// 表格边框集合。
+/// A set of table borders.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TableBorders {
-    /// 外边框。
+    /// Outer border.
     pub outer: Option<Border>,
-    /// 水平内边框。
+    /// Horizontal inner borders.
     pub horizontal: Option<Border>,
-    /// 垂直内边框。
+    /// Vertical inner borders.
     pub vertical: Option<Border>,
 }
 
-/// 命名样式表。
+/// A named style sheet.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StyleSheet {
-    /// 默认段落样式。
+    /// Default paragraph style.
     pub default_paragraph: ParaStyle,
-    /// 默认字符样式。
+    /// Default character style.
     pub default_character: TextStyle,
-    /// 命名段落样式。
+    /// Named paragraph styles.
     pub paragraph: Vec<NamedStyle<ParaStyle>>,
-    /// 命名字符样式。
+    /// Named character styles.
     pub character: Vec<NamedStyle<TextStyle>>,
 }
 
-/// 一条命名样式。
+/// A named style.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NamedStyle<T> {
-    /// 样式 ID。
+    /// Style ID.
     pub id: String,
-    /// 显示名称。
+    /// Display name.
     pub name: String,
-    /// 基于的父样式 ID。
+    /// ID of the parent style this is based on.
     pub based_on: Option<String>,
-    /// 样式属性。
+    /// Style properties.
     pub props: T,
 }
 
-/// 附件。
+/// An attachment.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Attachment {
-    /// 附件元数据。
+    /// Attachment metadata.
     pub info: AttachmentInfo,
-    /// 附件字节。
+    /// Attachment bytes.
     pub bytes: Arc<[u8]>,
 }
 

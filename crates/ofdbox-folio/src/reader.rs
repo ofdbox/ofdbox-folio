@@ -1,4 +1,4 @@
-//! 阅读器门面：格式探测、页面缓存与按需加载。
+//! Reader facade: format probing, page caching and on-demand loading.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
@@ -14,10 +14,10 @@ use ofdbox_folio_ir::{
 
 use crate::error::Error;
 
-/// 页面缓存选项。
+/// Page cache options.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CacheOptions {
-    /// 页面结构缓存预算，单位字节；0 表示禁用。
+    /// Budget for cached page structures, in bytes; 0 disables the cache.
     pub max_bytes: usize,
 }
 
@@ -29,49 +29,49 @@ impl Default for CacheOptions {
     }
 }
 
-/// 阅读器选项。
+/// Reader options.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReaderOptions {
-    /// 页面缓存。
+    /// Page cache.
     pub cache: CacheOptions,
 }
 
-/// 打开选项。
+/// Open options.
 #[derive(Default)]
 pub struct OpenOptions {
-    /// 显式指定格式；`None` 时自动探测。
+    /// Explicit format; auto-detected when `None`.
     pub format: Option<SourceFormat>,
-    /// 页面缓存。
+    /// Page cache.
     pub cache: CacheOptions,
-    /// 缺失字体的来源。
+    /// Source for missing fonts.
     pub font_provider: Option<Box<dyn FontProvider>>,
-    /// 加密文档的密码。
+    /// Password of an encrypted document.
     pub password: Option<String>,
 }
 
-/// 缓存统计。
+/// Cache statistics.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CacheStats {
-    /// 缓存预算。
+    /// Cache budget.
     pub max_bytes: usize,
-    /// 当前缓存页数。
+    /// Number of pages currently cached.
     pub pages: usize,
-    /// 当前缓存字节数。
+    /// Number of bytes currently cached.
     pub bytes: usize,
-    /// 命中次数。
+    /// Number of hits.
     pub hits: u64,
-    /// 未命中次数。
+    /// Number of misses.
     pub misses: u64,
-    /// 淘汰次数。
+    /// Number of evictions.
     pub evictions: u64,
 }
 
-/// 一页上的选择矩形。
+/// Selection rectangles on one page.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PageSelection {
-    /// 页面索引。
+    /// Page index.
     pub page: usize,
-    /// 页面空间的矩形。
+    /// Rectangles in page space.
     pub rects: Vec<ofdbox_folio_ir::Rect>,
 }
 
@@ -167,14 +167,14 @@ impl PageCache {
     }
 }
 
-/// 多格式文档阅读器。
+/// Multi-format document reader.
 pub struct Document {
     source: Box<dyn DocumentSource>,
     cache: PageCache,
 }
 
 impl Document {
-    /// 从已有文档源创建阅读器。
+    /// Creates a reader from an existing document source.
     pub fn from_source(source: Box<dyn DocumentSource>, options: ReaderOptions) -> Self {
         Self {
             source,
@@ -182,7 +182,7 @@ impl Document {
         }
     }
 
-    /// 从内存字节打开文档。
+    /// Opens a document from in-memory bytes.
     pub fn open_bytes(bytes: Vec<u8>, options: OpenOptions) -> Result<Self, Error> {
         let OpenOptions {
             format,
@@ -214,10 +214,14 @@ impl Document {
             )?),
             #[cfg(not(feature = "pdf"))]
             SourceFormat::Pdf => {
-                return Err(Error::UnsupportedFormat("未启用 PDF 支持".to_owned()));
+                return Err(Error::UnsupportedFormat(
+                    "PDF support is not enabled".to_owned(),
+                ));
             }
             SourceFormat::Docx => {
-                return Err(Error::UnsupportedFormat("DOCX 适配尚未实现".to_owned()));
+                return Err(Error::UnsupportedFormat(
+                    "DOCX support is not implemented yet".to_owned(),
+                ));
             }
             _ => {
                 return Err(Error::UnsupportedFormat(format!("{format:?}")));
@@ -229,49 +233,49 @@ impl Document {
         })
     }
 
-    /// 从文件打开文档。
+    /// Opens a document from a file.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_path(path: impl AsRef<Path>, options: OpenOptions) -> Result<Self, Error> {
         let bytes = std::fs::read(path)?;
         Self::open_bytes(bytes, options)
     }
 
-    /// 文档级信息。
+    /// Document-level information.
     pub fn info(&self) -> &DocumentInfo {
         self.source.info()
     }
 
-    /// 源格式。
+    /// Source format.
     pub fn format(&self) -> SourceFormat {
         self.info().format
     }
 
-    /// 元数据。
+    /// Metadata.
     pub fn metadata(&self) -> &Metadata {
         &self.info().metadata
     }
 
-    /// 页面数量。
+    /// Number of pages.
     pub fn page_count(&self) -> usize {
         self.info().page_count
     }
 
-    /// 大纲。
+    /// Outline.
     pub fn outline(&self) -> &[OutlineItem] {
         &self.info().outline
     }
 
-    /// 附件元数据。
+    /// Attachment metadata.
     pub fn attachments(&self) -> &[AttachmentInfo] {
         &self.info().attachments
     }
 
-    /// 页面信息，不加载页面内容。
+    /// Page information without loading the page content.
     pub fn page_info(&self, index: usize) -> Result<PageInfo, Error> {
         Ok(self.source.page_info(index)?)
     }
 
-    /// 按需加载页面；命中的页面直接来自缓存。
+    /// Loads a page on demand; a page that is already cached comes straight from the cache.
     pub fn page(&mut self, index: usize) -> Result<Arc<Page>, Error> {
         if let Some(page) = self.cache.get(index) {
             return Ok(page);
@@ -281,7 +285,7 @@ impl Document {
         Ok(page)
     }
 
-    /// 预取页面到缓存；已缓存时不做任何事。
+    /// Prefetches a page into the cache; does nothing when it is already cached.
     pub fn prefetch(&mut self, index: usize) -> Result<(), Error> {
         if self.cache.max_bytes == 0 || self.cache.contains(index) {
             return Ok(());
@@ -291,14 +295,15 @@ impl Document {
         Ok(())
     }
 
-    /// 返回一页的纯文本。
+    /// Returns the plain text of one page.
     pub fn page_text(&mut self, index: usize) -> Result<String, Error> {
         Ok(self.page(index)?.text.plain_text())
     }
 
-    /// 把页面内的字符偏移转换为文本位置。
+    /// Converts a character offset within a page into a text position.
     ///
-    /// `char_offset` 按页面文本项的逻辑顺序累计，超出范围时返回页末位置。
+    /// `char_offset` accumulates over the logical order of the page's text items; when it
+    /// is out of range, the position at the end of the page is returned.
     pub fn text_position(&mut self, page: usize, char_offset: u32) -> Result<TextPosition, Error> {
         let page = self.page(page)?;
         let layer = &page.text;
@@ -313,9 +318,9 @@ impl Document {
         Ok(layer.end_position())
     }
 
-    /// 跨页搜索；回调返回 `false` 时提前停止。
+    /// Searches across pages; stops early when the callback returns `false`.
     ///
-    /// 返回已访问的命中数量。页面按需加载并进入缓存。
+    /// Returns the number of hits visited. Pages are loaded on demand and enter the cache.
     pub fn search(
         &mut self,
         query: &SearchQuery,
@@ -334,7 +339,7 @@ impl Document {
         Ok(count)
     }
 
-    /// 跨页搜索并收集全部命中。
+    /// Searches across pages and collects all hits.
     pub fn search_all(&mut self, query: &SearchQuery) -> Result<Vec<SearchHit>, Error> {
         let mut hits = Vec::new();
         self.search(query, |hit| {
@@ -344,7 +349,8 @@ impl Document {
         Ok(hits)
     }
 
-    /// 返回跨页选择对应的文本；不同页之间用换行符连接。
+    /// Returns the text for a cross-page selection; different pages are joined with a
+    /// newline.
     pub fn selection_text(&mut self, selection: &Selection) -> Result<String, Error> {
         let range = selection.range();
         if range.is_empty() {
@@ -369,13 +375,14 @@ impl Document {
         Ok(output)
     }
 
-    /// 命中测试：页面坐标（毫米，左上角原点）落在哪个字符上。
+    /// Hit testing: which character a point in page coordinates (millimetres, top-left
+    /// origin) falls on.
     pub fn hit_test(&mut self, page: usize, point: Point) -> Result<Option<TextPosition>, Error> {
         let page = self.page(page)?;
         Ok(ofdbox_folio_ir::hit_test(&page.text, point))
     }
 
-    /// 返回跨页选择覆盖的页面矩形。
+    /// Returns the page rectangles covered by a cross-page selection.
     pub fn selection_rects(&mut self, selection: &Selection) -> Result<Vec<PageSelection>, Error> {
         let range = selection.range();
         if range.is_empty() {
@@ -404,7 +411,7 @@ impl Document {
         Ok(())
     }
 
-    /// 预取指定页前后若干页。
+    /// Prefetches a few pages before and after the given page.
     pub fn prefetch_around(&mut self, index: usize, radius: usize) -> Result<(), Error> {
         let page_count = self.page_count();
         if page_count == 0 {
@@ -418,23 +425,23 @@ impl Document {
         Ok(())
     }
 
-    /// 读取附件字节。
+    /// Reads the bytes of an attachment.
     pub fn attachment_bytes(&mut self, id: AttachmentId) -> Result<Arc<[u8]>, Error> {
         Ok(self.source.load_attachment(id)?)
     }
 
-    /// 当前缓存统计。
+    /// Current cache statistics.
     pub fn cache_stats(&self) -> CacheStats {
         self.cache.stats()
     }
 
-    /// 清空页面缓存。
+    /// Clears the page cache.
     pub fn clear_cache(&mut self) {
         self.cache.clear();
         self.source.clear_caches();
     }
 
-    /// 文档声明的字体名称。
+    /// Font names declared by the document.
     pub fn font_names(&mut self) -> Result<Vec<String>, Error> {
         Ok(self.source.font_names()?)
     }

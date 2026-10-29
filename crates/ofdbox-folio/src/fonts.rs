@@ -1,11 +1,13 @@
-//! 系统字体解析：把「字体族名 + 粗体/斜体」映射到本机字体文件。
+//! System font resolution: maps "font family name + bold/italic" to a local font file.
 //!
-//! 排版的断行、页数与字形都取决于实际取到的字体，所以这层映射必须只有一份实现、
-//! 且结果可解释：解析过的族名与实际文件都记在 [`SystemFonts::used_fonts`] 里，
-//! 供 `--report` 输出。
+//! Line breaking, page count and glyphs during layout all depend on the font that is
+//! actually resolved, so this mapping must have exactly one implementation and produce
+//! explainable results: resolved family names and the actual files are both recorded in
+//! [`SystemFonts::used_fonts`] for `--report` output.
 //!
-//! 只做「族名 → 文件」的最小映射，不解析字体内部信息；找不到时会依次退到
-//! 带 CJK 字形的通用字体，保证中文不会整段落到纯拉丁字体上。
+//! Only the minimal "family name → file" mapping is done; font internals are not parsed.
+//! When nothing matches, resolution falls back through generic fonts that carry CJK
+//! glyphs, so Chinese text never ends up entirely on a Latin-only font.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,29 +15,30 @@ use std::sync::{Arc, Mutex};
 
 use ofdbox_folio_ir::{FontError, FontProvider, FontRequest};
 
-/// 一次成功解析：族名与实际字体文件。
+/// One successful resolution: family name and actual font file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedFont {
-    /// 请求的字体族名（可能为空）。
+    /// Requested font family name (may be empty).
     pub family: String,
-    /// 实际命中的字体文件。
+    /// Font file that was actually hit.
     pub path: PathBuf,
 }
 
-/// 从本机字体目录按族名取字体的 [`FontProvider`]。
+/// A [`FontProvider`] that picks fonts by family name from the local font directories.
 #[derive(Debug, Default)]
 pub struct SystemFonts {
     dirs: Vec<PathBuf>,
-    /// `族名|粗|斜` → 文件；`None` 表示解析失败（同样缓存，避免反复扫目录）。
+    /// `family|bold|italic` → file; `None` means resolution failed (cached as well, to
+    /// avoid rescanning the directories over and over).
     resolved: Mutex<HashMap<String, Option<PathBuf>>>,
-    /// 文件 → 字节。
+    /// File → bytes.
     bytes: Mutex<HashMap<PathBuf, Option<Arc<[u8]>>>>,
-    /// 族名 → 实际文件，供报告使用。
+    /// Family name → actual file, for reporting.
     used: Mutex<HashMap<String, PathBuf>>,
 }
 
 impl SystemFonts {
-    /// 使用当前平台的默认字体目录。
+    /// Uses the default font directories of the current platform.
     pub fn new() -> Self {
         Self {
             dirs: default_font_dirs(),
@@ -45,7 +48,7 @@ impl SystemFonts {
         }
     }
 
-    /// 指定字体目录（按顺序查找，用于测试或自定义字体包）。
+    /// Font directories to use (searched in order; for tests or custom font bundles).
     pub fn with_dirs(dirs: Vec<PathBuf>) -> Self {
         Self {
             dirs,
@@ -53,9 +56,9 @@ impl SystemFonts {
         }
     }
 
-    /// 已经解析过的字体，按族名排序。
+    /// Fonts resolved so far, sorted by family name.
     pub fn used_fonts(&self) -> Vec<ResolvedFont> {
-        let used = self.used.lock().expect("字体使用表");
+        let used = self.used.lock().expect("font usage table");
         let mut items: Vec<ResolvedFont> = used
             .iter()
             .map(|(family, path)| ResolvedFont {
@@ -67,13 +70,13 @@ impl SystemFonts {
         items
     }
 
-    /// 解析族名到字体文件；找不到返回 `None`。
+    /// Resolves a family name to a font file; returns `None` when nothing is found.
     pub fn resolve(&self, family: &str) -> Option<PathBuf> {
         resolve_in(&self.dirs, family, false, false, &self.resolved)
     }
 
     fn load_bytes(&self, path: &Path) -> Option<Arc<[u8]>> {
-        let mut bytes = self.bytes.lock().expect("字体缓存");
+        let mut bytes = self.bytes.lock().expect("font byte cache");
         if let Some(cached) = bytes.get(path) {
             return cached.clone();
         }
@@ -104,14 +107,14 @@ impl FontProvider for SystemFonts {
         };
         self.used
             .lock()
-            .expect("字体使用表")
+            .expect("font usage table")
             .entry(family)
             .or_insert(path);
         Ok(Some(bytes))
     }
 }
 
-/// 当前平台的默认字体目录。
+/// Default font directories of the current platform.
 pub fn default_font_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if cfg!(windows) {
@@ -131,9 +134,9 @@ pub fn default_font_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// 族名经过粗体/斜体修正后的候选文件名，按优先级排列。
+/// Candidate file names for a family name after bold/italic adjustment, in priority order.
 ///
-/// 纯函数，便于单测：不碰文件系统。
+/// A pure function so it is easy to unit test: it never touches the filesystem.
 pub fn font_candidates(family: &str, bold: bool, italic: bool) -> Vec<String> {
     let name = family.to_ascii_lowercase();
     let mut candidates: Vec<String> = Vec::new();
@@ -146,7 +149,7 @@ pub fn font_candidates(family: &str, bold: bool, italic: bool) -> Vec<String> {
         }
     };
 
-    // 中日韩常见族名（含 Word 的中英文别名）。
+    // Common CJK family names (including Word's Chinese and English aliases).
     let cjk_serif = name.contains("sun")
         || name.contains("song")
         || name.contains("ming")
@@ -186,11 +189,13 @@ pub fn font_candidates(family: &str, bold: bool, italic: bool) -> Vec<String> {
         push(&["wingding.ttf", "DejaVuSans.ttf"]);
     }
     if italic && !cjk_serif && !cjk_kai && !cjk_hei {
-        // 中文字体一般没有独立斜体文件，这里只在拉动词族里插一次。
+        // CJK fonts generally have no separate italic file, so insert these only once
+        // among the Latin families.
         push(&["ariali.ttf", "timesi.ttf"]);
     }
 
-    // 通用兜底：即使族名完全未知，也优先带 CJK 字形的字体，避免中文整段豆腐块。
+    // Generic fallback: even when the family name is completely unknown, prefer fonts that
+    // carry CJK glyphs so Chinese text does not turn into whole blocks of tofu.
     push(&[
         "simhei.ttf",
         "simsun.ttc",
@@ -205,7 +210,7 @@ pub fn font_candidates(family: &str, bold: bool, italic: bool) -> Vec<String> {
     candidates
 }
 
-/// 在给定目录里按候选顺序找文件；结果写进 `cache`。
+/// Looks files up in the given directories in candidate order; the result is written into `cache`.
 fn resolve_in(
     dirs: &[PathBuf],
     family: &str,
@@ -214,18 +219,19 @@ fn resolve_in(
     cache: &Mutex<HashMap<String, Option<PathBuf>>>,
 ) -> Option<PathBuf> {
     let key = format!("{family}|{bold}|{italic}");
-    if let Some(cached) = cache.lock().expect("字体解析缓存").get(&key) {
+    if let Some(cached) = cache.lock().expect("font resolution cache").get(&key) {
         return cached.clone();
     }
     let found = find_font(dirs, &font_candidates(family, bold, italic));
     cache
         .lock()
-        .expect("字体解析缓存")
+        .expect("font resolution cache")
         .insert(key, found.clone());
     found
 }
 
-/// 按候选文件名查找，最后退化成「目录里按名字排序的第一个字体」。
+/// Looks up by candidate file name, finally degrading to "the first font in the directory
+/// sorted by name".
 fn find_font(dirs: &[PathBuf], candidates: &[String]) -> Option<PathBuf> {
     for dir in dirs {
         for candidate in candidates {
@@ -235,7 +241,8 @@ fn find_font(dirs: &[PathBuf], candidates: &[String]) -> Option<PathBuf> {
             }
         }
     }
-    // 兜底：扫目录，按文件名排序取第一个字体，保证结果稳定可复现。
+    // Fallback: scan the directory and take the first font sorted by file name, so the
+    // result stays stable and reproducible.
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
@@ -294,7 +301,7 @@ mod tests {
         let candidates = font_candidates("", false, false);
         assert_eq!(candidates[0], "simhei.ttf");
         assert!(candidates.contains(&"arial.ttf".to_owned()));
-        // 未知拉丁族名同样排在 CJK 兜底之后。
+        // Unknown Latin family names also rank after the CJK fallback.
         let candidates = font_candidates("SomeUnknownFace", false, false);
         assert_eq!(candidates[0], "simhei.ttf");
     }
@@ -303,9 +310,9 @@ mod tests {
     fn resolves_in_custom_directory_and_records_usage() {
         let dir = std::env::temp_dir().join(format!("ofdbox-fonts-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("创建目录");
-        std::fs::write(dir.join("simhei.ttf"), b"fake").expect("写文件");
-        std::fs::write(dir.join("arial.ttf"), b"fake").expect("写文件");
+        std::fs::create_dir_all(&dir).expect("create directory");
+        std::fs::write(dir.join("simhei.ttf"), b"fake").expect("write file");
+        std::fs::write(dir.join("arial.ttf"), b"fake").expect("write file");
 
         let mut fonts = SystemFonts::with_dirs(vec![dir.clone()]);
         let bytes = fonts
@@ -313,8 +320,8 @@ mod tests {
                 family_name: Some("黑体"),
                 ..FontRequest::default()
             })
-            .expect("加载")
-            .expect("命中");
+            .expect("load")
+            .expect("hit");
         assert_eq!(&bytes[..], b"fake");
 
         let used = fonts.used_fonts();
@@ -322,8 +329,9 @@ mod tests {
         assert_eq!(used[0].family, "黑体");
         assert_eq!(used[0].path, dir.join("simhei.ttf"));
 
-        // 未知族名退到带 CJK 字形的兜底候选（目录里有 simhei.ttf）。
-        let path = fonts.resolve("完全不存在的字体");
+        // An unknown family name falls back to the CJK-capable candidates (the directory
+        // contains simhei.ttf).
+        let path = fonts.resolve("NoSuchFontFaceExists");
         assert_eq!(path, Some(dir.join("simhei.ttf")));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -333,10 +341,11 @@ mod tests {
     fn unknown_names_fall_back_to_sorted_directory_scan() {
         let dir = std::env::temp_dir().join(format!("ofdbox-fonts-scan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("创建目录");
-        // 候选表里一个都没有，只能按文件名排序取第一个，保证结果可复现。
-        std::fs::write(dir.join("zzz-face.ttf"), b"fake").expect("写文件");
-        std::fs::write(dir.join("aaa-face.ttf"), b"fake").expect("写文件");
+        std::fs::create_dir_all(&dir).expect("create directory");
+        // None of the candidates exist, so the first font sorted by file name is taken to
+        // keep the result reproducible.
+        std::fs::write(dir.join("zzz-face.ttf"), b"fake").expect("write file");
+        std::fs::write(dir.join("aaa-face.ttf"), b"fake").expect("write file");
 
         let fonts = SystemFonts::with_dirs(vec![dir.clone()]);
         assert_eq!(fonts.resolve("Arial"), Some(dir.join("aaa-face.ttf")));

@@ -1,10 +1,11 @@
-//! OFDBox Folio 的 OFD 适配层。
+//! OFD adapter layer for OFDBox Folio.
 //!
-//! 负责把 OFD 包解析为 Fixed IR 页面，以及把 Fixed IR 写出为 OFD 包。
-//! 对外不暴露 `ofdbox_core` 的类型。
+//! Parses OFD packages into Fixed IR pages, and writes Fixed IR out as OFD packages.
+//! `ofdbox_core` types are not exposed publicly.
 //!
-//! 读取基于 `OfdFile`（容器、解密、entry 访问）与 folio 自己的宽松解析：
-//! 先按 typed model 严格解析，失败后规范化 XML 再试一次。
+//! Reading is built on `OfdFile` (container, decryption, entry access) plus folio's own lenient
+//! parsing: first parse strictly against the typed model, and on failure normalize the XML and
+//! try once more.
 
 #![allow(clippy::too_many_lines)]
 
@@ -37,82 +38,82 @@ use crate::package::{Ctx, Loaded, PackageReader};
 pub use frontend::{OfdReadOptions, UnsupportedPolicy};
 pub use writer::{OfdWriteOptions, write_fixed};
 
-/// 宽松解析模式。
+/// Lenient parsing mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LenientMode {
-    /// 只用严格解析。
+    /// Strict parsing only.
     Off,
-    /// 严格解析失败后回退宽松解析（默认）。
+    /// Fall back to lenient parsing when strict parsing fails (default).
     #[default]
     OnFailure,
-    /// 所有 entry 都先规范化再解析。
+    /// Normalize every entry before parsing it.
     Always,
 }
 
-/// 宽松解析时执行的一类修复。
+/// A class of repair performed during lenient parsing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OfdRepair {
-    /// 命名空间前缀/URI 规范化。
+    /// Namespace prefix/URI normalization.
     Namespace,
-    /// 注入缺失的图元/图层 ID。
+    /// Injected a missing graphic unit/layer ID.
     InjectId,
-    /// 注入缺失的必选属性。
+    /// Injected a missing required attribute.
     InjectAttribute,
-    /// 注入缺失的必选子元素。
+    /// Injected a missing required child element.
     InjectChild,
-    /// 丢弃无法解析的图元（例如缺资源引用的图片）。
+    /// Dropped a graphic unit that cannot be parsed (for example an image with no resource reference).
     DropObject,
-    /// 清洗数值分隔符。
+    /// Cleaned up numeric separators.
     CleanNumber,
 }
 
-/// 一条宽松解析诊断。
+/// A single lenient-parsing diagnostic.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OfdDiagnostic {
-    /// 发生修复的 entry。
+    /// Entry where the repair happened.
     pub entry: String,
-    /// 修复类型。
+    /// Kind of repair.
     pub repair: OfdRepair,
-    /// 面向开发者的说明。
+    /// Developer-facing description.
     pub detail: String,
 }
 
-/// 探测字节是否为 OFD 包。
+/// Probes whether the bytes are an OFD package.
 ///
-/// 复用 `ofdbox-core` 的 ZIP 读取，因此能容忍前置字节、空 EOCD 等
-/// 真实文件里常见的非标准封装；不解析页面。
+/// Reuses the ZIP reader of `ofdbox-core`, so it tolerates leading bytes, an empty EOCD, and
+/// other non-standard packaging commonly seen in real files; pages are not parsed.
 pub fn probe(bytes: &[u8]) -> bool {
     OfdPackage::probe(bytes).unwrap_or(false)
 }
 
-/// OFD 适配层错误。
+/// OFD adapter layer error.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum OfdError {
-    /// OFD 结构读取或解析失败。
+    /// OFD structure could not be read or parsed.
     #[error(transparent)]
     Core(#[from] ofdbox_core::OfdError),
-    /// 文档结构不符合预期。
-    #[error("OFD 结构错误: {0}")]
+    /// Document structure is not as expected.
+    #[error("OFD structure error: {0}")]
     InvalidStructure(String),
-    /// 包内缺少条目。
-    #[error("缺少包条目: {0}")]
+    /// A package entry is missing.
+    #[error("missing package entry: {0}")]
     MissingEntry(String),
-    /// 当前实现不支持的特性。
-    #[error("不支持的 OFD 特性: {0}")]
+    /// Feature not supported by the current implementation.
+    #[error("unsupported OFD feature: {0}")]
     Unsupported(String),
-    /// 资源缺失。
-    #[error("缺少资源: {0}")]
+    /// A resource is missing.
+    #[error("missing resource: {0}")]
     MissingResource(String),
-    /// 图片处理失败。
-    #[error("图片处理失败: {0}")]
+    /// Image processing failed.
+    #[error("image processing failed: {0}")]
     Image(String),
-    /// 字体处理失败。
-    #[error("字体处理失败: {0}")]
+    /// Font processing failed.
+    #[error("font processing failed: {0}")]
     Font(String),
-    /// I/O 错误。
-    #[error("I/O 错误: {0}")]
+    /// I/O error.
+    #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
 
@@ -128,7 +129,7 @@ impl From<OfdError> for PageError {
     }
 }
 
-/// OFD 文档源。
+/// OFD document source.
 pub struct OfdDocument {
     reader: Rc<PackageReader>,
     document: Loaded<Document>,
@@ -143,12 +144,12 @@ pub struct OfdDocument {
 }
 
 impl OfdDocument {
-    /// 从内存字节打开 OFD。
+    /// Opens an OFD from in-memory bytes.
     pub fn open_bytes(bytes: Vec<u8>, options: OfdReadOptions) -> Result<Self, OfdError> {
         Self::open_bytes_with_fonts(bytes, options, None)
     }
 
-    /// 从内存字节打开 OFD，并注入缺失字体的来源。
+    /// Opens an OFD from in-memory bytes and injects a source for missing fonts.
     pub fn open_bytes_with_fonts(
         bytes: Vec<u8>,
         options: OfdReadOptions,
@@ -162,7 +163,7 @@ impl OfdDocument {
             .doc_bodies
             .first()
             .map(|body| body.doc_root.clone())
-            .ok_or_else(|| OfdError::InvalidStructure("OFD.xml 没有 DocBody".to_owned()))?;
+            .ok_or_else(|| OfdError::InvalidStructure("OFD.xml has no DocBody".to_owned()))?;
         let document_entry = root.resolve(&doc_root)?;
         let document_data = reader.parse_document(document_entry.as_str())?;
         let document = Loaded::new(
@@ -173,13 +174,13 @@ impl OfdDocument {
         Self::from_document(reader, document, options, font_provider)
     }
 
-    /// 从文件打开 OFD。
+    /// Opens an OFD from a file.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_path(path: impl AsRef<Path>, options: OfdReadOptions) -> Result<Self, OfdError> {
         Self::open_path_with_fonts(path, options, None)
     }
 
-    /// 从文件打开 OFD，并注入缺失字体的来源。
+    /// Opens an OFD from a file and injects a source for missing fonts.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_path_with_fonts(
         path: impl AsRef<Path>,
@@ -220,22 +221,22 @@ impl OfdDocument {
         })
     }
 
-    /// 页面数量。
+    /// Number of pages.
     pub fn page_count(&self) -> usize {
         self.pages.len()
     }
 
-    /// 资源表。
+    /// Resource store.
     pub fn resources(&self) -> &ResourceStore {
         &self.store
     }
 
-    /// 读取过程中发生的宽松修复（含已加载页面）。
+    /// Lenient repairs performed while reading (including those of pages already loaded).
     pub fn diagnostics(&self) -> Vec<OfdDiagnostic> {
         self.reader.diagnostics()
     }
 
-    /// 页面尺寸：页面 Area → 模板页 Area → 文档 PageArea。
+    /// Page size: page Area → template page Area → document PageArea.
     fn page_physical_box(&self, page: &PageEntry) -> Result<Rect, PageError> {
         let loaded = self
             .document
@@ -257,7 +258,7 @@ impl OfdDocument {
         }
     }
 
-    /// 页面引用的模板页里第一个声明了 Area 的尺寸。
+    /// Size of the first Area declared in a template page referenced by the page.
     fn template_physical_box(&self, page: &Loaded<PageModel>) -> Option<StBox> {
         for reference in &page.data.templates {
             let Some(template) = self
@@ -366,7 +367,7 @@ impl DocumentSource for OfdDocument {
     }
 }
 
-/// `StBox` 到 Fixed IR 矩形（原点固定为左上角）。
+/// `StBox` to a Fixed IR rectangle (origin always at the top-left corner).
 fn stbox_rect(value: StBox) -> Rect {
     Rect::new(0.0, 0.0, value.width, value.height)
 }
@@ -456,7 +457,7 @@ mod tests {
         assert!(count_elements(&page.content.root.children) >= 2);
     }
 
-    /// 带两级大纲的两页 OFD。
+    /// A two-page OFD with a two-level outline.
     fn ofd_with_outline() -> Vec<u8> {
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         let options = zip::write::SimpleFileOptions::default();
@@ -516,7 +517,7 @@ mod tests {
         let document =
             OfdDocument::open_bytes(ofd_with_outline(), OfdReadOptions::default()).expect("open");
         let outline = &document.info().outline;
-        assert_eq!(outline.len(), 2, "顶层节点: {outline:?}");
+        assert_eq!(outline.len(), 2, "top-level nodes: {outline:?}");
         assert_eq!(outline[0].title, "扉页");
         assert_eq!(outline[0].destination.page, 0);
         assert!(outline[0].children.is_empty());
@@ -538,7 +539,7 @@ mod tests {
         assert!(document.info().outline.is_empty());
     }
 
-    /// 带一个附件的 OFD。
+    /// An OFD with a single attachment.
     fn ofd_with_attachment() -> Vec<u8> {
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         let options = zip::write::SimpleFileOptions::default();
@@ -597,7 +598,7 @@ mod tests {
             OfdDocument::open_bytes(ofd_with_attachment(), OfdReadOptions::default())
                 .expect("open");
         let attachments = &document.info().attachments;
-        assert_eq!(attachments.len(), 1, "附件: {attachments:?}");
+        assert_eq!(attachments.len(), 1, "attachments: {attachments:?}");
         assert_eq!(attachments[0].name, "note.txt");
         assert_eq!(attachments[0].format.as_deref(), Some("txt"));
         assert_eq!(attachments[0].size, 5);

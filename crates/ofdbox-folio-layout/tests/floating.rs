@@ -1,4 +1,4 @@
-//! 浮动对象的端到端测试。
+//! End-to-end tests for floating objects.
 
 use std::sync::Arc;
 
@@ -8,7 +8,7 @@ use ofdbox_folio_ir::{
 };
 use ofdbox_folio_layout::layout;
 
-/// 固定返回同一份字体字节的提供者。
+/// Provider that always returns the same font bytes.
 struct SystemFonts {
     bytes: Arc<[u8]>,
 }
@@ -62,7 +62,7 @@ fn image_rect(page: &ofdbox_folio_ir::Page) -> (f64, f64, f64, f64) {
             ofdbox_folio_ir::Element::Image(image) => Some(image),
             _ => None,
         })
-        .expect("浮动图片");
+        .expect("floating image");
     (
         image.transform.e,
         image.transform.f,
@@ -89,19 +89,19 @@ fn floating_object_is_positioned_absolutely() {
     let fixed = layout(&flow, &mut fonts).expect("layout");
     let page = &fixed.pages[0];
     let (x, y, w, _h) = image_rect(page);
-    // 相对版心左上角：(25.4, 25.4) + (60, 80)。
-    assert!((x - (25.4 + 60.0)).abs() < 0.5, "浮动 x={x}");
-    assert!((y - (25.4 + 80.0)).abs() < 0.5, "浮动 y={y}");
-    assert!((w - 20.0).abs() < 0.5, "浮动宽度={w}");
+    // Relative to the top-left corner of the text area: (25.4, 25.4) + (60, 80).
+    assert!((x - (25.4 + 60.0)).abs() < 0.5, "floating x={x}");
+    assert!((y - (25.4 + 80.0)).abs() < 0.5, "floating y={y}");
+    assert!((w - 20.0).abs() < 0.5, "floating width={w}");
 
-    // 不移交正文游标：正文仍在页首。
+    // The body cursor is not moved: the body is still at the top of the page.
     let text_y = page
         .text
         .lines
         .first()
         .map(|line| line.bbox.y)
-        .expect("正文行");
-    assert!(text_y < 30.0, "正文 y={text_y}");
+        .expect("body line");
+    assert!(text_y < 30.0, "body y={text_y}");
 }
 
 #[test]
@@ -125,10 +125,10 @@ fn top_bottom_wrap_pushes_text_below() {
         .lines
         .first()
         .map(|line| line.bbox.y)
-        .expect("正文行");
+        .expect("body line");
     assert!(
         text_y >= image_y + image_h - 1.0,
-        "正文应排在图片下方: text_y={text_y} image_bottom={}",
+        "the body should be laid out below the image: text_y={text_y} image_bottom={}",
         image_y + image_h
     );
 }
@@ -140,7 +140,8 @@ fn square_wrap_indents_paragraphs_beside_the_object() {
     };
     let mut flow = FlowDocument::new(Metadata::default());
     let image = image_block(&mut flow);
-    // 左半页顶部的浮动图，四周型绕排：正文与它垂直重叠时要逐行让开。
+    // A floating image at the top of the left half of the page with square
+    // wrapping: lines vertically overlapping it must step aside line by line.
     let mut floating = FloatingObject::new(Point::new(10.0, 0.0), image);
     floating.width = Some(Twips::from_mm(25.0));
     floating.wrap = WrapMode::Square;
@@ -157,10 +158,10 @@ fn square_wrap_indents_paragraphs_beside_the_object() {
         .lines
         .first()
         .map(|line| line.bbox.x)
-        .expect("正文行");
+        .expect("body line");
     assert!(
         text_x >= image_x + image_w - 1.0,
-        "正文应让到图片右侧: text_x={text_x} image_right={}",
+        "the body should step aside to the right of the image: text_x={text_x} image_right={}",
         image_x + image_w
     );
 }
@@ -182,9 +183,9 @@ fn page_relative_position_ignores_margins() {
 
     let fixed = layout(&flow, &mut fonts).expect("layout");
     let (x, y, _, _) = image_rect(&fixed.pages[0]);
-    // 相对页面左上角：不再叠加页边距。
-    assert!((x - 30.0).abs() < 0.5, "page 基准 x={x}");
-    assert!((y - 40.0).abs() < 0.5, "page 基准 y={y}");
+    // Relative to the page top-left corner: page margins are not added again.
+    assert!((x - 30.0).abs() < 0.5, "page-relative x={x}");
+    assert!((y - 40.0).abs() < 0.5, "page-relative y={y}");
 }
 
 #[test]
@@ -202,7 +203,8 @@ fn square_wrap_releases_lines_below_the_object() {
     floating.wrap = WrapMode::Square;
     flow.push(Block::Floating(Box::new(floating)));
 
-    // 足够长的一段：前几行在绕排带里，后面的行应该回到左边距。
+    // A long enough paragraph: the first few lines are inside the wrap band and
+    // the later lines should return to the left margin.
     let text = (0..20)
         .map(|index| format!("第{index}句用来占满多行以便观察逐行绕排。"))
         .collect::<Vec<_>>()
@@ -231,15 +233,21 @@ fn square_wrap_releases_lines_below_the_object() {
         .filter(|(_, y)| *y > band_bottom + 1.0)
         .map(|(x, _)| *x)
         .collect();
-    assert!(!in_band.is_empty(), "应有行落在绕排带里");
+    assert!(
+        !in_band.is_empty(),
+        "some lines should fall inside the wrap band"
+    );
     assert!(
         in_band.iter().all(|x| *x >= image_right - 1.0),
-        "带内的行应让到图片右侧: {in_band:?}"
+        "lines inside the band should step aside to the right of the image: {in_band:?}"
     );
-    assert!(!below_band.is_empty(), "应有行落在绕排带下方");
+    assert!(
+        !below_band.is_empty(),
+        "some lines should fall below the wrap band"
+    );
     assert!(
         below_band.iter().all(|x| (*x - 25.4).abs() < 1.0),
-        "带下方的行应回到左边距: {below_band:?}"
+        "lines below the band should return to the left margin: {below_band:?}"
     );
 }
 
@@ -265,8 +273,8 @@ fn floating_object_in_table_cell_falls_back_to_inline() {
             .report
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("浮动对象嵌在")),
-        "诊断: {:?}",
+            .any(|diagnostic| diagnostic.message.contains("floating object nested in")),
+        "diagnostics: {:?}",
         fixed.report.diagnostics
     );
     assert!(!fixed.pages.is_empty());

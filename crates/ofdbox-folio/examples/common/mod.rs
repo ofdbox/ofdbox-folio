@@ -1,6 +1,7 @@
-//! 示例共用的系统字体提供者。
+//! System font provider shared by the examples.
 //!
-//! 实现已抽到 `ofdbox_folio::fonts`，CLI 与示例共用同一份「族名 → 字体文件」规则，
-//! 保证同一份文档在不同入口排出同样的页数。
+//! The implementation has been extracted into `ofdbox_folio::fonts`; the CLI and the
+//! examples share the same "family name → font file" rules, so the same document lays
+//! out into the same page count from every entry point.
 
 pub use ofdbox_folio::fonts::SystemFonts;

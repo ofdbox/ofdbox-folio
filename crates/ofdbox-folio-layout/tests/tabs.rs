@@ -1,4 +1,4 @@
-//! 制表位与前导符的端到端测试。
+//! End-to-end tests for tab stops and leaders.
 
 use std::sync::Arc;
 
@@ -8,7 +8,7 @@ use ofdbox_folio_ir::{
 };
 use ofdbox_folio_layout::layout;
 
-/// 固定返回同一份字体字节的提供者。
+/// Provider that always returns the same font bytes.
 struct SystemFonts {
     bytes: Arc<[u8]>,
 }
@@ -38,7 +38,7 @@ fn body_style() -> TextStyle {
     }
 }
 
-/// 段落用制表位把两段文字分开。
+/// A paragraph that separates two pieces of text with a tab stop.
 fn tabbed(left: &str, right: &str, stop: TabStop) -> Paragraph {
     let mut paragraph = Paragraph::new(ParaStyle {
         tabs: vec![stop],
@@ -56,7 +56,7 @@ fn tabbed(left: &str, right: &str, stop: TabStop) -> Paragraph {
     paragraph
 }
 
-/// 页面文本层里的字符与位置。
+/// The characters and positions in the page's text layer.
 fn chars(page: &ofdbox_folio_ir::Page) -> Vec<(String, f64)> {
     page.text
         .items
@@ -65,14 +65,14 @@ fn chars(page: &ofdbox_folio_ir::Page) -> Vec<(String, f64)> {
         .collect()
 }
 
-/// 某个字符（首次出现）的右边界。
+/// Right edge of a character (its first occurrence).
 fn right_edge(page: &ofdbox_folio_ir::Page, needle: &str) -> f64 {
     page.text
         .items
         .iter()
         .find(|item| item.run.text == needle)
         .map(|item| item.bbox.right())
-        .unwrap_or_else(|| panic!("没有找到 {needle}"))
+        .unwrap_or_else(|| panic!("did not find {needle}"))
 }
 
 const MARGIN: f64 = 25.4;
@@ -92,14 +92,15 @@ fn right_tab_puts_trailing_text_at_the_stop() {
 
     let fixed = layout(&flow, &mut fonts).expect("layout");
     let page = &fixed.pages[0];
-    // 页码“12”的右边界应贴在右制表位上（版心右边界）。
+    // The right edge of page number "12" should sit on the right tab stop (the
+    // right edge of the text area).
     let right = right_edge(page, "2");
     assert!(
         (right - (MARGIN + CONTENT)).abs() < 0.6,
-        "页码右边界 {right}，期望 {}",
+        "page number right edge {right}, expected {}",
         MARGIN + CONTENT
     );
-    // 制表符本身不产生字形。
+    // The tab itself produces no glyph.
     assert!(!chars(page).iter().any(|(text, _)| text.contains('\t')));
 }
 
@@ -126,7 +127,7 @@ fn left_tab_moves_to_the_stop() {
         .expect("B");
     assert!(
         (b - (MARGIN + 80.0)).abs() < 0.6,
-        "左制表位落点 {b}，期望 {}",
+        "left tab stop lands at {b}, expected {}",
         MARGIN + 80.0
     );
 }
@@ -145,21 +146,21 @@ fn centre_and_decimal_tabs_align_as_expected() {
 
     let fixed = layout(&flow, &mut fonts).expect("layout");
     let page = &fixed.pages[0];
-    // 小数点“.”应落在制表位上。
+    // The decimal point "." should land on the tab stop.
     let dot = page
         .text
         .items
         .iter()
         .find(|item| item.run.text == ".")
         .map(|item| item.bbox.x)
-        .expect("小数点");
+        .expect("decimal point");
     assert!(
         (dot - (MARGIN + 60.0)).abs() < 0.8,
-        "小数点位置 {dot}，期望 {}",
+        "decimal point at {dot}, expected {}",
         MARGIN + 60.0
     );
 
-    // 居中制表位：文字中心落在制表位上。
+    // Center tab stop: the centre of the text lands on the tab stop.
     let mut flow = FlowDocument::new(Metadata::default());
     flow.push(Block::Paragraph(tabbed(
         "X",
@@ -179,7 +180,7 @@ fn centre_and_decimal_tabs_align_as_expected() {
     let centre = (middle_left + middle_right) / 2.0;
     assert!(
         (centre - (MARGIN + 90.0)).abs() < 0.8,
-        "居中制表位的文字中心 {centre}，期望 {}",
+        "centre of the text on the centre tab stop is {centre}, expected {}",
         MARGIN + 90.0
     );
 }
@@ -190,7 +191,8 @@ fn tab_stop_beyond_the_margin_is_clamped() {
         return;
     };
     let mut flow = FlowDocument::new(Metadata::default());
-    // 制表位声明在页边距之外：内容必须被裁回正文右边缘，并记一条诊断。
+    // The tab stop is declared outside the page margins: the content must be
+    // clipped back to the body right edge and a diagnostic recorded.
     flow.push(Block::Paragraph(tabbed(
         "超长制表位",
         "99",
@@ -202,15 +204,15 @@ fn tab_stop_beyond_the_margin_is_clamped() {
     let edge = right_edge(page, "9");
     assert!(
         edge <= right + 0.2,
-        "内容右边界 {edge:.2} 应不越过正文右边缘 {right:.2}"
+        "content right edge {edge:.2} should not cross the body right edge {right:.2}"
     );
     assert!(
         fixed
             .report
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("制表位")),
-        "应有制表位诊断: {:?}",
+            .any(|diagnostic| diagnostic.message.contains("tab stop")),
+        "a tab stop diagnostic is expected: {:?}",
         fixed.report.diagnostics
     );
 }
@@ -221,7 +223,8 @@ fn tab_content_wider_than_the_gap_does_not_overlap() {
         return;
     };
     let mut flow = FlowDocument::new(Metadata::default());
-    // 制表位很近、后面文字很长：右对齐会把起点推到 x 之前，必须退化成紧接排布。
+    // A very close tab stop with long trailing text: right alignment would push
+    // the start before x, so it must degrade to placing the text directly after.
     flow.push(Block::Paragraph(tabbed(
         "abc",
         "0123456789",
@@ -234,7 +237,7 @@ fn tab_content_wider_than_the_gap_does_not_overlap() {
     for (text, x) in &items {
         assert!(
             *x + 0.01 >= previous_x,
-            "字符 {text:?} 与前文重叠: x={x:.2} previous_x={previous_x:.2}"
+            "character {text:?} overlaps the preceding text: x={x:.2} previous_x={previous_x:.2}"
         );
         previous_x = *x;
     }
@@ -243,8 +246,8 @@ fn tab_content_wider_than_the_gap_does_not_overlap() {
             .report
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("制表位")),
-        "应有制表位诊断: {:?}",
+            .any(|diagnostic| diagnostic.message.contains("tab stop")),
+        "a tab stop diagnostic is expected: {:?}",
         fixed.report.diagnostics
     );
 }
@@ -273,24 +276,31 @@ fn dot_leader_fills_the_gap() {
             _ => None,
         })
         .collect();
-    assert_eq!(leaders.len(), 1, "应有一条前导符");
-    let stroke = leaders[0].stroke.as_ref().expect("描边");
-    assert!(!stroke.style.dash.is_empty(), "点线应有虚线节奏");
-    // 前导符从第一个字之后画到页码左侧（页码本身占住制表位右侧）。
-    let bounds = leaders[0].path.bounds().expect("前导符应有包围盒");
+    assert_eq!(leaders.len(), 1, "there should be one leader");
+    let stroke = leaders[0].stroke.as_ref().expect("stroke");
+    assert!(
+        !stroke.style.dash.is_empty(),
+        "a dotted line should have a dash pattern"
+    );
+    // The leader is drawn from after the first text to the left of the page number
+    // (the page number itself occupies the right side of the tab stop).
+    let bounds = leaders[0]
+        .path
+        .bounds()
+        .expect("the leader should have a bounding box");
     let number_x = page
         .text
         .items
         .iter()
         .find(|item| item.run.text == "7")
         .map(|item| item.bbox.x)
-        .expect("页码");
+        .expect("page number");
     assert!(
         (bounds.right() - number_x).abs() < 0.6,
-        "前导符右端 {}，页码起点 {number_x}",
+        "leader right end {}, page number start {number_x}",
         bounds.right()
     );
-    assert!(bounds.x > MARGIN, "前导符左端 {}", bounds.x);
+    assert!(bounds.x > MARGIN, "leader left end {}", bounds.x);
 }
 
 #[test]
@@ -330,9 +340,12 @@ fn tab_without_stops_advances_to_default_grid() {
         .find(|item| item.run.text == "B")
         .map(|item| item.bbox.x)
         .expect("B");
-    // 默认步长 12.5mm 的整数倍格点。
+    // Integer multiples of the default 12.5mm step.
     let step = 12.5;
     let grid = ((b - MARGIN) / step).round() * step + MARGIN;
-    assert!((b - grid).abs() < 0.6, "B 落在 {b}，最近格点 {grid}");
-    assert!(b > a, "制表符应把 B 推到 A 之后");
+    assert!(
+        (b - grid).abs() < 0.6,
+        "B lands at {b}, nearest grid point {grid}"
+    );
+    assert!(b > a, "the tab should push B past A");
 }

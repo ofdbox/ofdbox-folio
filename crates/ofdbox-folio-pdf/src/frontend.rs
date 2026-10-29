@@ -1,8 +1,10 @@
-//! PDF 页面前端：把 PDF 页面转换为 Fixed IR。
+//! PDF page frontend: converts PDF pages into Fixed IR.
 //!
-//! 覆盖路径、文本、图片、裁剪、透明度和 Form XObject。字体优先使用嵌入
-//! 字体，缺失时回退到调用方注入的 [`FontProvider`]，再退化为保留文本的
-//! 占位字体。页码、文本层与页面尺寸在构建页面时一并生成。
+//! Covers paths, text, images, clipping, transparency and Form XObjects. Fonts
+//! prefer the embedded font, fall back to the caller-injected [`FontProvider`]
+//! when missing, and finally degrade to a placeholder font that preserves the
+//! text. Page numbers, text layers and page sizes are produced while building
+//! the page.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,16 +26,16 @@ const PT_TO_MM: f64 = 25.4 / 72.0;
 
 type PageBox = (f64, f64, f64, f64);
 
-/// PDF 读取选项。
+/// PDF read options.
 #[derive(Clone, Debug)]
 pub struct PdfReadOptions {
-    /// 单页内容流的最大字节数。
+    /// Maximum bytes of a single page content stream.
     pub max_page_bytes: usize,
-    /// 单张图片允许的最大像素数。
+    /// Maximum pixels allowed per image.
     pub max_image_pixels: u64,
-    /// Form XObject 的最大嵌套层数。
+    /// Maximum Form XObject nesting depth.
     pub max_recursion_depth: u32,
-    /// 加密 PDF 的密码；用户密码与所有者密码均可。
+    /// Password for an encrypted PDF; either the user or the owner password works.
     pub password: Option<String>,
 }
 
@@ -60,7 +62,7 @@ pub(crate) struct FontState {
     font: Arc<FontAsset>,
     identity: bool,
     to_unicode: HashMap<u32, u32>,
-    /// 嵌入字体不可用、由外部字体替代。
+    /// The embedded font was unavailable and an external font was substituted.
     fallback: bool,
 }
 
@@ -115,7 +117,7 @@ impl Default for State {
     }
 }
 
-/// 构建一页。
+/// Builds one page.
 pub(crate) fn build_page(
     document: &Document,
     page_id: ObjectId,
@@ -252,7 +254,7 @@ fn merge_lines(lines: &mut Vec<TextLine>) {
     *lines = merged;
 }
 
-/// 页面尺寸与旋转信息，不解析内容。
+/// Page size and rotation info; content is not parsed.
 pub(crate) fn page_info(document: &Document, page_id: ObjectId) -> Result<PageInfo, PdfError> {
     let (_, (x0, y0, x1, y1)) = page_box(document, page_id)?;
     Ok(PageInfo {
@@ -350,7 +352,10 @@ impl Builder<'_> {
         depth: u32,
     ) -> Result<(), PdfError> {
         if depth > self.options.max_recursion_depth.max(1) {
-            self.diagnostic(DiagnosticCode::LimitExceeded, "PDF 内容嵌套过深");
+            self.diagnostic(
+                DiagnosticCode::LimitExceeded,
+                "PDF content nested too deeply",
+            );
             return Ok(());
         }
         for operation in operations {
@@ -727,7 +732,7 @@ impl Builder<'_> {
                             None => self.diagnostic(
                                 DiagnosticCode::Paint,
                                 format!(
-                                    "PDF Shading 缺失或暂不支持: {}",
+                                    "PDF Shading missing or not yet supported: {}",
                                     String::from_utf8_lossy(name)
                                 ),
                             ),
@@ -849,7 +854,10 @@ impl Builder<'_> {
                     None => {
                         self.diagnostic(
                             DiagnosticCode::MissingFont,
-                            format!("PDF 字体缺失: {}", base_font.as_deref().unwrap_or("未命名")),
+                            format!(
+                                "PDF font missing: {}",
+                                base_font.as_deref().unwrap_or("unnamed")
+                            ),
                         );
                         (Arc::from(&b""[..]), true)
                     }
@@ -968,8 +976,8 @@ impl Builder<'_> {
         if glyphs.is_empty() {
             return;
         }
-        // PDF 文本默认只填充；只有 Tr 指定时才描边。模式 3/7 不可见，
-        // 但仍保留文本层，供搜索与选择使用。
+        // PDF text is fill-only by default; it is stroked only when Tr says so. Modes 3/7 are invisible
+        // but the text layer is retained for search and selection.
         let fill = matches!(state.render_mode, 0 | 2 | 4 | 6)
             .then(|| self.fill_paint(state, resources))
             .flatten();
@@ -1050,7 +1058,10 @@ impl Builder<'_> {
             .unwrap_or_default();
         if subtype == b"Form" {
             if depth >= self.options.max_recursion_depth {
-                self.diagnostic(DiagnosticCode::LimitExceeded, "PDF Form XObject 嵌套过深");
+                self.diagnostic(
+                    DiagnosticCode::LimitExceeded,
+                    "PDF Form XObject nested too deeply",
+                );
                 return Ok(());
             }
             let form_dictionary = stream.dict.clone();
@@ -1099,7 +1110,7 @@ impl Builder<'_> {
         self.draw_image_stream(&stream, scene, state)
     }
 
-    /// 绘制图片流；XObject 与内联图片共用。
+    /// Draws an image stream; shared by XObjects and inline images.
     fn draw_image_stream(
         &mut self,
         stream: &lopdf::Stream,
@@ -1116,7 +1127,10 @@ impl Builder<'_> {
             return Ok(());
         };
         if width * height > self.options.max_image_pixels as f64 {
-            self.diagnostic(DiagnosticCode::LimitExceeded, "PDF 图片超过像素限制");
+            self.diagnostic(
+                DiagnosticCode::LimitExceeded,
+                "PDF image exceeds the pixel limit",
+            );
             return Ok(());
         }
         let filter = stream_value(&stream.dict, b"Filter", b"F").and_then(|object| match object {
@@ -1127,7 +1141,10 @@ impl Builder<'_> {
         let (format, bytes) = if filter == Some(b"DCTDecode") {
             (ImageFormat::Jpeg, Arc::<[u8]>::from(stream.content.clone()))
         } else if filter == Some(b"JPXDecode") {
-            self.diagnostic(DiagnosticCode::Unsupported, "PDF JPEG2000 图片暂不支持");
+            self.diagnostic(
+                DiagnosticCode::Unsupported,
+                "PDF JPEG2000 images are not supported yet",
+            );
             return Ok(());
         } else if filter == Some(b"JBIG2Decode") {
             (
@@ -1138,7 +1155,7 @@ impl Builder<'_> {
             match self.ccitt_image(stream, width as u32, height as u32) {
                 Some(bytes) => (ImageFormat::Png, Arc::from(bytes)),
                 None => {
-                    self.diagnostic(DiagnosticCode::Image, "PDF CCITT 图片解码失败");
+                    self.diagnostic(DiagnosticCode::Image, "PDF CCITT image decoding failed");
                     return Ok(());
                 }
             }
@@ -1149,7 +1166,7 @@ impl Builder<'_> {
                     self.diagnostic(
                         DiagnosticCode::Image,
                         format!(
-                            "PDF 图片编码暂不支持: {:?}",
+                            "PDF image encoding not supported yet: {:?}",
                             filter.map(String::from_utf8_lossy)
                         ),
                     );
@@ -1192,7 +1209,7 @@ impl Builder<'_> {
         }
     }
 
-    /// 着色图案（PatternType 2）。
+    /// Shading pattern (PatternType 2).
     fn pattern_paint(&self, name: &[u8], resources: &Dictionary) -> Option<Paint> {
         let patterns = resources
             .get(b"Pattern")
@@ -1227,7 +1244,7 @@ impl Builder<'_> {
         Some(transform_paint(paint, matrix))
     }
 
-    /// 把 PDF Shading 资源转换为 Fixed IR 渐变。
+    /// Converts a PDF Shading resource into a Fixed IR gradient.
     fn shading_paint(&self, name: &[u8], resources: &Dictionary) -> Option<Paint> {
         let shadings = resources
             .get(b"Shading")
@@ -1368,7 +1385,7 @@ impl Builder<'_> {
         }
     }
 
-    /// 采样函数（FunctionType 0）：一维输入、单通道输出。
+    /// Sampled function (FunctionType 0): one input dimension, one output channel.
     fn eval_sampled_function(&self, stream: &lopdf::Stream, t: f64) -> Option<Vec<f64>> {
         let function_type = stream
             .dict
@@ -1411,7 +1428,7 @@ impl Builder<'_> {
         let index = if size.len() == 1 {
             (sample.round().max(0.0) as usize).min(count - 1)
         } else {
-            // 多维采样函数取全零输入，得到常量输出。
+            // Multi-dimensional sampled functions are evaluated at all-zero input, giving a constant output.
             0
         };
         let data = stream
@@ -1448,7 +1465,7 @@ impl Builder<'_> {
             })
     }
 
-    /// 解码 CCITT G3/G4 传真编码，并转成 RGBA PNG。
+    /// Decodes CCITT G3/G4 fax encoding and converts it to an RGBA PNG.
     fn ccitt_image(&self, stream: &lopdf::Stream, width: u32, height: u32) -> Option<Vec<u8>> {
         let params = stream_value(&stream.dict, b"DecodeParms", b"DP")
             .and_then(|object| self.resolve(object))
@@ -1484,7 +1501,7 @@ impl Builder<'_> {
         encode_rgba_png(width, height, &rgba)
     }
 
-    /// 把 8 位、无预测器的原始像素编码成 RGBA PNG。
+    /// Encodes 8-bit, predictor-free raw pixels as an RGBA PNG.
     fn raw_image_rgba(&self, stream: &lopdf::Stream, width: u32, height: u32) -> Option<Vec<u8>> {
         let bits = stream_number(&stream.dict, b"BitsPerComponent", b"BPC").unwrap_or(8.0);
         if bits != 8.0 {
@@ -1565,7 +1582,7 @@ fn push_clip(state: &mut State, clip: ClipState) {
     state.clips.push(clip);
 }
 
-/// 把图案矩阵应用到渐变坐标；非均匀缩放按平均比例近似半径。
+/// Applies the pattern matrix to the gradient coordinates; non-uniform scale approximates the radius by the average ratio.
 fn transform_paint(paint: Paint, matrix: Matrix) -> Paint {
     match paint {
         Paint::LinearGradient(mut gradient) => {
@@ -1635,7 +1652,7 @@ struct CcittParams {
     encoded_byte_align: bool,
 }
 
-/// 解码 CCITT G3/G4 位流为 RGBA8；1 位表示黑色，0 位表示白色。
+/// Decodes a CCITT G3/G4 bitstream into RGBA8; a 1 bit means black and a 0 bit means white.
 fn decode_ccitt_rgba(data: &[u8], width: u32, height: u32, params: CcittParams) -> Option<Vec<u8>> {
     let encoding = if params.k < 0 {
         hayro_ccitt::EncodingMode::Group4
@@ -1974,7 +1991,7 @@ mod tests {
 
     #[test]
     fn decodes_group4_ccitt() {
-        // Pillow 生成的 16x8 Group 4 位流：白底、x=4..10 / y=2..5 有黑块。
+        // A 16x8 Group 4 bitstream produced by Pillow: white background, black block at x=4..10 / y=2..5.
         let data = [0x26, 0xa0, 0xbf, 0x2f, 0xff, 0xff, 0x1e, 0x00, 0x20, 0x02];
         let rgba = decode_ccitt_rgba(
             &data,
@@ -1982,7 +1999,7 @@ mod tests {
             8,
             CcittParams {
                 k: -1,
-                // TIFF 以 Photometric=1 (0=黑) 存储，需按相反极性解释。
+                // TIFF stores it with Photometric=1 (0=black), so it must be interpreted with the opposite polarity.
                 black_is_1: true,
                 ..CcittParams::default()
             },

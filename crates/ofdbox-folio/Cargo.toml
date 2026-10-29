@@ -7,7 +7,7 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 license.workspace = true
-description = "OFDBox Folio 多格式文档引擎门面。"
+description = "OFDBox Folio multi-format document engine facade."
 keywords = ["ofd", "pdf", "docx", "document", "layout"]
 categories = ["text-processing", "graphics"]
 

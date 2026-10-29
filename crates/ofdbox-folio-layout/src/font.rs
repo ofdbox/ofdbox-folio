@@ -1,8 +1,9 @@
-//! 字体解析与度量。
+//! Font parsing and metrics.
 //!
-//! 布局不扫描系统字体，只通过 [`FontProvider`] 取字节；每个「家族 + 粗体 + 斜体」
-//! 组合解析一次，把用到的字符的字形编号与宽度缓存成 em 比例，之后的行布局不再
-//! 触碰字体文件。
+//! Layout does not scan system fonts; it only fetches bytes through
+//! [`FontProvider`]. Each "family + bold + italic" combination is parsed once,
+//! caching the glyph ids and widths of the characters used as em ratios, so
+//! later line layout no longer touches the font files.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -10,19 +11,19 @@ use std::sync::Arc;
 use ofdbox_folio_ir::{FontAsset, FontProvider, FontRequest};
 use ttf_parser::Face;
 
-/// 字体键：家族名 + 粗体 + 斜体。
+/// Font key: family name + bold + italic.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct FontKey {
-    /// 首选家族名。
+    /// Preferred family name.
     pub family: String,
-    /// 粗体。
+    /// Bold.
     pub bold: bool,
-    /// 斜体。
+    /// Italic.
     pub italic: bool,
 }
 
 impl FontKey {
-    /// 由文本样式构造字体键。
+    /// Build a font key from a text style.
     pub fn new(family: &str, bold: bool, italic: bool) -> Self {
         Self {
             family: family.to_owned(),
@@ -32,66 +33,69 @@ impl FontKey {
     }
 }
 
-/// 单个字体的度量结果。
+/// Metrics result for a single font.
 pub(crate) struct FontData {
-    /// 字体字节，用于构造 Fixed IR 的字体资源。
+    /// Font bytes, used to construct font resources for the Fixed IR.
     pub bytes: Arc<[u8]>,
-    /// 集合内的 face 索引。
+    /// Face index within the collection.
     pub face_index: u32,
-    /// 家族名。
+    /// Family name.
     pub family: String,
 
-    /// 字符到 em 宽度。
+    /// Character to em advance.
     advances: HashMap<char, f64>,
-    /// 字符到字形编号。
+    /// Character to glyph id.
     glyphs: HashMap<char, u32>,
-    /// 字体里没有的字符。
+    /// Characters missing from the font.
     missing: HashSet<char>,
-    /// 上升高度（em）。
+    /// Ascender height (em).
     pub ascender: f64,
-    /// 下降高度（em，负数）。
+    /// Descender height (em, negative).
     pub descender: f64,
-    /// 行间距（em）。
+    /// Line gap (em).
     pub line_gap: f64,
 }
 
 impl FontData {
-    /// 构造供 Fixed IR 使用的字体资源。
+    /// Build the font resource used by the Fixed IR.
     pub fn asset(&self) -> FontAsset {
         FontAsset::new(Arc::clone(&self.bytes), self.face_index).with_family(self.family.clone())
     }
 
-    /// 字符的 em 宽度；缺字形时按 0.5 em 兜底。
+    /// The character's em advance; when the glyph is missing, falls back to 0.5
+    /// em.
     pub fn advance(&self, ch: char) -> f64 {
         self.advances.get(&ch).copied().unwrap_or(0.5)
     }
 
-    /// 字形编号；缺字形时为 0（.notdef）。
+    /// Glyph id; 0 (.notdef) when the glyph is missing.
     pub fn glyph(&self, ch: char) -> u32 {
         self.glyphs.get(&ch).copied().unwrap_or(0)
     }
 
-    /// 字体是否缺少该字符。
+    /// Whether the font is missing this character.
     pub fn is_missing(&self, ch: char) -> bool {
         self.missing.contains(&ch)
     }
 
-    /// 单倍行高的高度（em）：ascent - descent + lineGap。
+    /// Height of single-spaced line (em): ascent - descent + lineGap.
     pub fn line_height(&self) -> f64 {
         (self.ascender - self.descender + self.line_gap).max(0.5)
     }
 }
 
-/// 按家族名解析并缓存字体。
+/// Resolve and cache fonts by family name.
 #[derive(Default)]
 pub(crate) struct FontStore {
     fonts: HashMap<FontKey, Option<FontData>>,
-    /// 逐字形兜底字体：主字体缺字形时用它的字形。
+    /// Per-glyph fallback font: its glyphs are used when the primary font
+    /// lacks a glyph.
     fallback: Option<FontData>,
 }
 
 impl FontStore {
-    /// 预解析一批字体：`chars` 是要用到的字符集合。
+    /// Pre-resolve a batch of fonts: `chars` is the set of characters that will
+    /// be used.
     pub fn prepare(
         &mut self,
         provider: &mut dyn FontProvider,
@@ -107,7 +111,8 @@ impl FontStore {
         self.fonts.insert(key.clone(), data);
     }
 
-    /// 预解析兜底字体：用「不指定族名」的请求，交给提供者给一个通用字体。
+    /// Pre-resolve the fallback font: a request without a family name, leaving
+    /// it to the provider to return a generic font.
     pub fn prepare_fallback(&mut self, provider: &mut dyn FontProvider, chars: &HashSet<char>) {
         if self.fallback.is_some() {
             return;
@@ -120,12 +125,12 @@ impl FontStore {
         self.fallback = Self::build(bytes, &key, chars);
     }
 
-    /// 兜底字体。
+    /// The fallback font.
     pub fn fallback(&self) -> Option<&FontData> {
         self.fallback.as_ref()
     }
 
-    /// 取已解析字体。
+    /// Fetch an already resolved font.
     pub fn get(&self, key: &FontKey) -> Option<&FontData> {
         self.fonts.get(key).and_then(Option::as_ref)
     }
@@ -154,7 +159,8 @@ impl FontStore {
                 return Some(bytes);
             }
         }
-        // 家族名不可用时退化为「任意可用字体」，由调用方提供兜底。
+        // When the family name is unavailable, degrade to "any available font";
+        // the caller supplies the fallback.
         let request = FontRequest {
             bold: key.bold,
             italic: key.italic,
@@ -165,7 +171,8 @@ impl FontStore {
 
     fn build(bytes: Arc<[u8]>, key: &FontKey, chars: &HashSet<char>) -> Option<FontData> {
         let index = FACE_INDEX;
-        // `Face` 借用字体字节，先算完度量再移动 `bytes`。
+        // `Face` borrows the font bytes, so compute all metrics before moving
+        // `bytes`.
         let (advances, glyphs, missing, ascender, descender, line_gap) = {
             let face = Face::parse(&bytes, index).ok()?;
             let units = f64::from(face.units_per_em()).max(1.0);
@@ -206,5 +213,5 @@ impl FontStore {
     }
 }
 
-/// 字体集合里固定取第一个 face。
+/// Always take the first face in a font collection.
 const FACE_INDEX: u32 = 0;

@@ -1,174 +1,176 @@
+English | [简体中文](README.zh-CN.md)
+
 # ofdbox-folio
 
-OFDBox Folio 是一个以“页”为中心的多格式文档引擎：读取 OFD、PDF、DOCX，统一到 Flow IR / Fixed IR，完成排版、渲染与写出。
+OFDBox Folio is a page-centric multi-format document engine: it reads OFD, PDF and DOCX, unifies them into Flow IR / Fixed IR, and takes care of layout, rendering and writing.
 
-**当前状态：IR 契约已冻结，OFD → 图片、Fixed IR → OFD/PDF 写出、PDF → Fixed IR、Reader 页面缓存、跨页选择与搜索、DOCX → Flow 读入与单栏排版均已打通。** 217 份 OFD 语料中 211 份可读（6 份源文件损坏）。对可读语料做 OFD → Fixed IR → OFD 往返后渲染首页，189 份与源文件像素完全一致，211 份中 203 份差异像素低于 0.2%，平均 MAE 0.011。PDF 读写已接入：211 份由旧管线导出的 PDF 中 200 份可与 OFD 源对应，首页比对平均差异像素 1.5%，主要来自导出时文字轮廓化与像素取整；PDF 自身往返（读入 → 写出 → 再渲染）的代表样本差异低于 0.6%。wgpu 后端（实色路径、描边、线性渐变、裁剪、文字轮廓）已接入。DOCX 读入与单栏布局已接入；表格排版、页眉页脚落版与 DOCX 写出尚未接入。
+**Current status: the IR contract is frozen; OFD → image, Fixed IR → OFD/PDF writing, PDF → Fixed IR, Reader page caching, cross-page selection and search, and DOCX → Flow reading with single-column layout are all working.** 211 of the 217 OFD files in the corpus are readable (6 source files are corrupted). After round-tripping the readable corpus through OFD → Fixed IR → OFD and rendering the first page, 189 files are pixel-identical to the source, and 203 of the 211 have fewer than 0.2% differing pixels, with an average MAE of 0.011. PDF reading and writing are integrated: 200 of the 211 PDFs exported by the old pipeline can be matched to an OFD source, with an average of 1.5% differing pixels on the first page, mostly from text being outlined and pixel rounding during export; representative samples of a PDF-only round trip (read → write → re-render) differ by less than 0.6%. The wgpu backend (solid paths, strokes, linear gradients, clipping, text outlines) is integrated. DOCX reading and single-column layout are integrated; table layout, header/footer pagination and DOCX writing are not yet integrated.
 
-## 目标
+## Goals
 
-- 读取 OFD、PDF，直接得到 Fixed IR 页面。
-- 读取 DOCX，得到 Flow IR，经布局计算得到 Fixed IR。
-- 用一套创建 API 构造 Flow IR，直接写出 DOCX，或经布局写出 OFD、PDF、位图。
-- 以 Fixed IR 为统一读模型，支持惰性加载、文本选择/搜索、分页缓存和增量渲染。
-- 同一输入、同一字体字节、同一引擎版本，产生确定的 FixedDocument。
+- Read OFD and PDF, obtaining Fixed IR pages directly.
+- Read DOCX to obtain Flow IR, then run layout to obtain Fixed IR.
+- Build Flow IR with a single creation API, and either write DOCX directly or write OFD, PDF and bitmaps through layout.
+- Use Fixed IR as the unified read model, supporting lazy loading, text selection/search, page caching and incremental rendering.
+- The same input, the same font bytes and the same engine version produce a deterministic FixedDocument.
 
-## 非目标
+## Non-Goals
 
-- 不做 Fixed IR 到 Flow IR 的反向转换。
-- 不承诺 DOCX 排版与 Word 逐行一致；布局目标是结构、阅读顺序和可读性正确。
-- 不在首版追求 PDF 全特性覆盖（Type3、透明组、加密、复杂 CMap 等分期处理）。
-- 不提供 FixedDocument 的编辑 API；阅读器不承担文档编辑职责。
-- 不把 OFD/PDF/DOCX 的格式类型泄漏到 IR、布局或渲染接口中。
+- No reverse conversion from Fixed IR to Flow IR.
+- No promise that DOCX layout matches Word line by line; the layout goal is correct structure, reading order and readability.
+- No attempt at full PDF feature coverage in the first version (Type3, transparency groups, encryption, complex CMaps etc. are handled in stages).
+- No editing API for FixedDocument; the reader does not take on document editing duties.
+- No leaking of OFD/PDF/DOCX format types into the IR, layout or rendering interfaces.
 
-## Crate 架构
+## Crate Architecture
 
 ```text
-ofdbox-folio                门面：格式探测、Reader、创建 API、便捷转换
-├─ ofdbox-folio-ofd        OFD 读取/写出        → ofdbox-core
-├─ ofdbox-folio-pdf        PDF 读取/写出        → lopdf
-├─ ofdbox-folio-docx       DOCX 读取/写出       → zip + quick-xml
-├─ ofdbox-folio-layout     Flow → Fixed，单向排版
-├─ ofdbox-folio-render     Fixed → 位图，CPU/GPU 渲染与缓存
-└─ ofdbox-folio-ir         Flow IR、Fixed IR、几何、资源、文本层、Reader 契约
+ofdbox-folio                façade: format probing, Reader, creation API, convenience conversion
+├─ ofdbox-folio-ofd        OFD read/write        → ofdbox-core
+├─ ofdbox-folio-pdf        PDF read/write        → lopdf
+├─ ofdbox-folio-docx       DOCX read/write       → zip + quick-xml
+├─ ofdbox-folio-layout     Flow → Fixed, one-way layout
+├─ ofdbox-folio-render     Fixed → bitmap, CPU/GPU rendering and caching
+└─ ofdbox-folio-ir         Flow IR, Fixed IR, geometry, resources, text layer, Reader contracts
 ```
 
-依赖方向固定：格式适配器、布局、渲染都依赖 `ofdbox-folio-ir`；`ofdbox-folio-ir` 不依赖任何格式库或渲染后端。
+The dependency direction is fixed: the format adapters, layout and rendering all depend on `ofdbox-folio-ir`; `ofdbox-folio-ir` depends on no format library or rendering backend.
 
-| crate | 公开职责 | 关键约束 |
+| crate | Public responsibility | Key constraints |
 |---|---|---|
-| `ofdbox-folio-ir` | Flow IR、Fixed IR、几何/路径/画笔、资源、`TextLayer`、`DocumentSource`、诊断 | 无格式依赖，无 I/O |
-| `ofdbox-folio-layout` | `layout()`、`LayoutSession`、`FontProvider`、布局选项与错误 | 只做 Flow → Fixed，不读时钟/随机数/系统字体 |
-| `ofdbox-folio-render` | `CpuRenderer`、渲染目标、瓦片、字形与图片缓存 | 只消费 Fixed IR，不感知源格式 |
-| `ofdbox-folio-ofd` | `OfdDocument`（`DocumentSource`）、`write_fixed()` | 对外不暴露 `ofdbox_core` 类型 |
-| `ofdbox-folio-pdf` | `PdfDocument`（`DocumentSource`）、`write_fixed()` | 对外不暴露 `lopdf` 类型 |
-| `ofdbox-folio-docx` | `read_flow()`/`read_flow_path()` → Flow、`probe()`；`write_docx()` 后补 | 不接触 Fixed IR |
-| `ofdbox-folio` | `open_bytes()`/`open_path()`、`Document`、创建 API、便捷转换 | 统一错误、缓存与格式分发 |
+| `ofdbox-folio-ir` | Flow IR, Fixed IR, geometry/paths/pens, resources, `TextLayer`, `DocumentSource`, diagnostics | No format dependencies, no I/O |
+| `ofdbox-folio-layout` | `layout()`, `LayoutSession`, `FontProvider`, layout options and errors | Only Flow → Fixed; reads no clock/random numbers/system fonts |
+| `ofdbox-folio-render` | `CpuRenderer`, render targets, tiles, glyph and image caches | Consumes Fixed IR only, unaware of the source format |
+| `ofdbox-folio-ofd` | `OfdDocument` (`DocumentSource`), `write_fixed()` | Does not expose `ofdbox_core` types publicly |
+| `ofdbox-folio-pdf` | `PdfDocument` (`DocumentSource`), `write_fixed()` | Does not expose `lopdf` types publicly |
+| `ofdbox-folio-docx` | `read_flow()`/`read_flow_path()` → Flow, `probe()`; `write_docx()` to come | Does not touch Fixed IR |
+| `ofdbox-folio` | `open_bytes()`/`open_path()`, `Document`, creation API, convenience conversions | Unified errors, caching and format dispatch |
 
-## 工作原理
+## How It Works
 
-### 主流程
+### Main Flow
 
 ```text
-创建 API ───┐
-            ├──► Flow IR ──────► DOCX 写出
-DOCX 读取 ──┘        │
-                     │ layout（单向）
-                     ▼
-                Fixed IR ──────┬──► 位图渲染
-                     ▲         ├──► OFD 写出
-                     │         └──► PDF 写出
-                     │
-OFD / PDF 读取 ──────┘
+Creation API ───┐
+                ├──► Flow IR ──────► DOCX write
+DOCX read ──────┘       │
+                        │ layout (one-way)
+                        ▼
+                    Fixed IR ─────┬──► bitmap rendering
+                        ▲         ├──► OFD write
+                        │         └──► PDF write
+                        │
+OFD / PDF read ─────────┘
 ```
 
-- Flow IR 在上，Fixed IR 在下；布局是两者之间唯一的向下通路。
-- DOCX 写出直接消费 Flow IR，不经过布局和 Fixed IR。
-- OFD/PDF 读取直接产出 Fixed IR，不经过 Flow IR 和布局。
-- Fixed IR 是位图渲染、OFD 写出、PDF 写出的共同入口。
-- 阅读时打开文档只解析元数据、页面表、大纲和资源索引；`DocumentSource::load_page()` 按需解析单页，Reader 用字节预算的 LRU 缓存。单页损坏只影响该页，阅读器显示占位并保留诊断。
+- Flow IR is on top and Fixed IR at the bottom; layout is the only downward path between them.
+- DOCX writing consumes Flow IR directly, bypassing layout and Fixed IR.
+- OFD/PDF reading produces Fixed IR directly, bypassing Flow IR and layout.
+- Fixed IR is the common entry point for bitmap rendering, OFD writing and PDF writing.
+- When reading, opening a document parses only metadata, the page table, outlines and resource indexes; `DocumentSource::load_page()` parses a single page on demand, and the Reader uses a byte-budgeted LRU cache. Damage to a single page affects only that page: the reader shows a placeholder and keeps the diagnostics.
 
-### 两种 IR
+### The Two IRs
 
-**Flow IR**：语义化、可编辑的流式文档模型。段落、行内 run、标题、表格、图片、字段、目录、分节、页眉页脚。长度用整数 twips，不包含绝对坐标。
+**Flow IR**: a semantic, editable flow document model. Paragraphs, inline runs, headings, tables, images, fields, tables of contents, sections, headers and footers. Lengths are integer twips and no absolute coordinates are involved.
 
-**Fixed IR**：不可变、可缓存的固定版式页面。原点在左上，x 向右，y 向下，长度用毫米。每页包含：
+**Fixed IR**: immutable, cacheable fixed-layout pages. The origin is top-left, x points right, y points down, and lengths are in millimeters. Each page contains:
 
-- `Scene`：语义化页面内容树，供渲染与写出；
-- `TextLayer`：逻辑阅读顺序的文本与字符/字形簇映射，供选择、复制、搜索；
-- `PageInfo`：media/crop box、旋转、页码标签；
-- 链接区域与模板层引用。
+- `Scene`: the semantic page content tree, consumed by rendering and writing;
+- `TextLayer`: text in logical reading order plus character/glyph-cluster mapping, for selection, copying and search;
+- `PageInfo`: media/crop box, rotation, page labels;
+- link regions and template layer references.
 
-`FixedDocument` 是布局的完整输出；`Page` 是阅读器的加载单位。两者共享同一套内容树，但构建方式不同：布局一次性产出，阅读器按需解析。
+`FixedDocument` is the complete output of layout; `Page` is the reader's unit of loading. Both share the same content tree but build it differently: layout produces it all at once, while the reader parses it on demand.
 
-### 排版（A1）
+### Layout (A1)
 
-`ofdbox_folio::layout()` 把 Flow IR 排成 Fixed IR，规则冻结在 `docs/layout-contract.md`：
+`ofdbox_folio::layout()` lays Flow IR out into Fixed IR, with the rules frozen in `docs/layout-contract.md`:
 
-- **断行**：CJK 与空格处可断，行首/行尾禁则回吞标点；行尾空格不占行宽。
-- **段落**：首行/左右缩进、单倍/多倍/固定/最小行距、段前段后、左中右与两端对齐（两端对齐优先拉伸空格，无空格时均摊字间）。
-- **行高与字体回退**：单倍行高取字体 `hhea` 的 ascent/descent/lineGap，基线按 ascent 定位；主字体缺字形时逐字换兜底字体（中英混排不再出现空白）。
-- **分页与分栏**：按行跨页，段前间距在页首丢弃；PageSetup::columns 支持等宽多栏（先灌满左栏再流到右栏，最后一栏排满才换页）；引用「总页数」字段时排两遍，第一遍取页数、第二遍代入。
-- **图片**：块级图片按声明尺寸或 DPI 换算，超宽等比缩放并记诊断；行内图片作不可断单元，底部贴基线。
-- **字体**：`FontProvider` 按「字族 + 粗斜体」取字节，度量取自 `hmtx`；缺字记诊断并按 `.notdef` 宽度排版。
-- **大纲**：`heading_level` 在排版时登记，按层级生成 `OutlineItem` 树，目标页与 y 坐标取自标题首行。
-- **表格**：固定/权重列宽、单元格子框（列宽减内边距）排版、按行跨页并重排表头、逐格边框；行高于本页剩余空间时按行拆分续排。
-- **页眉页脚**：页眉从上边距上方往下排，页脚先量高再贴底；支持首页不同/偶数页，`PAGE`/`NUMPAGES` 与正文同一套页码。
-- **浮动对象**：Block::Floating 按页面坐标绝对定位，支持不绕排、上下型与四周型（整段让开）三种绕排。
-- **脚注尾注**：Inline::Note 按出现顺序编号，脚注在引用页底部预留空间并画分隔线，尾注收集到文档末尾单独成页。
-- **制表位**：声明超出正文宽度时裁到右边缘、后续内容放不进剩余空间时紧接排布（都记诊断）；`ParaStyle::tabs` 支持左/中/右/小数点对齐与点线、虚线、实线前导符；制表符在落版时按当前 x 跳到下一个制表位，没有显式制表位时按 12.5 mm 格点前进。
-- **自动目录**：`Block::Toc` 展开成「条目 + 制表符 + 页码」的段落，页码落在版心右边的右制表位上并带点线前导符；先空跑一遍取页码，再逐步代入直到稳定。
-- **样式**：命名样式沿 `based_on` 链继承，直接格式覆盖非默认字段。
+- **Line breaking**: breaks are allowed at CJK boundaries and spaces, and line-start/line-end prohibition rules pull punctuation back; trailing spaces do not consume line width.
+- **Paragraphs**: first-line/left/right indents, single/multiple/fixed/minimum line spacing, space before/after, left/center/right and justified alignment (justification stretches spaces first, and distributes the extra space between characters when there are none).
+- **Line height and font fallback**: single line height uses the font's `hhea` ascent/descent/lineGap, and the baseline is positioned by ascent; when the primary font lacks a glyph, the character falls back to a fallback font one by one (mixed Chinese/English runs no longer show blanks).
+- **Pagination and columns**: pages break by line, and space before a paragraph is dropped at the top of a page; PageSetup::columns supports equal-width multi-column layout (fill the left column before flowing into the right one, and break the page only when the last column is full); when the "total pages" field is referenced, layout runs twice — the first pass takes the page count, the second substitutes it.
+- **Images**: block-level images use their declared size or a DPI conversion; oversized ones are scaled proportionally and a diagnostic is recorded; inline images are unbreakable units, sitting on the baseline at the bottom.
+- **Fonts**: `FontProvider` resolves bytes by "family + bold/italic", metrics come from `hmtx`; missing glyphs are recorded as diagnostics and laid out with the `.notdef` width.
+- **Outlines**: `heading_level` is registered during layout, and an `OutlineItem` tree is generated by level; the target page and y coordinate come from the first line of the heading.
+- **Tables**: fixed/weighted column widths, cell sub-frame layout (column width minus padding), page breaks by row with the header row repeated, and per-cell borders; when a row is taller than the space left on the page, it is split by row and continued.
+- **Headers and footers**: headers lay out downward from above the top margin, and footers are measured first and then pinned to the bottom; different first page / even pages are supported, and `PAGE`/`NUMPAGES` share the same page numbering as the body.
+- **Floating objects**: Block::Floating is positioned absolutely in page coordinates, and supports three wrapping modes: no wrap, top-and-bottom, and square (the whole paragraph steps aside).
+- **Footnotes and endnotes**: Inline::Note is numbered in order of appearance; footnotes reserve space at the bottom of the referencing page and draw a separator line, while endnotes are collected at the end of the document on a page of their own.
+- **Tab stops**: a declared stop beyond the text width is clipped to the right edge, and content that does not fit in the remaining space is laid out immediately after (both record diagnostics); `ParaStyle::tabs` supports left/center/right/decimal alignment with dot, dash and solid leaders; when laying out, a tab jumps to the next tab stop at the current x, and without an explicit stop it advances on a 12.5 mm grid.
+- **Automatic table of contents**: `Block::Toc` expands into paragraphs of "entry + tab + page number", with the page number landing on a right tab stop at the right edge of the text area and carrying a dot leader; a dry run first collects the page numbers, which are then substituted iteratively until stable.
+- **Styles**: named styles inherit along the `based_on` chain, and direct formatting overrides non-default fields.
 
-### 系统字体
+### System Fonts
 
-`ofdbox_folio::fonts::SystemFonts` 是唯一的「字体族名 → 本机字体文件」解析实现（候选表 + 缓存 + 结果稳定），示例与 CLI 共用；`used_fonts()` 返回实际命中的文件，CLI 的 `--report` 会写成 `FONT <族名> -> <文件>`。
+`ofdbox_folio::fonts::SystemFonts` is the only "font family name → local font file" resolution implementation (candidate table + cache + stable results), shared by the examples and the CLI; `used_fonts()` returns the files that were actually hit, and the CLI's `--report` writes them as `FONT <family> -> <file>`.
 
-### DOCX 读写
+### DOCX Reading and Writing
 
-`ofdbox_folio::docx::write_flow()` 把 Flow IR 写成 DOCX 包（`[Content_Types].xml`、`document.xml`、`styles.xml`、页眉页脚、`footnotes.xml`/`endnotes.xml`、`media/*`、`docProps`）：分节与页面设置（含分栏）、段落与字符格式、制表位与前导符、表格（边框/表头行/单元格内边距）、行内与浮动图片（`wp:inline`/`wp:anchor`）、页眉页脚、`PAGE`/`NUMPAGES` 域、超链接、脚注尾注引用、自动目录域、书签与大纲级别。附件按「清单 + 原文件部件」写进包（Word 不展示，本库可往返）。固定 ZIP 时间戳，相同输入产生相同字节；write_flow_with_report 额外返回降级诊断。
+`ofdbox_folio::docx::write_flow()` writes Flow IR into a DOCX package (`[Content_Types].xml`, `document.xml`, `styles.xml`, headers and footers, `footnotes.xml`/`endnotes.xml`, `media/*`, `docProps`): sections and page setup (including columns), paragraph and character formatting, tab stops and leaders, tables (borders/header rows/cell padding), inline and floating images (`wp:inline`/`wp:anchor`), headers and footers, `PAGE`/`NUMPAGES` fields, hyperlinks, footnote and endnote references, automatic TOC fields, bookmarks and outline levels. Attachments are written into the package as "manifest + original file parts" (Word does not display them, but this library can round-trip them). ZIP timestamps are fixed, so the same input produces the same bytes; write_flow_with_report additionally returns degradation diagnostics.
 
-从零创建文档的完整示例见 `examples/create_document.rs`：同一份 Flow IR 同时写出 DOCX 与 OFD（标题、字符格式、制表位点线、表格、行内与浮动图片、脚注、目录域、页眉页脚与页码字段；OFD 走排版引擎并做字体子集化）：
+For a complete example of creating a document from scratch, see `examples/create_document.rs`: the same Flow IR writes both DOCX and OFD (heading, character formatting, dot-leader tab stops, tables, inline and floating images, footnotes, TOC fields, headers and footers with page-number fields; OFD goes through the layout engine with font subsetting):
 
 ```bash
-cargo run -p ofdbox-folio --example create_document -- out.docx  # 同时产出 out.ofd
+cargo run -p ofdbox-folio --example create_document -- out.docx  # also produces out.ofd
 ```
 
-### DOCX 读取
+### DOCX Reading
 
-`ofdbox_folio::docx::read_flow()` 把 DOCX 读成 Flow IR：
+`ofdbox_folio::docx::read_flow()` reads DOCX into Flow IR:
 
-- **样式**：按 OOXML 的层叠（`docDefaults` → 默认样式 → 段落/字符样式链 → 直接格式）逐字段解析后拍平，显式写回的默认值也能生效；`based_on` 与主题字体（`majorFont`/`minorFont`、`Hans` 脚本）都会解析。
-- **块**：段落、表格（列宽、表头行、边框与单元格内边距）、行内图片（按 `wp:extent` 取显示尺寸）、分页符（段前与段中）、大纲级别→标题、目录内容控件→`Block::Toc`。
-- **列表**：`numbering.xml` 的编号/项目符号作为段落首个 run 的标记，配合悬挂缩进；Symbol 字体的私用区码位映射成普通符号。
-- **页眉页脚**：`headerReference`/`footerReference` 读成 `HeaderFooterSet`，`fldSimple` 与复杂域的 `PAGE`/`NUMPAGES` 转成 `Field`。
-- **元数据**：`docProps/core.xml` 与 `app.xml`。
-- **降级**：浮动图片按行内处理、合并单元格按普通单元格、VML/脚注/符号字体等记 `FlowDocument.report` 诊断。
+- **Styles**: fields are resolved according to the OOXML cascade (`docDefaults` → default styles → paragraph/character style chain → direct formatting) and then flattened, so defaults written back explicitly also take effect; both `based_on` and theme fonts (`majorFont`/`minorFont`, `Hans` script) are resolved.
+- **Blocks**: paragraphs, tables (column widths, header rows, borders and cell padding), inline images (display size taken from `wp:extent`), page breaks (before a paragraph and inside it), outline level → heading, table-of-contents content control → `Block::Toc`.
+- **Lists**: numbering/bullets from `numbering.xml` become the marker of the paragraph's first run, paired with a hanging indent; private-use code points of the Symbol font are mapped to ordinary symbols.
+- **Headers and footers**: `headerReference`/`footerReference` are read into `HeaderFooterSet`, and `PAGE`/`NUMPAGES` in `fldSimple` and in complex fields become `Field`.
+- **Metadata**: `docProps/core.xml` and `app.xml`.
+- **Degradation**: floating images are treated as inline, merged cells as ordinary cells, and VML/footnotes/symbol fonts etc. are recorded as `FlowDocument.report` diagnostics.
 
-### 阅读器性能模型
+### Reader Performance Model
 
-- **页面惰性**：首屏时间与总页数无关；内存由缓存预算和可视页决定。
-- **资源分离**：字体、图片按内容共享；图片按目标缩放档位解码，缩略图不触发全分辨率解码。
-- **渲染列表缓存**：页面首次绘制时生成扁平渲染指令列表，滚动和缩放复用。
-- **文本层独立**：绘制顺序不等于阅读顺序；文本层保存行框、基线和字符映射，选择/搜索不重新解析页面。
-- **渐进布局**：DOCX 解析成 Flow IR 后按顺序产出页面，先显示首页，总页数字段后到。
-- **错误隔离**：页级错误不终止文档加载。
+- **Lazy pages**: first-screen time is independent of the total page count; memory is determined by the cache budget and the visible pages.
+- **Separated resources**: fonts and images are shared by content; images are decoded at the target scale tier, so thumbnails do not trigger full-resolution decoding.
+- **Render-list cache**: a flat render-command list is generated the first time a page is drawn and reused for scrolling and zooming.
+- **Independent text layer**: drawing order is not reading order; the text layer stores line boxes, baselines and character mappings, so selection/search does not re-parse the page.
+- **Progressive layout**: after DOCX is parsed into Flow IR, pages are produced in order, showing the first page first, with total-page fields arriving later.
+- **Error isolation**: a page-level error does not abort document loading.
 
-### 文本与字体
+### Text and Fonts
 
-- 布局阶段完成 shaping，Fixed IR 保存字形 ID、位置、advance 和字符/字形簇映射。
-- 阅读 OFD 时保留 `CGTransform`；阅读 PDF 时使用 `ToUnicode` CMap；DOCX 使用逻辑顺序。
-- 无法解析为字体的文本（Type3、缺失字体）降级为路径，并在文本层记录降级区段。
-- 字体由调用方显式提供，不扫描系统字体；缺字体按策略报错或回退并写入报告。
+- Shaping is completed during layout; Fixed IR stores glyph IDs, positions, advances and character/glyph-cluster mappings.
+- Reading OFD preserves `CGTransform`; reading PDF uses the `ToUnicode` CMap; DOCX uses logical order.
+- Text that cannot be resolved to a font (Type3, missing fonts) degrades to paths, and the degraded range is recorded in the text layer.
+- Fonts are supplied explicitly by the caller; system fonts are not scanned; a missing font produces an error or a fallback per policy and is written into the report.
 
-### 确定性
+### Determinism
 
-- Flow IR 使用 twips，Fixed IR 使用毫米；边界一次性换算，OFD 输出量化到 0.001 mm。
-- 布局不读时钟、随机数、环境变量，不使用 HashMap 遍历序。
-- FixedDocument 记录布局引擎版本和字体内容指纹。
-- 相同 Flow + 相同字体字节 + 相同选项 + 相同版本，布局结果一致。
-- 阅读器的加载时序可以变化，但页面内容不因此变化。
+- Flow IR uses twips and Fixed IR uses millimeters; boundaries are converted once, and OFD output is quantized to 0.001 mm.
+- Layout reads no clock, random numbers or environment variables, and does not rely on HashMap iteration order.
+- FixedDocument records the layout engine version and font content fingerprints.
+- Same Flow + same font bytes + same options + same version → identical layout results.
+- The reader's load timing may vary, but page content does not change because of it.
 
-## 关键契约
+## Key Contracts
 
-1. **单向**：只允许 Flow → Fixed；Fixed IR 不保留 Flow 反向引用。
-2. **格式中立**：IR、布局、渲染接口中不出现 OFD/PDF/DOCX/ZIP/XML 类型。
-3. **页面不可变**：`Page` 可缓存、可跨线程共享；文档不一次性构建全部页面。
-4. **单位固定**：Flow 用 twips，Fixed 用毫米；坐标系为左上原点、y 向下。
-5. **沉默**：不写日志、不打印；不可表示项进入报告，失败返回错误。
-6. **无 panic**：所有格式解析器对不可信输入返回错误，并受页数、解压、图片像素与递归深度上限约束。
-7. **不泄漏依赖**：`ofdbox_core`、`lopdf`、`quick_xml`、`zip`、`rustybuzz`、`ttf_parser`、`vello`、`wgpu` 类型不得出现在公开签名中。
+1. **One-way**: only Flow → Fixed is allowed; Fixed IR keeps no back-references to Flow.
+2. **Format-neutral**: OFD/PDF/DOCX/ZIP/XML types do not appear in the IR, layout or rendering interfaces.
+3. **Immutable pages**: a `Page` can be cached and shared across threads; the document does not build all pages at once.
+4. **Fixed units**: Flow uses twips, Fixed uses millimeters; the coordinate system has its origin at the top-left with y pointing down.
+5. **Silence**: no logging, no printing; unrepresentable items go into the report, and failures return errors.
+6. **No panics**: every format parser returns errors for untrusted input, bounded by limits on page count, decompression, image pixels and recursion depth.
+7. **No dependency leaks**: `ofdbox_core`, `lopdf`, `quick_xml`, `zip`, `rustybuzz`, `ttf_parser`, `vello` and `wgpu` types must not appear in public signatures.
 
-## API 示意
+## API Sketch
 
-以下为结构示意，最终以 crate 的公开 API 为准。
+The following is a structural sketch; the crates' public APIs are authoritative.
 
 ```rust
-// 读取：格式探测 + 按需取页
+// Read: format probing + on-demand page access
 let mut doc = ofdbox_folio::open_path("input.ofd", &OpenOptions::default())?;
 let info = doc.info();
 let page = doc.page(0)?;
 
-// 创建：构造 Flow IR
+// Create: build Flow IR
 let mut builder = DocumentBuilder::new(Metadata::default());
 builder.heading(1, "第一章");
 builder.paragraph(
@@ -178,16 +180,16 @@ builder.paragraph(
 );
 let flow = builder.build()?;
 
-// 直接写出 DOCX
+// Write DOCX directly
 let docx = ofdbox_folio::to_docx(&flow, &DocxWriteOptions::default())?;
 
-// 布局后写出 OFD
+// Write OFD after layout
 let mut fonts = MyFontProvider::new();
 let fixed = ofdbox_folio::layout(&flow, &mut fonts, &LayoutOptions::default())?;
 let ofd = ofdbox_folio::to_ofd(&fixed, &OfdWriteOptions::default())?;
 ```
 
-## OFD 写出
+## OFD Writing
 
 ```rust
 use ofdbox_folio::ir::FixedDocument;
@@ -196,11 +198,11 @@ use ofdbox_folio::ofd::{OfdWriteOptions, write_fixed};
 let bytes = write_fixed(&document, &OfdWriteOptions::default())?;
 ```
 
-写出器消费 Fixed IR，输出 OFD 1.0 包（`Version="1.0"`）：路径、文本（含 `CGTransform` 与 `DeltaX/DeltaY`）、图片、组裁剪、透明度、轴向/径向渐变、字体名称与内嵌字体字节。对象 `Boundary` 取整页，实际位置由 `CTM` 承载；行的位置差直接来自字形局部坐标，避免字体度量引入偏差。内嵌字体按文档实际用字做 TrueType 子集化（保留字形 ID，只清空未用轮廓，复合字形依赖一并保留），字体不可裁剪时整份嵌入；默认使用固定 ZIP 时间戳和内容摘要 `DocID`，相同输入产生相同字节。
+The writer consumes Fixed IR and outputs an OFD 1.0 package (`Version="1.0"`): paths, text (with `CGTransform` and `DeltaX/DeltaY`), images, group clipping, transparency, axial/radial gradients, font names and embedded font bytes. The object `Boundary` covers the whole page, with the actual position carried by the `CTM`; line position deltas come directly from glyph-local coordinates, avoiding the deviation introduced by font metrics. Embedded fonts are subsetted as TrueType based on the characters actually used in the document (glyph IDs are preserved, only unused outlines are cleared, and composite glyph dependencies are kept along with them); when a font cannot be subsetted, it is embedded in full. By default a fixed ZIP timestamp and a content-digest `DocID` are used, so the same input produces the same bytes.
 
-已知限制：图案与网格填充尚未写出（回退为首个色标），组透明度分配到子元素颜色 alpha，不保留独立图层语义。
+Known limitations: pattern and mesh fills are not yet written (they fall back to the first color stop), and group transparency is distributed to the alpha of child element colors, so independent layer semantics are not preserved.
 
-## PDF 读写
+## PDF Reading and Writing
 
 ```rust
 use ofdbox_folio::pdf::{PdfDocument, PdfOptions, PdfReadOptions, write_fixed};
@@ -210,13 +212,13 @@ let page = source.load_page(0)?;
 let bytes = write_fixed(&fixed, &PdfOptions::default())?;
 ```
 
-读取覆盖路径、文本（Identity-H 与简单字体，`ToUnicode`、`Tr` 渲染模式、字距与水平缩放）、图片（含 CCITT G3/G4）、`sh` 着色与 PatternType 2 渐变图案、内联图片、Form XObject、裁剪、透明度、页面旋转、大纲与附件、加密 PDF（用户或所有者密码）；`PdfDocument` 实现 `DocumentSource`，提供页面尺寸、文本层、字体名与资源表。写出覆盖路径、裁剪、图片、渐变、透明组、文字（嵌入 TrueType 字体并子集化，失败时退化为字形轮廓）、元数据与书签；JPEG 以 `DCTDecode` 原样嵌入，PNG/JBIG2/BMP 解码后以 `FlateDecode` 嵌入。
+Reading covers paths, text (Identity-H and simple fonts, `ToUnicode`, `Tr` render mode, character spacing and horizontal scaling), images (including CCITT G3/G4), `sh` shading and PatternType 2 gradient patterns, inline images, Form XObjects, clipping, transparency, page rotation, outlines and attachments, and encrypted PDFs (user or owner password); `PdfDocument` implements `DocumentSource` and provides page sizes, text layers, font names and resource tables. Writing covers paths, clipping, images, gradients, transparency groups, text (embedding subsetted TrueType fonts, degrading to glyph outlines on failure), metadata and bookmarks; JPEG is embedded as-is with `DCTDecode`, while PNG/JBIG2/BMP are decoded and embedded with `FlateDecode`.
 
-已知限制：PatternType 1 分块图案与 JPEG2000 尚未读取；写出时 TIFF/CCITT 图片资源仍不支持（PDF 读取的 CCITT 会先解码为 PNG）。trailer 中直接内联的 `/Encrypt` 会先改写成间接对象并强制 xref 重建，大型加密文件首次打开会明显变慢。
+Known limitations: PatternType 1 tiling patterns and JPEG2000 are not yet read; TIFF/CCITT image resources are still unsupported when writing (CCITT read from PDF is decoded to PNG first). An `/Encrypt` inlined directly in the trailer is first rewritten as an indirect object and forces an xref rebuild, so opening large encrypted files is noticeably slower the first time.
 
-## GPU 后端
+## GPU Backend
 
-`ofdbox-folio-render` 的 `wgpu` feature（门面 `gpu`）提供 compute 后端，`gpu` 默认关闭：
+The `wgpu` feature of `ofdbox-folio-render` (facade `gpu`) provides the compute backend; `gpu` is off by default:
 
 ```rust
 use ofdbox_folio::render::{WgpuBackend, WgpuContext, WgpuTarget};
@@ -227,27 +229,27 @@ backend.render_to_target(&page.content, &target)?;
 let rgba = target.read_rgba(backend.context())?;
 ```
 
-当前覆盖实色填充、描边、线性渐变、裁剪与文字轮廓；图片、径向渐变与混合模式尚未实现，需要完整特性时使用 CPU 渲染器。
+It currently covers solid fills, strokes, linear gradients, clipping and text outlines; images, radial gradients and blend modes are not yet implemented, so use the CPU renderer when you need the full feature set.
 
-## 路线
+## Roadmap
 
-| 阶段 | 内容 | 验收 |
+| Phase | Content | Acceptance |
 |---|---|---|
-| R1 阅读器内核 | IR、OFD 读取、CPU 渲染、文本层、页面缓存 | OFD→图片帧一致、选择/搜索可用、页级错误隔离、wasm 构建 |
-| R2 流式文档 | Flow IR、布局（单栏 + 表格 + 页眉页脚 + 自动目录）、DOCX 读入、DOCX 写出与创建 API | Word → OFD/PDF/位图链路打通，布局确定 |
-| R3 PDF 阅读硬化 | 字体与 CMap、图案/渐变、透明、加密、坏文件容错 | 真实 PDF 语料可读，降级有报告 |
-| R4 文档能力 | 注释/表单、附件、大纲编辑、GPU 后端 | 阅读器功能闭环 |
+| R1 Reader kernel | IR, OFD reading, CPU rendering, text layer, page cache | OFD→image frames consistent, selection/search usable, page-level error isolation, wasm build |
+| R2 Flow documents | Flow IR, layout (single column + tables + headers/footers + automatic TOC), DOCX reading, DOCX writing and the creation API | Word → OFD/PDF/bitmap pipeline working, deterministic layout |
+| R3 PDF reading hardening | Fonts and CMaps, patterns/gradients, transparency, encryption, malformed-file tolerance | Real PDF corpus readable, degradation reported |
+| R4 Document capabilities | Annotations/forms, attachments, outline editing, GPU backend | Reader feature set complete |
 
-当前完成 R1 的 OFD/PDF 读写、CPU 位图与 wgpu 后端骨架、Reader 页面缓存与跨页选择/搜索；CLI 已迁移到 `ofdbox-reader`，旧 `ofdbox-render` 已删除。下一步进入 R2 的 Flow IR、布局与 DOCX。
+R1 is now complete for OFD/PDF reading and writing, CPU bitmaps plus the wgpu backend skeleton, Reader page caching and cross-page selection/search; the CLI has moved to `ofdbox-reader` and the old `ofdbox-render` has been removed. Next comes R2: Flow IR, layout and DOCX.
 
-当前已知限制：
+Currently known limitations:
 
-- OFD 未内嵌字体时，渲染依赖调用方注入 `FontProvider`；未注入时文本层仍保留文本并使用估算 advance，但不绘制文字。
-- 模板页目前拍平进页面内容，`Page.templates` 语义尚未拆分。
-- 页面缓存只计页面结构；字体和图片属于文档级共享资源，单独计价。
-- 文本行按 TextObject 粗略分组，跨对象行合并待完善。
+- When an OFD does not embed fonts, rendering depends on the caller injecting a `FontProvider`; without one, the text layer still keeps the text and uses estimated advances, but no text is drawn.
+- Template pages are currently flattened into page content; the `Page.templates` semantics have not yet been separated out.
+- The page cache accounts only for page structure; fonts and images are document-level shared resources and are accounted separately.
+- Text lines are grouped roughly by TextObject; merging lines across objects still needs work.
 
-## 阅读器缓存
+## Reader Cache
 
 ```rust
 use ofdbox_folio::{CacheOptions, Document, OpenOptions};
@@ -260,15 +262,15 @@ let mut document = Document::open_path(
     },
 )?;
 
-let page = document.page(0)?;      // 首次解析并写入缓存
-let page_again = document.page(0)?; // 命中缓存，返回同一个 Arc<Page>
-document.prefetch(1)?;              // 预取下一页
+let page = document.page(0)?;      // parsed on first access and written to the cache
+let page_again = document.page(0)?; // cache hit, returns the same Arc<Page>
+document.prefetch(1)?;              // prefetch the next page
 let stats = document.cache_stats();
 ```
 
-缓存按页面结构字节数计费，LRU 淘汰；`max_bytes = 0` 可禁用。
+The cache is charged by page-structure bytes and evicts in LRU order; `max_bytes = 0` disables it.
 
-## 跨页选择与搜索
+## Cross-Page Selection and Search
 
 ```rust
 use ofdbox_folio::{Document, OpenOptions, SearchQuery, Selection, TextPosition};
@@ -282,7 +284,7 @@ let hits = document.search_all(&SearchQuery {
 })?;
 for hit in &hits {
     let page = hit.range.start.page;
-    // hit.rects 是页面空间矩形
+    // hit.rects are rectangles in page space
 }
 
 let selection = Selection {
@@ -293,36 +295,35 @@ let text = document.selection_text(&selection)?;
 let rects = document.selection_rects(&selection)?;
 ```
 
-搜索按页按需加载并进入缓存；选择文本跨页时用换行符连接，页面之间不重复解析。
+Search loads pages on demand and puts them into the cache; when a selection spans pages, the text is joined with newlines and pages are not re-parsed in between.
 
 
-## 快速验证
+## Quick Verification
 
 ```bash
 cargo run -p ofdbox-folio --example ofd_to_png -- input.ofd output.png 0 96
-cargo run -p ofdbox-folio --example ofd_search -- input.ofd 查询词
+cargo run -p ofdbox-folio --example ofd_search -- input.ofd query
 ```
 
-## 测试与验收
+## Testing and Acceptance
 
-- 生成的 OFD 必须能被 `ofdbox-core` 严格读取并严格重写后字节一致。
-- 相同输入的布局结果生成稳定摘要；跨平台 CI 比较。
-- 阅读器内存随总页数保持有界；翻页复用字体、图片和渲染缓存。
-- 文本选择、复制、搜索不重新解析页面。
-- 单页损坏不影响其他页。
-- 以现有 OFD 语料为基准，并补充 PDF/DOCX 语料。
+- Generated OFD must be strictly readable by `ofdbox-core`, and byte-identical after a strict rewrite.
+- Layout results for the same input produce a stable digest, compared across platforms in CI.
+- Reader memory stays bounded as the total page count grows; page turns reuse font, image and render caches.
+- Text selection, copying and search do not re-parse pages.
+- A single damaged page does not affect other pages.
+- The existing OFD corpus is the baseline, complemented with PDF/DOCX corpora.
 
-## 与 OFDBox 的关系
+## Relationship to OFDBox
 
-- `ofdbox-folio` 是独立仓库，位于 `ofdbox` 组织下，与工具箱仓库 `ofdbox/ofdbox` 分开发布。
-- OFD 结构解析、密码学与签章暂时依赖 `ofdbox-core`、`ofdbox-crypto`、`ofdbox-seal`。
-- 新引擎承接并最终替代 `ofdbox-render` 的读取、渲染与写出能力；旧 crate 迁移完成后打弃用标记。
-- 新仓库内部 crate 统一使用 `ofdbox-folio-` 前缀，避免过渡期与旧 crate 抢名。
+- `ofdbox-folio` is an independent repository under the `ofdbox` organization, released separately from the toolbox repository `ofdbox/ofdbox`.
+- OFD structure parsing, cryptography and sealing temporarily depend on `ofdbox-core`, `ofdbox-crypto` and `ofdbox-seal`.
+- The new engine takes over and will eventually replace the reading, rendering and writing capabilities of `ofdbox-render`; the old crate will be marked deprecated once migration is complete.
+- Crates inside the new repository all use the `ofdbox-folio-` prefix, to avoid name clashes with old crates during the transition.
 
-## 许可证
+## License
 
-本项目采用 MIT 或 Apache-2.0 双协议，任选其一：
+This project is dual-licensed under MIT or Apache-2.0, at your option:
 
 - [LICENSE-MIT](LICENSE-MIT)
 - [LICENSE-APACHE](LICENSE-APACHE)
-

@@ -1,14 +1,16 @@
-//! 图片蒙版合成：把「底图 + 灰度蒙版」合成为带 alpha 的 PNG。
+//! Image mask compositing: combine a base image and a grayscale mask into a PNG with
+//! alpha.
 //!
-//! DOCX 没有通用的 alpha 蒙版概念，只能把透明度烘进图片本身。这里只处理
-//! PNG 底图 + PNG 蒙版（蒙版按亮度乘到 alpha 上）；其它组合返回 `None`，
-//! 由调用方降级并记录诊断。
+//! DOCX has no general alpha-mask concept, so transparency can only be baked into the
+//! image itself. Only a PNG base with a PNG mask is handled here (the mask is multiplied
+//! into alpha by luminance); other combinations return `None` and the caller downgrades
+//! and records a diagnostic.
 
 use std::io::Cursor;
 
 use ofdbox_folio_ir::ImageAsset;
 
-/// 合成带 alpha 的 PNG；不支持的组合返回 `None`。
+/// Composite a PNG with alpha; unsupported combinations return `None`.
 pub(crate) fn composite_masked_png(image: &ImageAsset) -> Option<Vec<u8>> {
     let mask = image.mask.as_deref()?;
     let (width, height, mut pixels) = decode_rgba(image)?;
@@ -16,7 +18,8 @@ pub(crate) fn composite_masked_png(image: &ImageAsset) -> Option<Vec<u8>> {
     if mask_width == 0 || mask_height == 0 {
         return None;
     }
-    // 蒙版按亮度乘到 alpha 上；尺寸不同时最近邻采样。
+    // The mask is multiplied into alpha by luminance; nearest-neighbour sampling when
+    // the sizes differ.
     for y in 0..height {
         let mask_y = (y as u64 * u64::from(mask_height) / u64::from(height.max(1)))
             .min(u64::from(mask_height) - 1) as u32;
@@ -32,7 +35,7 @@ pub(crate) fn composite_masked_png(image: &ImageAsset) -> Option<Vec<u8>> {
     encode_png(width, height, &pixels)
 }
 
-/// 解码成 RGBA8；只接受 PNG。
+/// Decode into RGBA8; only PNG is accepted.
 fn decode_rgba(asset: &ImageAsset) -> Option<(u32, u32, Vec<u8>)> {
     if asset.format != ofdbox_folio_ir::ImageFormat::Png {
         return None;
@@ -110,7 +113,7 @@ mod tests {
             2,
             2,
         );
-        // 一半黑一半白的蒙版。
+        // A mask that is half black and half white.
         let mut mask_pixels = Vec::new();
         for _ in 0..2 {
             mask_pixels.extend([0, 0, 0, 255]);
@@ -132,7 +135,8 @@ mod tests {
         let mut buffer = vec![0; reader.output_buffer_size().unwrap_or(0).max(1)];
         let info = reader.next_frame(&mut buffer).expect("frame");
         assert_eq!(info.color_type, png::ColorType::Rgba);
-        // 左列被黑蒙版全透明，右列保持不透明。
+        // The left column is fully transparent under the black mask, the right column
+        // stays opaque.
         assert_eq!(buffer[3], 0);
         assert_eq!(buffer[7], 255);
     }

@@ -1,22 +1,22 @@
-//! 未启用 `wgpu` feature 时的占位实现。
+//! Placeholder implementation used when the `wgpu` feature is not enabled.
 
 use crate::RenderError;
 use ofdbox_folio_ir::Scene;
 
-/// wgpu 后端占位类型。
+/// Placeholder type for the wgpu backend.
 #[derive(Debug, Default)]
 pub struct WgpuBackend;
 
 impl WgpuBackend {
-    /// 创建占位后端。
+    /// Creates the placeholder backend.
     pub fn new() -> Self {
         Self
     }
 
-    /// 未启用 wgpu 时始终返回不支持。
+    /// Always returns unsupported while wgpu is not enabled.
     pub fn draw(&mut self, _scene: &Scene) -> Result<(), RenderError> {
         Err(RenderError::Unsupported(
-            "wgpu 后端未启用，请开启 render/wgpu feature".to_owned(),
+            "wgpu backend is not enabled; enable the render/wgpu feature".to_owned(),
         ))
     }
 }

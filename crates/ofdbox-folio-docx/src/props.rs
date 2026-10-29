@@ -1,9 +1,12 @@
-//! DOCX 原始属性：`pPr` / `rPr` / `sectPr` / `tblPr` 的解析、合并与 IR 映射。
+//! Raw DOCX properties: parsing, merging and IR mapping of `pPr` / `rPr` / `sectPr` /
+//! `tblPr`.
 //!
-//! OOXML 的样式是「文档默认 → 表格样式 → 段落样式链 → 字符样式链 → 直接格式」
-//! 的层叠。IR 的命名样式只有一层 `based_on` 合并，无法表达「显式写回默认值」，
-//! 所以读入时按 XML 里**是否出现**逐字段合并（`Option` 语义），最后把解析结果
-//! 拍平成直接格式写进 Flow IR。
+//! OOXML styles cascade as "document defaults → table style → paragraph style chain →
+//! character style chain → direct formatting". The IR named style has only a single
+//! `based_on` merge and cannot express "explicitly written back default value", so on
+//! read each field is merged based on **whether it appears** in the XML (`Option`
+//! semantics), and the result is finally flattened into direct formatting in the Flow
+//! IR.
 
 use ofdbox_folio_ir::{
     Align, Border, BorderStyle, FontFamily, LineSpacing, Margins, PageSetup, ParaStyle, Rgba,
@@ -16,54 +19,56 @@ use crate::xml::{
     skip_element,
 };
 
-/// 上下标。
+/// Vertical alignment (superscript/subscript).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VertAlign {
-    /// 上标。
+    /// Superscript.
     Superscript,
-    /// 下标。
+    /// Subscript.
     Subscript,
 }
 
-/// 段落属性的原始值；`None` 表示该字段在 XML 里没出现。
+/// Raw paragraph properties; `None` means the field does not appear in the XML.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RawParaProps {
-    /// 命名段落样式 ID。
+    /// Named paragraph style ID.
     pub style_id: Option<String>,
-    /// 对齐。
+    /// Alignment.
     pub align: Option<Align>,
-    /// 行距。
+    /// Line spacing.
     pub line_spacing: Option<LineSpacing>,
-    /// 段前。
+    /// Space before.
     pub space_before: Option<Twips>,
-    /// 段后。
+    /// Space after.
     pub space_after: Option<Twips>,
-    /// 首行缩进（可为负，表示悬挂）。
+    /// First-line indent (may be negative, meaning hanging).
     pub first_line: Option<Twips>,
-    /// 左缩进。
+    /// Left indent.
     pub left: Option<Twips>,
-    /// 右缩进。
+    /// Right indent.
     pub right: Option<Twips>,
-    /// 与下段同页。
+    /// Keep with the next paragraph.
     pub keep_next: Option<bool>,
-    /// 段内各行同页。
+    /// Keep the lines of a paragraph together.
     pub keep_lines: Option<bool>,
-    /// 制表位。
+    /// Tab stops.
     pub tabs: Option<Vec<TabStop>>,
-    /// 段前分页。
+    /// Page break before the paragraph.
     pub page_break_before: Option<bool>,
-    /// 编号：`(numId, ilvl)`。
+    /// Numbering: `(numId, ilvl)`.
     pub numbering: Option<(u32, u8)>,
-    /// 大纲级别（0 基）。
+    /// Outline level (0-based).
     pub outline_level: Option<u8>,
-    /// 段落标记的字符属性，作为空段落的字符样式。
+    /// Character properties of the paragraph mark, used as the character style of an
+    /// empty paragraph.
     pub mark: Option<RawRunProps>,
-    /// 段落内嵌的分节属性（段末分节符）。
+    /// Section properties embedded in the paragraph (section break at the paragraph
+    /// end).
     pub section: Option<RawSectionProps>,
 }
 
 impl RawParaProps {
-    /// 用 `over` 中出现的字段覆盖自身。
+    /// Overwrite the fields present in `over`.
     pub fn merge(&mut self, over: &Self) {
         macro_rules! fill {
             ($($field:ident),* $(,)?) => {
@@ -97,7 +102,7 @@ impl RawParaProps {
         }
     }
 
-    /// 生成 Flow IR 的段落样式（只写非默认值）。
+    /// Build the Flow IR paragraph style (only non-default values are written).
     pub fn to_style(&self) -> ParaStyle {
         let mut style = ParaStyle::default();
         if let Some(align) = self.align {
@@ -134,42 +139,44 @@ impl RawParaProps {
     }
 }
 
-/// 字符属性的原始值。
+/// Raw character properties.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RawRunProps {
-    /// 命名字符样式 ID。
+    /// Named character style ID.
     pub style_id: Option<String>,
-    /// 西文字体。
+    /// Latin font.
     pub ascii: Option<String>,
-    /// 主题西文字体（`majorHAnsi` / `minorHAnsi`）。
+    /// Theme Latin font (`majorHAnsi` / `minorHAnsi`).
     pub ascii_theme: Option<String>,
-    /// 东亚字体。
+    /// East Asian font.
     pub east_asia: Option<String>,
-    /// 主题东亚字体。
+    /// Theme East Asian font.
     pub east_asia_theme: Option<String>,
-    /// 字号（磅）。
+    /// Font size (points).
     pub size: Option<f64>,
-    /// 粗体。
+    /// Bold.
     pub bold: Option<bool>,
-    /// 斜体。
+    /// Italic.
     pub italic: Option<bool>,
-    /// 下划线。
+    /// Underline.
     pub underline: Option<bool>,
-    /// 删除线。
+    /// Strikethrough.
     pub strike: Option<bool>,
-    /// 颜色。
+    /// Color.
     pub color: Option<Rgba>,
-    /// 上下标。
+    /// Vertical alignment.
     pub vert: Option<VertAlign>,
-    /// 隐藏文字。
+    /// Hidden text.
     pub hidden: Option<bool>,
 }
 
 impl RawRunProps {
-    /// 用 `over` 中出现的字段覆盖自身。
+    /// Overwrite the fields present in `over`.
     ///
-    /// 字体是「显式名 / 主题名」二选一：某一层写了显式字体，就要清掉上一层继承
-    /// 的主题字体，否则主题字体会反过来盖掉样式里明确写的字体。
+    /// Fonts come as either an explicit name or a theme name: once some layer writes an
+    /// explicit font, the theme font inherited from the layer below must be cleared,
+    /// otherwise the theme font would in turn override the font explicitly written in
+    /// the style.
     pub fn merge(&mut self, over: &Self) {
         macro_rules! fill {
             ($($field:ident),* $(,)?) => {
@@ -199,10 +206,11 @@ impl RawRunProps {
         }
     }
 
-    /// 生成 Flow IR 的字符样式。
+    /// Build the Flow IR character style.
     ///
-    /// 主题字体会先解析成具体字体名；主题解析不到时保留显式字体，避免把中文
-    /// 文本交给只有西文字形的主题字体。
+    /// Theme fonts are resolved to concrete font names first; when a theme name cannot
+    /// be resolved the explicit font is kept, so Chinese text is never handed to a theme
+    /// font that only has Latin glyphs.
     pub fn to_style(&self, theme: &ThemeFonts) -> TextStyle {
         let mut style = TextStyle::default();
         let mut name = None;
@@ -259,21 +267,21 @@ impl RawRunProps {
     }
 }
 
-/// 主题字体：`major` 对应 `*Theme="major*"`，`minor` 对应 `minor*`。
+/// Theme fonts: `major` corresponds to `*Theme="major*"`, `minor` to `minor*`.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ThemeFonts {
-    /// 标题西文字体。
+    /// Heading Latin font.
     pub major_latin: Option<String>,
-    /// 标题东亚字体。
+    /// Heading East Asian font.
     pub major_east_asia: Option<String>,
-    /// 正文字体。
+    /// Body Latin font.
     pub minor_latin: Option<String>,
-    /// 正文东亚字体。
+    /// Body East Asian font.
     pub minor_east_asia: Option<String>,
 }
 
 impl ThemeFonts {
-    /// 按主题名取具体字体。
+    /// Resolve a concrete font by theme name.
     pub fn resolve(&self, name: &str) -> Option<String> {
         let lower = name.to_ascii_lowercase();
         let major = lower.starts_with("major");
@@ -292,39 +300,39 @@ impl ThemeFonts {
     }
 }
 
-/// 分节属性的原始值。
+/// Raw section properties.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RawSectionProps {
-    /// 页面宽度。
+    /// Page width.
     pub width: Option<Twips>,
-    /// 页面高度。
+    /// Page height.
     pub height: Option<Twips>,
-    /// 页边距。
+    /// Top margin.
     pub top: Option<Twips>,
-    /// 下边距。
+    /// Bottom margin.
     pub bottom: Option<Twips>,
-    /// 左边距。
+    /// Left margin.
     pub left: Option<Twips>,
-    /// 右边距。
+    /// Right margin.
     pub right: Option<Twips>,
-    /// 页眉距顶边。
+    /// Header distance from the top edge.
     pub header: Option<Twips>,
-    /// 页脚距底边。
+    /// Footer distance from the bottom edge.
     pub footer: Option<Twips>,
-    /// 首页不同。
+    /// Different first page.
     pub title_page: Option<bool>,
-    /// 页眉引用：`(类型, rId)`。
+    /// Header references: `(type, rId)`.
     pub headers: Vec<(String, String)>,
-    /// 页脚引用：`(类型, rId)`。
+    /// Footer references: `(type, rId)`.
     pub footers: Vec<(String, String)>,
-    /// 分栏数。
+    /// Column count.
     pub columns: Option<u32>,
-    /// 栏间距。
+    /// Column gap.
     pub column_gap: Option<Twips>,
 }
 
 impl RawSectionProps {
-    /// 叠加另一份分节属性。
+    /// Merge another set of section properties on top.
     pub fn merge(&mut self, over: &Self) {
         macro_rules! fill {
             ($($field:ident),* $(,)?) => {
@@ -345,7 +353,7 @@ impl RawSectionProps {
         }
     }
 
-    /// 生成页面设置；缺省字段沿用 A4 默认。
+    /// Build the page setup; missing fields keep the A4 defaults.
     pub fn to_setup(&self) -> PageSetup {
         let mut setup = PageSetup::default();
         if let Some(value) = self.width {
@@ -382,23 +390,23 @@ impl RawSectionProps {
     }
 }
 
-/// 表格属性。
+/// Table properties.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RawTableProps {
-    /// 表格样式 ID。
+    /// Table style ID.
     pub style_id: Option<String>,
-    /// 外边框。
+    /// Outer border.
     pub outer: Option<Border>,
-    /// 水平内边框。
+    /// Horizontal inner border.
     pub horizontal: Option<Border>,
-    /// 垂直内边框。
+    /// Vertical inner border.
     pub vertical: Option<Border>,
-    /// 单元格内边距。
+    /// Cell margins.
     pub cell_margins: Option<Margins>,
 }
 
 impl RawTableProps {
-    /// 用 `over` 中出现的字段覆盖自身。
+    /// Overwrite the fields present in `over`.
     pub fn merge(&mut self, over: &Self) {
         if over.style_id.is_some() {
             self.style_id = over.style_id.clone();
@@ -417,7 +425,7 @@ impl RawTableProps {
         }
     }
 
-    /// 生成 IR 的边框集合。
+    /// Build the IR border set.
     pub fn borders(&self) -> TableBorders {
         TableBorders {
             outer: self.outer,
@@ -427,9 +435,9 @@ impl RawTableProps {
     }
 }
 
-// ---- 解析 ----
+// ---- Parsing ----
 
-/// 解析 `w:pPr`。
+/// Parse `w:pPr`.
 pub(crate) fn parse_para_props(
     reader: &mut XmlReader<'_>,
     _start: &quick_xml::events::BytesStart<'_>,
@@ -460,7 +468,7 @@ pub(crate) fn parse_para_props(
             },
             quick_xml::events::Event::End(_) => break,
             quick_xml::events::Event::Eof => {
-                return Err(DocxError::Structure("pPr 没有结束标签".to_owned()));
+                return Err(DocxError::Structure("pPr has no end tag".to_owned()));
             }
             _ => {}
         }
@@ -468,7 +476,7 @@ pub(crate) fn parse_para_props(
     Ok(props)
 }
 
-/// 解析 `w:rPr`。
+/// Parse `w:rPr`.
 pub(crate) fn parse_run_props(
     reader: &mut XmlReader<'_>,
     _start: &quick_xml::events::BytesStart<'_>,
@@ -507,7 +515,7 @@ pub(crate) fn parse_run_props(
             },
             quick_xml::events::Event::End(_) => break,
             quick_xml::events::Event::Eof => {
-                return Err(DocxError::Structure("rPr 没有结束标签".to_owned()));
+                return Err(DocxError::Structure("rPr has no end tag".to_owned()));
             }
             _ => {}
         }
@@ -515,7 +523,7 @@ pub(crate) fn parse_run_props(
     Ok(props)
 }
 
-/// 解析 `w:sectPr`。
+/// Parse `w:sectPr`.
 pub(crate) fn parse_section_props(
     reader: &mut XmlReader<'_>,
     start: &quick_xml::events::BytesStart<'_>,
@@ -547,7 +555,7 @@ pub(crate) fn parse_section_props(
             quick_xml::events::Event::End(_) => break,
             quick_xml::events::Event::Eof => {
                 let _ = start;
-                return Err(DocxError::Structure("sectPr 没有结束标签".to_owned()));
+                return Err(DocxError::Structure("sectPr has no end tag".to_owned()));
             }
             _ => {}
         }
@@ -555,7 +563,7 @@ pub(crate) fn parse_section_props(
     Ok(props)
 }
 
-/// 应用 `w:cols`：分栏数与栏间距。
+/// Apply `w:cols`: column count and column gap.
 fn apply_columns(element: &quick_xml::events::BytesStart<'_>, props: &mut RawSectionProps) {
     if let Some(count) = attr_u32(element, "num") {
         props.columns = Some(count);
@@ -565,7 +573,8 @@ fn apply_columns(element: &quick_xml::events::BytesStart<'_>, props: &mut RawSec
     }
 }
 
-/// 应用 `pgSz` 与 `pgMar` 上的尺寸属性（两者共享同一个属性命名空间）。
+/// Apply the size attributes on `pgSz` and `pgMar` (the two share one attribute
+/// namespace).
 fn apply_page_attrs(element: &quick_xml::events::BytesStart<'_>, props: &mut RawSectionProps) {
     let read = |name: &str| attr_i32(element, name).map(|value| Twips::new(i64::from(value)));
     if let Some(value) = read("w") {
@@ -594,7 +603,7 @@ fn apply_page_attrs(element: &quick_xml::events::BytesStart<'_>, props: &mut Raw
     }
 }
 
-/// 解析 `w:tblPr`。
+/// Parse `w:tblPr`.
 pub(crate) fn parse_table_props(
     reader: &mut XmlReader<'_>,
     _start: &quick_xml::events::BytesStart<'_>,
@@ -616,7 +625,7 @@ pub(crate) fn parse_table_props(
             }
             quick_xml::events::Event::End(_) => break,
             quick_xml::events::Event::Eof => {
-                return Err(DocxError::Structure("tblPr 没有结束标签".to_owned()));
+                return Err(DocxError::Structure("tblPr has no end tag".to_owned()));
             }
             _ => {}
         }
@@ -624,7 +633,7 @@ pub(crate) fn parse_table_props(
     Ok(props)
 }
 
-/// 解析 `w:tabs` 里的制表位定义。
+/// Parse the tab stop definitions inside `w:tabs`.
 fn parse_tabs(reader: &mut XmlReader<'_>) -> Result<Vec<TabStop>, DocxError> {
     let mut stops = Vec::new();
     loop {
@@ -641,7 +650,7 @@ fn parse_tabs(reader: &mut XmlReader<'_>) -> Result<Vec<TabStop>, DocxError> {
                     Some("center") => TabAlign::Center,
                     Some("right") => TabAlign::Right,
                     Some("decimal") => TabAlign::Decimal,
-                    // clear/bar 不是文本对齐用的制表位。
+                    // clear/bar are not tab stops used for text alignment.
                     Some("clear") | Some("bar") => continue,
                     _ => TabAlign::Left,
                 };
@@ -662,7 +671,7 @@ fn parse_tabs(reader: &mut XmlReader<'_>) -> Result<Vec<TabStop>, DocxError> {
     Ok(stops)
 }
 
-/// 解析 `w:numPr`，返回 `(numId, ilvl)`。
+/// Parse `w:numPr` and return `(numId, ilvl)`.
 fn parse_numbering_props(
     reader: &mut XmlReader<'_>,
     _start: &quick_xml::events::BytesStart<'_>,
@@ -802,7 +811,8 @@ fn parse_cell_margins(
                 let Some(value) = attr_i32(&element, "w") else {
                     continue;
                 };
-                // 只有 dxa（twip）能直接使用，其余单位（如 pct）按 twip 近似。
+                // Only dxa (twip) can be used directly; other units (such as pct) are
+                // approximated as twips.
                 let twips = Twips::new(i64::from(value));
                 match local_name(&element).as_str() {
                     "top" => margins.top = twips,
@@ -820,7 +830,7 @@ fn parse_cell_margins(
     Ok(margins)
 }
 
-/// 解析 `w:jc` 的取值。
+/// Parse the value of `w:jc`.
 pub(crate) fn parse_align(value: &str) -> Option<Align> {
     Some(match value {
         "center" => Align::Center,
@@ -831,7 +841,7 @@ pub(crate) fn parse_align(value: &str) -> Option<Align> {
     })
 }
 
-/// 解析 `w:color` 的十六进制取值。
+/// Parse the hexadecimal value of `w:color`.
 fn parse_color(value: &str) -> Option<Rgba> {
     let hex = value.trim().trim_start_matches('#');
     if hex.eq_ignore_ascii_case("auto") || hex.len() != 6 {
@@ -850,7 +860,7 @@ mod tests {
     use super::{RawParaProps, parse_para_props};
     use crate::xml::XmlReader;
 
-    /// 解析 `xml` 里第一个 `pPr`。
+    /// Parse the first `pPr` in `xml`.
     fn parse(xml: &str) -> RawParaProps {
         let mut reader = XmlReader::from_str(xml);
         loop {
@@ -860,7 +870,7 @@ mod tests {
                         return parse_para_props(&mut reader, &element).expect("props");
                     }
                 }
-                quick_xml::events::Event::Eof => panic!("没有 pPr"),
+                quick_xml::events::Event::Eof => panic!("no pPr"),
                 _ => {}
             }
         }
@@ -895,7 +905,7 @@ mod tests {
         let mut base = parse(r#"<w:pPr><w:jc w:val="center"/><w:spacing w:after="240"/></w:pPr>"#);
         let over = parse(r#"<w:pPr><w:spacing w:after="0"/></w:pPr>"#);
         base.merge(&over);
-        // 显式写回的 0 也要生效。
+        // An explicitly written back 0 must take effect too.
         assert_eq!(base.space_after, Some(Twips::new(0)));
         assert_eq!(base.align, Some(Align::Center));
     }
@@ -911,7 +921,7 @@ mod tests {
                         break super::parse_run_props(&mut reader, &element).expect("props");
                     }
                 }
-                quick_xml::events::Event::Eof => panic!("没有 rPr"),
+                quick_xml::events::Event::Eof => panic!("no rPr"),
                 _ => {}
             }
         };

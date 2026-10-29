@@ -1,6 +1,7 @@
-//! 追加的 A2 测试：表格与页眉页脚。
+//! Additional A2 tests: tables, headers and footers.
 //!
-//! 与 `layout.rs` 一样依赖系统里的 Arial 做度量，拿不到字体时跳过。
+//! Like `layout.rs` these rely on the system's Arial for metrics and are skipped
+//! when the font is unavailable.
 
 use std::sync::Arc;
 
@@ -11,7 +12,7 @@ use ofdbox_folio_ir::{
 };
 use ofdbox_folio_layout::{LayoutOptions, layout, layout_with};
 
-/// 固定返回同一份字体字节的提供者。
+/// Provider that always returns the same font bytes.
 struct SystemFonts {
     bytes: Arc<[u8]>,
 }
@@ -73,7 +74,8 @@ fn table(rows: Vec<Row>, header_rows: u32) -> Table {
     table
 }
 
-/// 页面文本层里每一行的文字、首个字符的 x 与行框的 y。
+/// The text of each line in the page's text layer, the x of its first character
+/// and the y of its line box.
 fn texts(page: &ofdbox_folio_ir::Page) -> Vec<(String, f64, f64)> {
     page.text
         .lines
@@ -108,25 +110,29 @@ fn lays_out_table_cells_with_padding_and_borders() {
         text.iter()
             .find(|(value, _, _)| value == needle)
             .map(|(_, x, y)| (*x, *y))
-            .unwrap_or_else(|| panic!("没有找到 {needle}: {text:?}"))
+            .unwrap_or_else(|| panic!("did not find {needle}: {text:?}"))
     };
 
-    // 第一列：左边距 25.4 + 内边距 2；第二列再向右 50。
+    // First column: left margin 25.4 + padding 2; the second column is 50 further
+    // right.
     let (first_x, first_y) = find("A1");
-    assert!((first_x - 27.4).abs() < 0.5, "首列 x={first_x}");
+    assert!((first_x - 27.4).abs() < 0.5, "first column x={first_x}");
     let (second_x, _) = find("B1");
     assert!(
         (second_x - (first_x + 50.0)).abs() < 0.5,
-        "第二列 x={second_x}"
+        "second column x={second_x}"
     );
-    // 单元格上内边距 1mm：首行文字落在表格顶部之下。
-    assert!(first_y > 25.4 - 1.0, "首行 y={first_y}");
+    // Cell top padding 1mm: the first line of text sits below the table top.
+    assert!(first_y > 25.4 - 1.0, "first row y={first_y}");
 
-    // 表格之后的段落要落在表格下方。
+    // The paragraph placed after the table must fall below the table.
     let (_, after_y) = find("表格之后");
-    assert!(after_y > first_y + 3.0, "表格后段落 y={after_y}");
+    assert!(
+        after_y > first_y + 3.0,
+        "paragraph after the table y={after_y}"
+    );
 
-    // 每个单元格 4 条边 → 3 个单元格 12 条描边路径。
+    // 4 edges per cell → 12 stroked paths for 3 cells.
     let strokes = page
         .content
         .root
@@ -134,7 +140,7 @@ fn lays_out_table_cells_with_padding_and_borders() {
         .iter()
         .filter(|element| matches!(element, ofdbox_folio_ir::Element::Path(_)))
         .count();
-    assert_eq!(strokes, 12, "边框描边数量");
+    assert_eq!(strokes, 12, "number of border strokes");
 }
 
 #[test]
@@ -160,12 +166,12 @@ fn repeats_table_header_rows_on_the_next_page() {
     flow.push(Block::Table(table));
 
     let fixed = layout_with(&flow, &mut fonts, LayoutOptions::default()).expect("layout");
-    assert!(fixed.pages.len() >= 2, "页数: {}", fixed.pages.len());
+    assert!(fixed.pages.len() >= 2, "pages: {}", fixed.pages.len());
     for (index, page) in fixed.pages.iter().enumerate() {
         let text = texts(page);
         assert!(
             text.iter().any(|(value, _, _)| value == "表头甲"),
-            "第 {} 页缺少重复表头: {text:?}",
+            "page {} is missing the repeated header: {text:?}",
             index + 1
         );
     }
@@ -182,7 +188,8 @@ fn splits_a_row_taller_than_a_page_across_pages() {
         is_header: true,
         height: None,
     }];
-    // 单元格里塞 90 段小字，整行远高于一页。
+    // Stuff 90 short paragraphs into the cell so the whole row is far taller than
+    // one page.
     let mut tall_cell = Vec::new();
     for index in 0..140 {
         tall_cell.push(Block::Paragraph(paragraph(&format!(
@@ -196,7 +203,7 @@ fn splits_a_row_taller_than_a_page_across_pages() {
 
     let mut table = table(rows, 1);
     table.cell_padding = Margins::uniform(Twips::from_mm(1.0));
-    // 单列表格更常见：改成两列。
+    // Single-column tables are more common: switch to two columns.
     table.columns = vec![
         Column {
             width: ColumnWidth::Twips(Twips::from_mm(90.0)),
@@ -210,26 +217,28 @@ fn splits_a_row_taller_than_a_page_across_pages() {
     let fixed = layout_with(&flow, &mut fonts, LayoutOptions::default()).expect("layout");
     assert!(
         fixed.pages.len() >= 3,
-        "超高行应跨页续排，实际页数: {}",
+        "an oversized row should continue across pages; actual page count: {}",
         fixed.pages.len()
     );
 
-    // 每一页都有续排的超高行内容，且每页都重复表头。
+    // Every page carries the continued content of the oversized row and repeats
+    // the header.
     for (index, page) in fixed.pages.iter().enumerate() {
         let text = texts(page);
         assert!(
             text.iter().any(|(value, _, _)| value == "表头甲"),
-            "第 {} 页缺少表头: {text:?}",
+            "page {} is missing the header: {text:?}",
             index + 1
         );
         assert!(
             text.iter()
                 .any(|(value, _, _)| value.starts_with("很长的单元格内容第")),
-            "第 {} 页缺少单元格续排内容: {text:?}",
+            "page {} is missing the continued cell content: {text:?}",
             index + 1
         );
     }
-    // 第一段与最后一段分处不同页，说明是同一行被拆开续排，而不是整行挪页。
+    // The first and last paragraphs land on different pages, which shows that a
+    // single row was split and continued rather than moved wholesale.
     let page_of = |needle: &str| {
         fixed
             .pages
@@ -237,20 +246,20 @@ fn splits_a_row_taller_than_a_page_across_pages() {
             .position(|page| texts(page).iter().any(|(value, _, _)| value == needle))
             .map(|index| index + 1)
     };
-    let first_page = page_of("很长的单元格内容第 0 行").expect("首段");
-    let last_page = page_of("很长的单元格内容第 139 行").expect("末段");
+    let first_page = page_of("很长的单元格内容第 0 行").expect("first paragraph");
+    let last_page = page_of("很长的单元格内容第 139 行").expect("last paragraph");
     assert!(
         last_page > first_page,
-        "同一行的首末段应分页: {first_page} vs {last_page}"
+        "the first and last parts of the same row should land on different pages: {first_page} vs {last_page}"
     );
 
-    // 最后一行整行落在末尾，不会重复。
-    let last = fixed.pages.last().expect("最后一页");
+    // The last row falls entirely on the final page and is not repeated.
+    let last = fixed.pages.last().expect("last page");
     assert!(
         texts(last)
             .iter()
             .any(|(value, _, _)| value == "表格最后一行"),
-        "最后一行应排完: {:?}",
+        "the last row should be fully laid out: {:?}",
         texts(last)
     );
     assert!(
@@ -258,8 +267,8 @@ fn splits_a_row_taller_than_a_page_across_pages() {
             .report
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("表格行跨页")),
-        "应记录行跨页诊断"
+            .any(|diagnostic| diagnostic.message.contains("table row spans pages")),
+        "a row-spanning-pages diagnostic should be recorded"
     );
 }
 
@@ -269,8 +278,8 @@ fn merged_cell_spans_multiple_columns() {
         return;
     };
     let mut flow = FlowDocument::new(Metadata::default());
-    // 两列各 40mm：跨两列的单元格可用宽度 80mm，短文字一行放得下；
-    // 单列宽度只有 40mm 时会折成两行。
+    // Two 40mm columns: a cell spanning both has 80mm available, so the short text
+    // fits on one line; a single 40mm column would wrap it to two lines.
     let mut table = table(
         vec![
             Row::new(vec![
@@ -310,7 +319,10 @@ fn merged_cell_spans_multiple_columns() {
         .iter()
         .filter(|line| line.contains("跨列单元格"))
         .count();
-    assert_eq!(span_lines, 1, "跨列单元格应一行排完: {lines:?}");
+    assert_eq!(
+        span_lines, 1,
+        "a spanning cell should fit on one line: {lines:?}"
+    );
 }
 
 #[test]
@@ -355,11 +367,15 @@ fn lays_out_header_and_footer_with_page_fields() {
     let header = first
         .iter()
         .find(|(value, _, _)| value == "页眉文字")
-        .expect("页眉");
-    assert!((header.1 - 25.4).abs() < 0.5, "页眉左边距: {}", header.1);
+        .expect("header");
+    assert!(
+        (header.1 - 25.4).abs() < 0.5,
+        "header left margin: {}",
+        header.1
+    );
     assert!(
         (header.2 - 10.0).abs() < 3.0,
-        "页眉 y 应贴近页眉距离: {}",
+        "header y should be close to the header distance: {}",
         header.2
     );
 
@@ -368,21 +384,24 @@ fn lays_out_header_and_footer_with_page_fields() {
         .map(|(value, _, _)| value.as_str())
         .collect::<Vec<_>>()
         .join("");
-    assert!(footer.contains("第 1 页"), "页脚文字: {footer}");
-    assert!(footer.contains("共 2 页"), "页脚文字: {footer}");
+    assert!(footer.contains("第 1 页"), "footer text: {footer}");
+    assert!(footer.contains("共 2 页"), "footer text: {footer}");
     let footer_y = first
         .iter()
         .filter(|(_, _, y)| *y > 250.0)
         .map(|(_, _, y)| *y)
         .fold(0.0_f64, f64::max);
-    assert!(footer_y > 250.0, "页脚应在页面底部: {footer_y}");
+    assert!(
+        footer_y > 250.0,
+        "the footer should be at the bottom of the page: {footer_y}"
+    );
 
     let second: String = texts(&fixed.pages[1])
         .iter()
         .map(|(value, _, _)| value.as_str())
         .collect::<Vec<_>>()
         .join("");
-    assert!(second.contains("第 2 页"), "第二页页脚: {second}");
+    assert!(second.contains("第 2 页"), "second page footer: {second}");
 }
 
 #[test]
@@ -412,16 +431,21 @@ fn aligns_centered_cells_and_keeps_row_height() {
         .iter()
         .find(|(value, _, _)| value == "居中")
         .map(|(_, x, y)| (*x, *y))
-        .expect("居中文本");
-    // 列宽 60mm、文本居中：起点应明显右于左边距。
-    assert!(centered_x.0 > 25.4 + 15.0, "居中 x={}", centered_x.0);
+        .expect("centered text");
+    // Column width 60mm with centered text: the start should be clearly right of
+    // the left margin.
+    assert!(centered_x.0 > 25.4 + 15.0, "centered x={}", centered_x.0);
     let after_y = text
         .iter()
         .find(|(value, _, _)| value == "之后")
         .map(|(_, _, y)| *y)
-        .expect("后续段落");
-    // 固定行高 20mm：后续段落的首行顶部在 +20mm 附近（行框从基线向上量）。
-    assert!(after_y > 25.4 + 20.0 - 1.5, "后续段落 y={after_y}");
+        .expect("following paragraph");
+    // Fixed row height 20mm: the first line top of the following paragraph is
+    // around +20mm (line boxes are measured upward from the baseline).
+    assert!(
+        after_y > 25.4 + 20.0 - 1.5,
+        "following paragraph y={after_y}"
+    );
 }
 
 #[test]
@@ -443,8 +467,8 @@ fn reports_table_without_columns() {
             .report
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("表格没有行或列")),
-        "诊断: {:?}",
+            .any(|diagnostic| diagnostic.message.contains("table has no rows or columns")),
+        "diagnostics: {:?}",
         fixed.report.diagnostics
     );
     assert!(!fixed.pages.is_empty());
@@ -475,12 +499,13 @@ fn justifies_and_indents_inside_cells() {
     let fixed = layout(&flow, &mut fonts).expect("layout");
     let page = &fixed.pages[0];
     let lines = texts(page);
-    // 单元格文本应在 3 行以上（60mm 列宽装不下整段）。
-    assert!(lines.len() >= 3, "行数: {} / {lines:?}", lines.len());
+    // The cell text should take more than 3 lines (60mm of column width cannot
+    // hold the whole paragraph).
+    assert!(lines.len() >= 3, "line count: {} / {lines:?}", lines.len());
     for line in &page.text.lines {
         assert!(
             line.bbox.right() <= 25.4 + 60.0 + 1.0,
-            "行超出列宽: {} / {lines:?}",
+            "line exceeds the column width: {} / {lines:?}",
             line.bbox.right()
         );
     }

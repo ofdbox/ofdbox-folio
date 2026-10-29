@@ -1,14 +1,14 @@
-//! Fixed IR 到 OFD 包的写出。
+//! Writing Fixed IR out as an OFD package.
 //!
-//! 页面、图元、资源和大纲先映射为 `ofdbox-core` 的结构化模型对象，再由 core
-//! 负责 XML 序列化和 ZIP 打包。输出 entry 布局保持稳定：
-//! `OFD.xml`、`Doc_0/Document.xml`、`Doc_0/Pages/Page_{n}/Content.xml`、
-//! `Doc_0/PublicRes.xml`（字体）、`Doc_0/DocumentRes.xml`（图片），字体和图片
-//! 分别落在 `Doc_0/Res/` 下。core 固定 ZIP 时间戳并按名字排序条目，因此相同
-//! 输入产生相同字节。
+//! Pages, graphic units, resources and the outline are first mapped to the structured model
+//! objects of `ofdbox-core`, and core then handles XML serialization and ZIP packaging. The
+//! output entry layout stays stable: `OFD.xml`, `Doc_0/Document.xml`,
+//! `Doc_0/Pages/Page_{n}/Content.xml`, `Doc_0/PublicRes.xml` (fonts) and
+//! `Doc_0/DocumentRes.xml` (images), with fonts and images living under `Doc_0/Res/`. core fixes
+//! the ZIP timestamps and sorts entries by name, so identical input produces identical bytes.
 //!
-//! 当前覆盖路径、文本、图片、基础资源和渐变；组裁剪、透明度按页面坐标近似写
-//! 出，与旧实现保持一致。
+//! Currently covers paths, text, images, basic resources and gradients; group clipping and opacity
+//! are written out approximated in page coordinates, consistent with the old implementation.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -37,17 +37,17 @@ use ofdbox_folio_ir::{
 
 use crate::OfdError;
 
-/// 大纲树最大嵌套深度，避免异常输入把写出拖入深递归。
+/// Maximum nesting depth of the outline tree, so abnormal input cannot drag writing into deep recursion.
 const MAX_OUTLINE_DEPTH: usize = 16;
 
-/// OFD 写出选项。
+/// OFD write options.
 #[derive(Clone, Debug)]
 pub struct OfdWriteOptions {
-    /// 生成工具名称。
+    /// Name of the generating tool.
     pub creator: String,
-    /// 固定文档 ID；不提供时由页面内容摘要生成。
+    /// Fixed document ID; when not provided it is generated from a digest of the page content.
     pub doc_id: Option<String>,
-    /// 保留字段：core 打包时恒使用固定 ZIP 时间戳，该值不再影响输出。
+    /// Retained field: core always uses fixed ZIP timestamps when packaging, so this value no longer affects output.
     pub deterministic: bool,
 }
 
@@ -61,16 +61,18 @@ impl Default for OfdWriteOptions {
     }
 }
 
-/// 把 FixedDocument 写成 OFD 包。
+/// Writes a FixedDocument out as an OFD package.
 pub fn write_fixed(
     document: &FixedDocument,
     options: &OfdWriteOptions,
 ) -> Result<Vec<u8>, OfdError> {
     if document.pages.is_empty() {
-        return Err(OfdError::InvalidStructure("没有可写出的页面".to_owned()));
+        return Err(OfdError::InvalidStructure(
+            "there are no pages to write".to_owned(),
+        ));
     }
 
-    // 旧行为：文档公共区域和每页区域都取页面尺寸。
+    // Old behavior: both the document-wide common area and each page area use the page size.
     let first_size = page_size(&document.pages[0]);
     let page_area = page_area_value(first_size);
 
@@ -84,7 +86,8 @@ pub fn write_fixed(
         image_entries: Vec::new(),
     };
 
-    // 先构建全部页面模型：DocID 需要页面序列化结果，且核心建包要求先知道页区域。
+    // Build all page models first: DocID needs the serialized page bytes, and core's package
+    // creation requires the page area to be known up front.
     let mut built_pages = Vec::with_capacity(document.pages.len());
     for page in &document.pages {
         let page_id = state.alloc();
@@ -113,15 +116,16 @@ pub fn write_fixed(
             }),
             actions: None,
         };
-        let bytes = model_xml::to_bytes(&model)
-            .map_err(|error| OfdError::InvalidStructure(format!("序列化页面失败: {error}")))?;
+        let bytes = model_xml::to_bytes(&model).map_err(|error| {
+            OfdError::InvalidStructure(format!("failed to serialize page: {error}"))
+        })?;
         built_pages.push(BuiltPage {
             id: page_id,
             model,
             bytes,
         });
     }
-    // 全局 ID 空间：页、图层、图元、字体和图片资源共用。
+    // Global ID space: pages, layers, graphic units, fonts and image resources share it.
     let max_unit_id = state.next_id.saturating_sub(1);
     let page_ids = built_pages.iter().map(|page| page.id).collect::<Vec<_>>();
     let doc_id = options
@@ -135,7 +139,7 @@ pub fn write_fixed(
         page_area: Some(page_area.clone()),
     })?;
 
-    // OFD.xml：版本固定 1.0（GB/T 33190-2016 / OFD.xsd），并写入元数据。
+    // OFD.xml: version is fixed at 1.0 (GB/T 33190-2016 / OFD.xsd), and metadata is written in.
     let mut ofd = file.ofd()?;
     ofd.data.version = "1.0".to_owned();
     if let Some(body) = ofd.data.doc_bodies.first_mut() {
@@ -148,7 +152,8 @@ pub fn write_fixed(
     doc.data.common_data.max_unit_id = StId::new(max_unit_id);
     doc.data.common_data.page_area = page_area;
 
-    // 手工登记页面：`add_page` 从 Page_1 起且页 ID 不可控，这里保持 Page_0 起。
+    // Register pages manually: `add_page` starts at Page_1 and its page ID is not controllable,
+    // so here we keep starting at Page_0.
     for (index, page) in built_pages.into_iter().enumerate() {
         let BuiltPage { id, model, .. } = page;
         let base_loc = StLoc::new(format!("Pages/Page_{index}/Content.xml"));
@@ -161,7 +166,7 @@ pub fn write_fixed(
         });
     }
 
-    // 字体：PublicRes.xml + Res/Font_{id}.{ext}。
+    // Fonts: PublicRes.xml + Res/Font_{id}.{ext}.
     if !state.font_entries.is_empty() {
         let fonts = state
             .font_entries
@@ -200,8 +205,9 @@ pub fn write_fixed(
                     .get(&font.id)
                     .and_then(|used| subset_truetype(&font.bytes, font.face_index, used))
             };
-            // 集合字体即使不能子集，也要拆出单个 face 再内嵌：OFD 的 FontFile
-            // 只接受单份字体，整包塞 .ttc 会让阅读器读不出字形。
+            // Even when a collection font cannot be subset, a single face is still extracted for
+            // embedding: `FontFile` in OFD only accepts a single font, and stuffing a whole .ttc in
+            // makes readers unable to find glyphs.
             let face = if subset.is_none() {
                 extract_truetype_face(&font.bytes, font.face_index)
             } else {
@@ -218,7 +224,7 @@ pub fn write_fixed(
         }
     }
 
-    // 图片：DocumentRes.xml + Res/Image_{id}.{ext}。
+    // Images: DocumentRes.xml + Res/Image_{id}.{ext}.
     if !state.image_entries.is_empty() {
         let multi_medias = state
             .image_entries
@@ -254,7 +260,7 @@ pub fn write_fixed(
     Ok(file.to_bytes()?)
 }
 
-/// 已构建的页面：模型、序列化字节和页面 ID。
+/// A page that has been built: model, serialized bytes and page ID.
 struct BuiltPage {
     id: u32,
     model: OfdPage,
@@ -265,9 +271,10 @@ struct State {
     next_id: u32,
     fonts: HashMap<u64, u32>,
     font_entries: Vec<FontEntry>,
-    /// 每个字体用到的字形 ID，写出时据此子集化。
+    /// Glyph IDs used per font, used to subset when writing out.
     font_glyphs: HashMap<u32, HashSet<u16>>,
-    /// 只给了 `TextCode` 没给字形 ID 的字体：无法确定用字，必须整份嵌入。
+    /// Fonts that only received a `TextCode` and no glyph IDs: the used characters cannot be
+    /// determined, so the whole font must be embedded.
     font_unmapped: HashSet<u32>,
     images: HashMap<u64, u32>,
     image_entries: Vec<ImageEntry>,
@@ -338,7 +345,7 @@ impl PageWriter<'_> {
         }
     }
 
-    /// 图元公共属性：页面边界、CTM 和当前裁剪。
+    /// Common graphic unit attributes: page boundary, CTM and the current clips.
     fn common(&self, transform: Matrix) -> GraphicUnit {
         GraphicUnit {
             boundary: StBox::new(0.0, 0.0, self.page_width, self.page_height),
@@ -348,7 +355,8 @@ impl PageWriter<'_> {
         }
     }
 
-    /// OFD 的裁剪区域位于对象空间，不随对象 CTM 缩放；写出时直接给页面坐标。
+    /// OFD clipping areas live in object space and are not scaled by the object CTM; when writing
+    /// out they are given directly in page coordinates.
     fn clips_value(&self) -> Option<Clips> {
         if self.clips.is_empty() {
             return None;
@@ -422,13 +430,14 @@ impl PageWriter<'_> {
             return;
         }
         let font_id = self.font(&element.font);
-        // 记录实际用到的字形，写出时按需子集化；只有 TextCode、没有字形 ID 的
-        // 字体无法判断用字，标记为整份嵌入。
+        // Record the glyphs actually used so they can be subset on demand when writing out; fonts
+        // that only have a TextCode and no glyph IDs cannot have their characters determined, and
+        // are marked for full embedding.
         if run.glyphs.is_empty() {
             self.state.font_unmapped.insert(font_id);
         } else {
             let used = self.state.font_glyphs.entry(font_id).or_default();
-            // TrueType 字形 ID 是 16 位，超出的 ID 不可能出现在字体里。
+            // TrueType glyph IDs are 16 bits, so an out-of-range ID cannot occur in a font.
             used.extend(
                 run.glyphs
                     .iter()
@@ -463,8 +472,9 @@ impl PageWriter<'_> {
             });
         }
         let first = run.glyphs.first().copied().unwrap_or_default();
-        // 直接用相邻字形的局部坐标差还原步进，避免字体度量或 HScale 引入偏差；
-        // DeltaX/DeltaY 是“本字形之后”的偏移，最后一个字形补 0。
+        // Recover the advance directly from the local-coordinate differences of adjacent glyphs to
+        // avoid bias from font metrics or HScale; DeltaX/DeltaY are the offset "after this glyph",
+        // with a trailing 0 for the last glyph.
         let deltas_x = position_deltas(&run.glyphs, |glyph| glyph.x);
         let deltas_y = position_deltas(&run.glyphs, |glyph| glyph.y);
         let text_code = TextCode {
@@ -583,7 +593,7 @@ impl PageWriter<'_> {
     }
 }
 
-/// 通过文档上下文写出 `PublicRes.xml` / `DocumentRes.xml`。
+/// Writes `PublicRes.xml` / `DocumentRes.xml` through the document context.
 fn save_res(
     doc: &Stored<ofdbox_core::model::document::Document>,
     name: &str,
@@ -595,7 +605,7 @@ fn save_res(
     Ok(())
 }
 
-/// 生成 `Outlines`；没有大纲时返回 `None`，序列化后不产生节点。
+/// Builds `Outlines`; returns `None` when there is no outline, so that serialization produces no node.
 fn build_outlines(items: &[OutlineItem], page_ids: &[u32]) -> Option<Outlines> {
     if items.is_empty() {
         return None;
@@ -641,7 +651,7 @@ fn push_outline(
         .collect()
 }
 
-/// 目标区域：整页用 `Fit`，带坐标用 `XYZ`。
+/// Destination area: `Fit` for a whole page, `XYZ` when coordinates are given.
 fn dest_value(page_id: u32, destination: Destination) -> Dest {
     let Point { x, y } = destination.point;
     if x.abs() < 1e-6 && y.abs() < 1e-6 {
@@ -769,7 +779,7 @@ fn path_data(path: &Path) -> String {
     output.trim_end().to_owned()
 }
 
-/// IR 画笔映射为 OFD 颜色；纯色和轴向/径向渐变都落到 `Color`。
+/// Maps an IR paint to an OFD color; solid colors and axial/radial gradients both land in `Color`.
 fn color_value(paint: &Paint, opacity: f32) -> Color {
     match paint {
         Paint::Color(color) => solid_color(*color, opacity),
@@ -833,7 +843,7 @@ fn color_value(paint: &Paint, opacity: f32) -> Color {
 
 fn solid_color(color: Rgba, opacity: f32) -> Color {
     Color {
-        // core 的 ColorArray 用 u32 分量，兼容灰度/CMYK 等超过 255 的通道值。
+        // core's ColorArray uses u32 components, accommodating channel values above 255 such as grayscale/CMYK.
         value: Some(ColorArray::new(vec![
             u32::from(color.r),
             u32::from(color.g),
@@ -858,7 +868,7 @@ fn shd_segments(stops: &[ofdbox_folio_ir::GradientStop], opacity: f32) -> Vec<Sh
         .collect()
 }
 
-/// Direct 渐变下 Extend 控制两侧是否延伸；Pad 等价于两侧都延伸。
+/// Under a Direct gradient, `Extend` controls whether either side extends; Pad is equivalent to both sides extending.
 fn gradient_map(extend: GradientExtend, map_unit: f64) -> (MapType, Option<f64>, i32) {
     let map_type = match extend {
         GradientExtend::Pad => MapType::Direct,
@@ -936,7 +946,7 @@ fn number(value: f64) -> String {
     if text == "-0" { "0".to_owned() } else { text }
 }
 
-/// 内容摘要 DocID：FNV-1a over 生成工具名与序列化后的页面 XML。
+/// Content-digest DocID: FNV-1a over the generating tool name and the serialized page XML.
 fn content_id(creator: &str, pages: &[BuiltPage]) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in creator
@@ -1054,7 +1064,7 @@ mod tests {
         let second = write_fixed(&document, &options).expect("write again");
         assert_eq!(first, second);
 
-        // entry 布局与页索引保持旧行为：Page_0 起，资源固定文件名。
+        // The entry layout and page indexing preserve the old behavior: starting at Page_0, with fixed resource file names.
         let names = entry_names(&first);
         for name in [
             "OFD.xml",
@@ -1063,14 +1073,14 @@ mod tests {
         ] {
             assert!(
                 names.iter().any(|entry| entry == name),
-                "缺少 {name}: {names:?}"
+                "missing {name}: {names:?}"
             );
         }
 
         let document_xml = read_entry(&first, "Doc_0/Document.xml");
         let document: ofdbox_core::model::document::Document =
             model_xml::from_str(&document_xml).expect("parse document");
-        // 页 ID=1、图层 ID=2、路径 ID=3。
+        // Page ID=1, layer ID=2, path ID=3.
         assert_eq!(document.common_data.max_unit_id, StId::new(3));
         assert_eq!(
             document.common_data.page_area.physical_box,
@@ -1162,7 +1172,8 @@ mod tests {
         let bytes = write_fixed(&document, &OfdWriteOptions::default()).expect("write");
 
         let content = read_entry(&bytes, "Doc_0/Pages/Page_0/Content.xml");
-        // TextObject 的 Fill/Stroke 等于默认值，序列化时省略；读回后语义不变。
+        // TextObject's Fill/Stroke equal the defaults, so they are omitted on serialization; the
+        // semantics are unchanged when read back.
         assert!(!content.contains("Stroke="), "{content}");
         assert!(!content.contains("Fill="), "{content}");
         assert!(content.contains("DeltaX="), "{content}");
@@ -1188,7 +1199,7 @@ mod tests {
         assert_eq!(text.content.size, 3.0);
         assert!(
             text.content.font.0 >= 1,
-            "字体资源 ID 必须非默认: {}",
+            "font resource ID must be non-default: {}",
             text.content.font.0
         );
         assert_eq!(text.content.text_codes[0].text, "A");
@@ -1279,22 +1290,28 @@ mod tests {
         let page: OfdPage = model_xml::from_str(&content).expect("parse page");
         let objects = &page.content.as_ref().expect("content").layers[0].objects;
         let GraphicObject::Path(path) = &objects[0] else {
-            panic!("第一个图元应为路径");
+            panic!("the first graphic unit should be a path");
         };
-        assert!(path.content.graphic.clips.is_some(), "裁剪区域丢失");
+        assert!(
+            path.content.graphic.clips.is_some(),
+            "clipping area was lost"
+        );
         let Some(ColorKind::AxialShd(shd)) =
             path.content.fill_color.as_ref().map(|color| &color.kind)
         else {
-            panic!("轴向渐变丢失: {:?}", path.content.fill_color);
+            panic!("axial gradient was lost: {:?}", path.content.fill_color);
         };
         assert_eq!(shd.segments.len(), 2);
         assert_eq!(shd.map_type, MapType::Direct);
         assert_eq!(shd.extend, 3);
         let GraphicObject::Image(image) = &objects[1] else {
-            panic!("第二个图元应为图片");
+            panic!("the second graphic unit should be an image");
         };
         assert_eq!(image.content.graphic.alpha, 128);
-        assert!(image.content.resource_id.0 >= 1, "图片资源 ID 必须非默认");
+        assert!(
+            image.content.resource_id.0 >= 1,
+            "image resource ID must be non-default"
+        );
 
         let resources = read_entry(&bytes, "Doc_0/DocumentRes.xml");
         assert!(resources.contains("Format=\"PNG\""), "{resources}");
@@ -1312,7 +1329,7 @@ mod tests {
             entry_names(&bytes)
                 .iter()
                 .any(|name| name.starts_with("Doc_0/Res/Image_")),
-            "缺少图片 entry"
+            "missing image entry"
         );
     }
 
@@ -1363,7 +1380,7 @@ mod tests {
                     .and_then(|entry| entry.name().ok().map(|name| name.into_owned()))
                     .is_some_and(|name| name.starts_with("Doc_0/Res/Font_"))
             })
-            .expect("嵌入字体");
+            .expect("embedded font");
         let mut subset = Vec::new();
         archive
             .by_index(index)
@@ -1372,11 +1389,12 @@ mod tests {
             .expect("read");
         assert!(
             subset.len() * 2 < raw.len(),
-            "子集 {} 字节，原字体 {} 字节",
+            "subset is {} bytes, original font is {} bytes",
             subset.len(),
             raw.len()
         );
-        // 字形顺序不变：字形表里仍保留原字形数量，引用原始 GID 的文本才有效。
+        // Glyph order is unchanged: the glyph table still keeps the original glyph count, so text
+        // referencing the original GIDs remains valid.
         let glyphs = u16::from_be_bytes([subset[4], subset[5]]);
         assert!(glyphs > 0);
     }

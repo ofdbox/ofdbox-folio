@@ -1,8 +1,11 @@
-//! Fixed IR 到 PDF 的写出。
+//! Writing Fixed IR out to PDF.
 //!
-//! 输出矢量 PDF：页面坐标、路径、裁剪、图片、渐变、透明组与文字。
-//! 文字优先嵌入 TrueType 字体并做子集化，字体不可用时退化为字形轮廓。
-//! JPEG 原样以 DCTDecode 嵌入，其他图片解码后以 FlateDecode 嵌入。
+//! Emits vector PDF: page coordinates, paths, clipping, images, gradients,
+//! transparency groups and text.
+//! Text prefers embedding a subsetted TrueType font and degrades to glyph
+//! outlines when the font is unavailable.
+//! JPEG is embedded as-is with DCTDecode; other images are decoded and embedded
+//! with FlateDecode.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Write};
@@ -16,12 +19,12 @@ use ofdbox_folio_ir::{
 
 use crate::error::PdfError;
 
-/// PDF 版本。
+/// PDF version.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PdfVersion {
-    /// PDF 1.4，兼容旧阅读器。
+    /// PDF 1.4, compatible with older readers.
     V14,
-    /// PDF 1.7，默认值。
+    /// PDF 1.7, the default.
     #[default]
     V17,
 }
@@ -35,24 +38,24 @@ impl PdfVersion {
     }
 }
 
-/// 文字输出方式。
+/// How text is emitted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TextMode {
-    /// 优先嵌入字体，失败时转成字形轮廓。
+    /// Prefer embedding the font; fall back to glyph outlines on failure.
     #[default]
     EmbedThenOutline,
-    /// 始终输出字形轮廓。
+    /// Always emit glyph outlines.
     Outline,
 }
 
-/// PDF 输出选项。
+/// PDF output options.
 #[derive(Clone, Debug)]
 pub struct PdfOptions {
-    /// PDF 版本。
+    /// PDF version.
     pub version: PdfVersion,
-    /// 文字输出方式。
+    /// How text is emitted.
     pub text_mode: TextMode,
-    /// 单张图片允许的最大像素数。
+    /// Maximum pixels allowed per image.
     pub max_image_pixels: u64,
 }
 
@@ -66,40 +69,40 @@ impl Default for PdfOptions {
     }
 }
 
-/// PDF 文档元数据。
+/// PDF document metadata.
 #[derive(Clone, Debug, Default)]
 pub struct PdfMetadata {
-    /// 标题。
+    /// Title.
     pub title: Option<String>,
-    /// 作者。
+    /// Author.
     pub author: Option<String>,
-    /// 主题。
+    /// Subject.
     pub subject: Option<String>,
-    /// 关键词。
+    /// Keywords.
     pub keywords: Option<String>,
-    /// 创建工具。
+    /// Creating application.
     pub creator: Option<String>,
-    /// 生成工具。
+    /// Producing application.
     pub producer: Option<String>,
 }
 
-/// PDF 书签。
+/// A PDF bookmark.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PdfOutline {
-    /// 标题。
+    /// Title.
     pub title: String,
-    /// 目标页索引，从 0 开始。
+    /// Destination page index, zero-based.
     pub page: usize,
-    /// 目标坐标，单位毫米，原点在页面左上角。
+    /// Destination coordinates in millimeters, origin at the page's top-left corner.
     pub point: Point,
-    /// 子书签。
+    /// Child bookmarks.
     pub children: Vec<PdfOutline>,
 }
 
-/// 把 FixedDocument 写成 PDF。
+/// Writes a FixedDocument out as PDF.
 pub fn write_fixed(document: &FixedDocument, options: &PdfOptions) -> Result<Vec<u8>, PdfError> {
     if document.pages.is_empty() {
-        return Err(PdfError::Unsupported("没有可写出的页面".to_owned()));
+        return Err(PdfError::Unsupported("no pages to write".to_owned()));
     }
     let mut writer = Writer::new(options.clone());
     writer.set_metadata(PdfMetadata {
@@ -118,7 +121,7 @@ pub fn write_fixed(document: &FixedDocument, options: &PdfOptions) -> Result<Vec
     writer.finish()
 }
 
-/// 把 IR 大纲转换成 PDF 书签树。
+/// Converts the IR outline into a PDF bookmark tree.
 fn outline_tree(items: &[OutlineItem]) -> Vec<PdfOutline> {
     items
         .iter()
@@ -138,16 +141,16 @@ struct PdfPage {
     resources: String,
 }
 
-/// 1 毫米等于多少 PDF 点。
+/// How many PDF points one millimeter equals.
 const MM_TO_PT: f64 = 72.0 / 25.4;
 
-/// 大纲节点的对象编号与子节点编号。
+/// Object number of an outline node together with its child node numbers.
 struct OutlineIds {
     id: u32,
     children: Vec<OutlineIds>,
 }
 
-/// 校验大纲页码都在文档范围内。
+/// Validates that every outline page is within the document range.
 fn validate_outline(nodes: &[PdfOutline], page_count: usize) -> Result<(), PdfError> {
     for node in nodes {
         if node.page >= page_count {
@@ -181,7 +184,7 @@ struct FontResource {
     cid: u32,
 }
 
-/// 多页 PDF 写出器。
+/// Multi-page PDF writer.
 pub struct Writer {
     options: PdfOptions,
     writer: PdfWriter,
@@ -195,7 +198,7 @@ pub struct Writer {
 }
 
 impl Writer {
-    /// 创建 PDF 写出器。
+    /// Creates a PDF writer.
     pub fn new(options: PdfOptions) -> Self {
         Self {
             writer: PdfWriter::new(options.version),
@@ -210,12 +213,12 @@ impl Writer {
         }
     }
 
-    /// 设置文档元数据。
+    /// Sets the document metadata.
     pub fn set_metadata(&mut self, metadata: PdfMetadata) {
         self.metadata = metadata;
     }
 
-    /// 添加书签，页索引从 0 开始。
+    /// Adds a bookmark; the page index is zero-based.
     pub fn add_outline(&mut self, title: impl Into<String>, page: usize) {
         self.outlines.push(PdfOutline {
             title: title.into(),
@@ -225,18 +228,18 @@ impl Writer {
         });
     }
 
-    /// 添加一页。
+    /// Adds a page.
     pub fn add_page(&mut self, page: &Page) -> Result<(), PdfError> {
         self.add_scene(&page.content)
     }
 
-    /// 添加一个页面场景。
+    /// Adds a page scene.
     pub fn add_scene(&mut self, scene: &Scene) -> Result<(), PdfError> {
         let scale = 72.0 / 25.4;
         let width = scene.size.width * scale;
         let height = scene.size.height * scale;
         if !(width.is_finite() && width > 0.0 && height.is_finite() && height > 0.0) {
-            return Err(PdfError::Unsupported("页面尺寸非法".to_owned()));
+            return Err(PdfError::Unsupported("invalid page size".to_owned()));
         }
         let mut collected = HashMap::new();
         collect_images(&scene.root, &mut collected);
@@ -339,12 +342,12 @@ impl Writer {
         Ok(())
     }
 
-    /// 当前页数。
+    /// Current page count.
     pub fn page_count(&self) -> usize {
         self.pages.len()
     }
 
-    /// 完成 PDF 并返回字节。
+    /// Finishes the PDF and returns its bytes.
     pub fn finish(mut self) -> Result<Vec<u8>, PdfError> {
         self.subset_fonts()?;
         self.write_to_unicode()?;
@@ -407,7 +410,7 @@ impl Writer {
         Ok(self.writer.finish(catalog_id, info_id))
     }
 
-    /// 预分配大纲树中每个节点的对象编号。
+    /// Pre-allocates an object number for every node in the outline tree.
     fn allocate_outline_ids(&mut self, nodes: &[PdfOutline]) -> Vec<OutlineIds> {
         nodes
             .iter()
@@ -418,7 +421,7 @@ impl Writer {
             .collect()
     }
 
-    /// 递归写出大纲节点，返回（首项、末项、可见子项总数）。
+    /// Recursively writes the outline nodes, returning (first item, last item, total visible children).
     fn write_outline_nodes(
         &mut self,
         nodes: &[PdfOutline],
@@ -455,7 +458,7 @@ impl Writer {
             }
             let page_id = page_ids.get(node.page).copied().unwrap_or(1);
             let height = heights.get(node.page).copied().unwrap_or(0.0);
-            // IR 原点在左上角，PDF 的 Y 轴朝上。
+            // The IR origin is at the top-left, while PDF's Y axis points up.
             let top = (height - node.point.y * MM_TO_PT).clamp(0.0, height.max(0.0));
             body.push_str(&format!(
                 " /Dest [{page_id} 0 R /XYZ {} {} null] >>",
@@ -564,7 +567,7 @@ impl Writer {
             });
         }
         let face = ttf_parser::Face::parse(font.data(), font.face_index())
-            .map_err(|error| PdfError::Font(format!("字体解析失败: {error}")))?;
+            .map_err(|error| PdfError::Font(format!("font parsing failed: {error}")))?;
         let units = face.units_per_em();
         if units == 0 {
             return Ok(FontResource {
@@ -645,11 +648,15 @@ impl Writer {
                 3,
             ),
             _ => {
-                return Err(PdfError::Unsupported("纯色没有 Shading".to_owned()));
+                return Err(PdfError::Unsupported(
+                    "a solid color has no Shading".to_owned(),
+                ));
             }
         };
         if stops.len() < 2 {
-            return Err(PdfError::Unsupported("渐变缺少颜色段".to_owned()));
+            return Err(PdfError::Unsupported(
+                "gradient has no color stops".to_owned(),
+            ));
         }
         let mut functions = Vec::new();
         for pair in stops.windows(2) {
@@ -708,7 +715,7 @@ impl Writer {
         } else {
             image.format
         };
-        // 带蒙版的 JPEG 不能走 DCTDecode 直通，否则蒙版会丢；改为解码后写 SMask。
+        // A JPEG with a mask cannot take the DCTDecode passthrough or the mask would be lost; decode it and write an SMask instead.
         if format == ImageFormat::Jpeg && image.mask.is_none() {
             return self.embed_jpeg(image, name);
         }
@@ -744,7 +751,7 @@ impl Writer {
         })
     }
 
-    /// JPEG 不重新编码，直接以 DCTDecode 嵌入。
+    /// JPEG is embedded directly with DCTDecode, without re-encoding.
     fn embed_jpeg(&mut self, image: &ImageAsset, name: String) -> Result<ImageResource, PdfError> {
         let components = jpeg_components(&image.encoded).unwrap_or(3);
         let colorspace = match components {
@@ -769,24 +776,24 @@ impl Writer {
     }
 }
 
-/// 单页 PDF 便捷后端。
+/// Convenience backend for single-page PDFs.
 #[derive(Debug, Default)]
 pub struct PdfBackend {
     options: PdfOptions,
 }
 
 impl PdfBackend {
-    /// 使用默认选项创建后端。
+    /// Creates a backend with default options.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 使用指定选项创建后端。
+    /// Creates a backend with the given options.
     pub fn with_options(options: PdfOptions) -> Self {
         Self { options }
     }
 
-    /// 把单个场景写成单页 PDF。
+    /// Writes a single scene out as a single-page PDF.
     pub fn render(&mut self, scene: &Scene) -> Result<Vec<u8>, PdfError> {
         let mut writer = Writer::new(self.options.clone());
         writer.add_scene(scene)?;
@@ -813,7 +820,9 @@ fn decode_rgba(image: &ImageAsset, max_pixels: u64) -> Result<DecodedImage, PdfE
         ImageFormat::Jbig2 => decode_jbig2(&image.encoded)?,
         ImageFormat::Bmp => decode_bmp(&image.encoded)?,
         other => {
-            return Err(PdfError::Unsupported(format!("PDF 图片格式: {other:?}")));
+            return Err(PdfError::Unsupported(format!(
+                "PDF image format: {other:?}"
+            )));
         }
     };
     if let Some(mask) = &image.mask {
@@ -826,12 +835,12 @@ fn decode_rgba(image: &ImageAsset, max_pixels: u64) -> Result<DecodedImage, PdfE
             mask.width,
             mask.height,
         )
-        .map_err(|error| PdfError::Image(format!("图像蒙版不可用: {error}")))?;
+        .map_err(|error| PdfError::Image(format!("image mask unavailable: {error}")))?;
     }
     Ok(decoded)
 }
 
-/// 统计 JPEG 采样分量数。
+/// Counts the number of JPEG sampling components.
 fn jpeg_components(data: &[u8]) -> Option<u8> {
     let mut index = 2;
     if data.get(..2)? != [0xFF, 0xD8] {
@@ -870,11 +879,13 @@ fn decode_png(data: &[u8], max_pixels: u64) -> Result<DecodedImage, PdfError> {
     let header = reader.info();
     let pixels = u64::from(header.width) * u64::from(header.height);
     if pixels > max_pixels {
-        return Err(PdfError::Image("图片像素数超出限制".to_owned()));
+        return Err(PdfError::Image(
+            "image pixel count exceeds the limit".to_owned(),
+        ));
     }
     let size = reader
         .output_buffer_size()
-        .ok_or_else(|| PdfError::Image("PNG 输出尺寸未知".to_owned()))?;
+        .ok_or_else(|| PdfError::Image("PNG output size unknown".to_owned()))?;
     let mut buffer = vec![0; size];
     let info = reader
         .next_frame(&mut buffer)
@@ -899,7 +910,7 @@ fn decode_png(data: &[u8], max_pixels: u64) -> Result<DecodedImage, PdfError> {
             .flat_map(|pixel| [pixel[0], pixel[0], pixel[0], pixel[1]])
             .collect(),
         png::ColorType::Indexed => {
-            return Err(PdfError::Image("PNG 调色板未被展开".to_owned()));
+            return Err(PdfError::Image("PNG palette was not expanded".to_owned()));
         }
     };
     Ok(DecodedImage {
@@ -916,17 +927,19 @@ fn decode_jpeg(data: &[u8], max_pixels: u64) -> Result<DecodedImage, PdfError> {
         .map_err(|error| PdfError::Image(error.to_string()))?;
     let header = decoder
         .info()
-        .ok_or_else(|| PdfError::Image("缺少 JPEG 图像信息".to_owned()))?;
+        .ok_or_else(|| PdfError::Image("missing JPEG image info".to_owned()))?;
     let pixel_count = u64::from(header.width) * u64::from(header.height);
     if pixel_count > max_pixels {
-        return Err(PdfError::Image("图片像素数超出限制".to_owned()));
+        return Err(PdfError::Image(
+            "image pixel count exceeds the limit".to_owned(),
+        ));
     }
     let pixels = decoder
         .decode()
         .map_err(|error| PdfError::Image(error.to_string()))?;
     let info = decoder
         .info()
-        .ok_or_else(|| PdfError::Image("缺少 JPEG 图像信息".to_owned()))?;
+        .ok_or_else(|| PdfError::Image("missing JPEG image info".to_owned()))?;
     let rgba = match info.pixel_format {
         jpeg_decoder::PixelFormat::L8 => pixels
             .iter()
@@ -956,7 +969,9 @@ fn decode_jpeg(data: &[u8], max_pixels: u64) -> Result<DecodedImage, PdfError> {
             })
             .collect(),
         jpeg_decoder::PixelFormat::L16 => {
-            return Err(PdfError::Image("不支持 16 位灰度 JPEG".to_owned()));
+            return Err(PdfError::Image(
+                "16-bit grayscale JPEG is not supported".to_owned(),
+            ));
         }
     };
     Ok(DecodedImage {
@@ -973,9 +988,9 @@ fn decode_jbig2(data: &[u8]) -> Result<DecodedImage, PdfError> {
     let page = pages
         .into_iter()
         .next()
-        .ok_or_else(|| PdfError::Image("JBIG2 没有页面".to_owned()))?;
+        .ok_or_else(|| PdfError::Image("JBIG2 has no page".to_owned()))?;
     if page.width == 0 || page.height == 0 {
-        return Err(PdfError::Image("JBIG2 页面尺寸无效".to_owned()));
+        return Err(PdfError::Image("invalid JBIG2 page size".to_owned()));
     }
     let mut rgba = Vec::with_capacity(page.width as usize * page.height as usize * 4);
     for y in 0..page.height {

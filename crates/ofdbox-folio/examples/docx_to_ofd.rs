@@ -1,4 +1,4 @@
-//! DOCX → Flow IR → Fixed IR → OFD 的最小链路示例。
+//! Minimal pipeline example: DOCX → Flow IR → Fixed IR → OFD.
 //!
 //! ```text
 //! cargo run -p ofdbox-folio --example docx_to_ofd -- in.docx out.ofd [page.png]
@@ -21,8 +21,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
     let input = args
         .next()
-        .ok_or("用法: docx_to_ofd <in.docx> <out.ofd> [page.png]")?;
-    let output = args.next().ok_or("缺少输出路径")?;
+        .ok_or("usage: docx_to_ofd <in.docx> <out.ofd> [page.png]")?;
+    let output = args.next().ok_or("missing output path")?;
     let png = args.next();
 
     let flow = read_flow_path(&input, &DocxReadOptions::default())?;
@@ -32,7 +32,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|section| section.blocks.len())
         .sum();
     println!(
-        "读入: {} 节 {} 块 图片 {} 张",
+        "read: {} sections, {} blocks, {} images",
         flow.sections.len(),
         block_count,
         flow.resources.image_count()
@@ -41,21 +41,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut fonts = SystemFonts::new();
     let fixed = layout_with(&flow, &mut fonts, LayoutOptions::default())?;
     println!(
-        "排版: {} 页 大纲 {} 项 诊断 {} 条",
+        "layout: {} pages, {} outline entries, {} diagnostics",
         fixed.pages.len(),
         fixed.outline.len(),
         fixed.report.diagnostics.len()
     );
     for diagnostic in &fixed.report.diagnostics {
-        println!("  [排版诊断] {}", diagnostic.message);
+        println!("  [layout diagnostic] {}", diagnostic.message);
     }
     for diagnostic in &flow.report.diagnostics {
-        println!("  [读入诊断] {}", diagnostic.message);
+        println!("  [read diagnostic] {}", diagnostic.message);
     }
 
     let bytes = write_fixed(&fixed, &OfdWriteOptions::default())?;
     fs::write(&output, &bytes)?;
-    println!("写出: {output} ({} 字节)", bytes.len());
+    println!("wrote: {output} ({} bytes)", bytes.len());
 
     if let Some(png) = png {
         let mut document = Document::open_path(&output, OpenOptions::default())?;
@@ -76,7 +76,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let mut writer = encoder.write_header()?;
             writer.write_image_data(target.data())?;
         }
-        println!("渲染: {png}");
+        println!("rendered: {png}");
     }
     Ok(())
 }

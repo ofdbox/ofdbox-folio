@@ -1,66 +1,66 @@
-//! `numbering.xml`：列表编号与项目符号。
+//! `numbering.xml`: list numbering and bullets.
 
 use std::collections::HashMap;
 
 use crate::xml::{XmlReader, attr, attr_i32, attr_u32, is_element, local_name, skip_element};
 
-/// 编号格式。
+/// Numbering format.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum MarkerFormat {
-    /// 项目符号。
+    /// Bullet symbol.
     #[default]
     Bullet,
-    /// 阿拉伯数字。
+    /// Arabic numerals.
     Decimal,
-    /// 小写字母。
+    /// Lowercase letters.
     LowerLetter,
-    /// 大写字母。
+    /// Uppercase letters.
     UpperLetter,
-    /// 小写罗马数字。
+    /// Lowercase Roman numerals.
     LowerRoman,
-    /// 大写罗马数字。
+    /// Uppercase Roman numerals.
     UpperRoman,
-    /// 不显示编号。
+    /// No numbering displayed.
     None,
 }
 
-/// 一级编号定义。
+/// Definition of one numbering level.
 #[derive(Clone, Debug)]
 pub(crate) struct Level {
-    /// 格式。
+    /// Format.
     pub format: MarkerFormat,
-    /// 编号模板，例如 `%1.`。
+    /// Numbering template, for example `%1.`.
     pub text: String,
-    /// 起始值。
+    /// Start value.
     pub start: u32,
-    /// 左缩进（twip）。
+    /// Left indent (twip).
     pub left: Option<i64>,
-    /// 悬挂缩进（twip）。
+    /// Hanging indent (twip).
     pub hanging: Option<i64>,
 }
 
-/// 一级的编号定义。
+/// Per-level numbering definitions.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Numbering {
-    /// `(numId, ilvl)` → 定义。
+    /// `(numId, ilvl)` → definition.
     levels: HashMap<(u32, u8), Level>,
 }
 
-/// 编号计数器：每个 `(numId, ilvl)` 当前的值。
+/// Numbering counters: the current value of each `(numId, ilvl)`.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Counters {
-    /// 当前值。
+    /// Current value.
     values: HashMap<(u32, u8), u32>,
 }
 
 impl Counters {
-    /// 进入一个编号段落，返回该段的标记文本。
+    /// Enter a numbered paragraph and return that paragraph's marker text.
     pub fn next(&mut self, numbering: &Numbering, num_id: u32, level: u8) -> Option<String> {
         let definition = numbering.levels.get(&(num_id, level))?;
         if definition.format == MarkerFormat::None {
             return None;
         }
-        // 回到某级时，更深层重新计数。
+        // When returning to a level, deeper levels restart their count.
         self.values
             .retain(|(id, ilvl), _| !(*id == num_id && *ilvl > level));
         let entry = self
@@ -110,12 +110,12 @@ impl Counters {
 }
 
 impl Numbering {
-    /// 解析 `numbering.xml`。
+    /// Parse `numbering.xml`.
     pub fn parse(text: &str) -> Self {
         let mut numbering = Self::default();
-        // abstractNumId → 各级定义。
+        // abstractNumId → per-level definitions.
         let mut abstracts: HashMap<u32, HashMap<u8, Level>> = HashMap::new();
-        // numId → abstractNumId。
+        // numId → abstractNumId.
         let mut nums: HashMap<u32, u32> = HashMap::new();
         let mut reader = XmlReader::from_str(text);
         loop {
@@ -138,8 +138,9 @@ impl Numbering {
                             }
                         }
                         _ => {
-                            // 顶层容器（如 `w:numbering`）本身不携带信息，直接忽略；
-                            // 只关心 `abstractNum` 与 `num`。
+                            // Top-level containers (such as `w:numbering`) carry no
+                            // information themselves, so ignore them; only `abstractNum`
+                            // and `num` matter.
                         }
                     }
                 }
@@ -159,16 +160,17 @@ impl Numbering {
         numbering
     }
 
-    /// 取该 `(numId, ilvl)` 的定义。
+    /// Get the definition of this `(numId, ilvl)`.
     pub fn level(&self, num_id: u32, level: u8) -> Option<&Level> {
         self.levels.get(&(num_id, level))
     }
 }
 
-/// 把 Symbol/Wingdings 的私用区码位换成普通字符。
+/// Map Symbol/Wingdings private-use code points to ordinary characters.
 ///
-/// Word 的项目符号常写成 `<w:lvlText w:val="\u{F0B7}">` 并配 Symbol 字体，
-/// 直接输出会变成缺字形；这里映射成常用符号。
+/// Word often writes bullets as `<w:lvlText w:val="\u{F0B7}">` with a Symbol font,
+/// which would come out as a missing glyph if emitted directly; map them to common
+/// symbols here.
 fn normalise_bullet(text: &str) -> String {
     let mut result = String::new();
     for ch in text.chars() {
@@ -252,7 +254,7 @@ fn parse_level(reader: &mut XmlReader<'_>) -> Option<Level> {
     Some(definition)
 }
 
-/// 读取编号级别里的缩进（`w:lvl/w:pPr/w:ind`）。
+/// Read the indent inside a numbering level (`w:lvl/w:pPr/w:ind`).
 fn parse_level_para(reader: &mut XmlReader<'_>, definition: &mut Level) {
     loop {
         match reader.read_event() {
@@ -295,7 +297,7 @@ fn parse_num(reader: &mut XmlReader<'_>) -> Option<u32> {
     abstract_id
 }
 
-/// 把计数器值格式化成该编号格式的文本。
+/// Format a counter value as text in that numbering format.
 fn format_number(format: MarkerFormat, value: u32) -> String {
     match format {
         MarkerFormat::Decimal => value.to_string(),
@@ -374,7 +376,7 @@ mod tests {
         assert_eq!(counters.next(&numbering, 5, 0).as_deref(), Some("1."));
         assert_eq!(counters.next(&numbering, 5, 1).as_deref(), Some("a)"));
         assert_eq!(counters.next(&numbering, 5, 1).as_deref(), Some("b)"));
-        // 回到 0 级后，1 级重新从 a 开始。
+        // After returning to level 0, level 1 starts again from a.
         assert_eq!(counters.next(&numbering, 5, 0).as_deref(), Some("2."));
         assert_eq!(counters.next(&numbering, 5, 1).as_deref(), Some("a)"));
     }
