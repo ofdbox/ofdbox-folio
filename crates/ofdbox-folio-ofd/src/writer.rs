@@ -135,9 +135,9 @@ pub fn write_fixed(
         page_area: Some(page_area.clone()),
     })?;
 
-    // OFD.xml：覆盖 core 默认的 1.0 版本和元数据。
+    // OFD.xml：版本固定 1.0（GB/T 33190-2016 / OFD.xsd），并写入元数据。
     let mut ofd = file.ofd()?;
-    ofd.data.version = "1.1".to_owned();
+    ofd.data.version = "1.0".to_owned();
     if let Some(body) = ofd.data.doc_bodies.first_mut() {
         body.doc_info.doc_id = doc_id;
         body.doc_info.creator = Some(options.creator.clone());

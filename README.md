@@ -196,7 +196,7 @@ use ofdbox_folio::ofd::{OfdWriteOptions, write_fixed};
 let bytes = write_fixed(&document, &OfdWriteOptions::default())?;
 ```
 
-写出器消费 Fixed IR，输出 OFD 1.1 包：路径、文本（含 `CGTransform` 与 `DeltaX/DeltaY`）、图片、组裁剪、透明度、轴向/径向渐变、字体名称与内嵌字体字节。对象 `Boundary` 取整页，实际位置由 `CTM` 承载；行的位置差直接来自字形局部坐标，避免字体度量引入偏差。内嵌字体按文档实际用字做 TrueType 子集化（保留字形 ID，只清空未用轮廓，复合字形依赖一并保留），字体不可裁剪时整份嵌入；默认使用固定 ZIP 时间戳和内容摘要 `DocID`，相同输入产生相同字节。
+写出器消费 Fixed IR，输出 OFD 1.0 包（`Version="1.0"`）：路径、文本（含 `CGTransform` 与 `DeltaX/DeltaY`）、图片、组裁剪、透明度、轴向/径向渐变、字体名称与内嵌字体字节。对象 `Boundary` 取整页，实际位置由 `CTM` 承载；行的位置差直接来自字形局部坐标，避免字体度量引入偏差。内嵌字体按文档实际用字做 TrueType 子集化（保留字形 ID，只清空未用轮廓，复合字形依赖一并保留），字体不可裁剪时整份嵌入；默认使用固定 ZIP 时间戳和内容摘要 `DocID`，相同输入产生相同字节。
 
 已知限制：图案与网格填充尚未写出（回退为首个色标），组透明度分配到子元素颜色 alpha，不保留独立图层语义。
 
