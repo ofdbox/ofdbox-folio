@@ -1,3 +1,5 @@
+English | [简体中文](layout-contract.zh-CN.md)
+
 # Flow → Fixed Layout Contract (A0)
 
 Updated: 2026-10-24
