@@ -120,31 +120,31 @@ impl PackageReader {
     }
 
     pub(crate) fn parse_ofd(&self, entry: &str) -> Result<Ofd, OfdError> {
-        self.parse_with(entry, |bytes| model_xml::from_bytes::<Ofd>(bytes))
+        self.parse_with(entry, model_xml::from_bytes::<Ofd>)
     }
 
     pub(crate) fn parse_document(&self, entry: &str) -> Result<Document, OfdError> {
-        self.parse_with(entry, |bytes| model_xml::from_bytes::<Document>(bytes))
+        self.parse_with(entry, model_xml::from_bytes::<Document>)
     }
 
     pub(crate) fn parse_page(&self, entry: &str) -> Result<Page, OfdError> {
-        self.parse_with(entry, |bytes| model_xml::from_bytes::<Page>(bytes))
+        self.parse_with(entry, model_xml::from_bytes::<Page>)
     }
 
     pub(crate) fn parse_res(&self, entry: &str) -> Result<Res, OfdError> {
-        self.parse_with(entry, |bytes| model_xml::from_bytes::<Res>(bytes))
+        self.parse_with(entry, model_xml::from_bytes::<Res>)
     }
 
     pub(crate) fn parse_annotations(&self, entry: &str) -> Result<Annotations, OfdError> {
-        self.parse_with(entry, |bytes| model_xml::from_bytes::<Annotations>(bytes))
+        self.parse_with(entry, model_xml::from_bytes::<Annotations>)
     }
 
     pub(crate) fn parse_attachments(&self, entry: &str) -> Result<Attachments, OfdError> {
-        self.parse_with(entry, |bytes| model_xml::from_bytes::<Attachments>(bytes))
+        self.parse_with(entry, model_xml::from_bytes::<Attachments>)
     }
 
     pub(crate) fn parse_page_annot(&self, entry: &str) -> Result<PageAnnot, OfdError> {
-        self.parse_with(entry, |bytes| model_xml::from_bytes::<PageAnnot>(bytes))
+        self.parse_with(entry, model_xml::from_bytes::<PageAnnot>)
     }
 }
 

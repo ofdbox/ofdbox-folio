@@ -59,13 +59,13 @@ fn parse(text: &str) -> Result<Node, OfdError> {
                 stack.push(node_from(&element)?);
             }
             Event::Empty(element) => {
-                push_node(&mut stack, &mut root, node_from(&element)?);
+                attach_node(&mut stack, &mut root, node_from(&element)?);
             }
             Event::End(_) => {
                 let node = stack.pop().ok_or_else(|| {
                     OfdError::InvalidStructure("XML has more end tags than start tags".to_owned())
                 })?;
-                push_node(&mut stack, &mut root, node);
+                attach_node(&mut stack, &mut root, node);
             }
             Event::Text(value) => {
                 if let Some(node) = stack.last_mut() {
@@ -116,7 +116,7 @@ fn node_from(element: &quick_xml::events::BytesStart<'_>) -> Result<Node, OfdErr
     })
 }
 
-fn push_node(stack: &mut Vec<Node>, root: &mut Option<Node>, node: Node) {
+fn attach_node(stack: &mut [Node], root: &mut Option<Node>, node: Node) {
     if let Some(parent) = stack.last_mut() {
         parent.children.push(node);
     } else if root.is_none() {

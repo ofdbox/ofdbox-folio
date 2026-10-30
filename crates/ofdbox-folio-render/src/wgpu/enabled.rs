@@ -498,41 +498,58 @@ fn collect_paths(scene: &Scene, dpi: f64, origin_px: (f64, f64)) -> (Vec<[f32; 4
     let mut paths = Vec::new();
     collect_group(
         &scene.root,
-        Matrix::IDENTITY,
+        GroupState {
+            parent: Matrix::IDENTITY,
+            clip: None,
+            opacity: 1.0,
+        },
         scale,
         origin_px,
-        None,
-        1.0,
         &mut edges,
         &mut paths,
     );
     (edges, paths)
 }
 
+/// Shared transform/clip state while flattening a group tree.
+#[derive(Clone, Copy)]
+struct GroupState {
+    parent: Matrix,
+    clip: Option<(u32, u32, u32)>,
+    opacity: f32,
+}
+
 fn collect_group(
     group: &Group,
-    parent: Matrix,
+    state: GroupState,
     scale: f64,
     origin_px: (f64, f64),
-    inherited_clip: Option<(u32, u32, u32)>,
-    inherited_opacity: f32,
     edges: &mut Vec<[f32; 4]>,
     paths: &mut Vec<DrawPath>,
 ) {
-    let transform = group.transform.then(parent);
-    let opacity = inherited_opacity * group.opacity.clamp(0.0, 1.0);
+    let transform = group.transform.then(state.parent);
+    let opacity = state.opacity * group.opacity.clamp(0.0, 1.0);
     let clip = if let Some(clip) = &group.clip {
         let start = u32::try_from(edges.len()).unwrap_or(u32::MAX);
         flatten_path(&clip.path, transform, scale, origin_px, edges);
         let count = u32::try_from(edges.len()).unwrap_or(u32::MAX) - start;
         Some((start, count, u32::from(clip.rule == FillRule::EvenOdd)))
     } else {
-        inherited_clip
+        state.clip
     };
     for element in &group.children {
         match element {
             Element::Group(child) => collect_group(
-                child, transform, scale, origin_px, clip, opacity, edges, paths,
+                child,
+                GroupState {
+                    parent: transform,
+                    clip,
+                    opacity,
+                },
+                scale,
+                origin_px,
+                edges,
+                paths,
             ),
             Element::Path(path) => {
                 let start = u32::try_from(edges.len()).unwrap_or(u32::MAX);
