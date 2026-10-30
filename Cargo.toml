@@ -13,7 +13,7 @@ members = [
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 authors = ["OFDBox contributors"]
 repository = "https://github.com/ofdbox/ofdbox-folio"
 homepage = "https://github.com/ofdbox/ofdbox-folio"
