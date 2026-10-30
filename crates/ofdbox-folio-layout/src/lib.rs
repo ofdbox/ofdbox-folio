@@ -111,16 +111,19 @@ pub enum LayoutError {
 }
 
 /// Layout options.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LayoutOptions {
     /// Resolution used when an image declares no DPI.
     pub default_image_dpi: f64,
+    /// Heading text of the endnotes page.
+    pub endnote_title: String,
 }
 
 impl Default for LayoutOptions {
     fn default() -> Self {
         Self {
             default_image_dpi: 96.0,
+            endnote_title: "Endnotes".to_owned(),
         }
     }
 }
@@ -161,7 +164,7 @@ pub fn layout_with(
     let mut last = None;
     for _ in 0..4 {
         let (fixed, headings) =
-            Engine::new(document, options).run(fonts, total_pages, toc_entries.clone());
+            Engine::new(document, options.clone()).run(fonts, total_pages, toc_entries.clone());
         let next_entries: Option<Vec<TocEntry>> = needs_toc.then(|| {
             headings
                 .iter()
@@ -1331,8 +1334,9 @@ impl<'a> Engine<'a> {
         }
         self.new_page();
         self.start_page_body();
+        let title = self.options.endnote_title.clone();
         let mut heading = Paragraph::plain(
-            "尾注",
+            title,
             TextStyle {
                 size: Twips::from_pt(14.0),
                 ..TextStyle::default()

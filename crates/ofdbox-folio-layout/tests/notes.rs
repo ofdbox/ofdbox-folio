@@ -6,7 +6,7 @@ use ofdbox_folio_ir::{
     Block, FlowDocument, FontError, FontProvider, FontRequest, Inline, Metadata, Note, NoteKind,
     NoteRef, Paragraph, TextStyle, Twips,
 };
-use ofdbox_folio_layout::layout;
+use ofdbox_folio_layout::{LayoutOptions, layout, layout_with};
 
 /// Provider that always returns the same font bytes.
 struct SystemFonts {
@@ -203,12 +203,45 @@ fn endnote_goes_to_the_end_of_the_document() {
     );
     let last = fixed.pages.last().expect("last page");
     let text = page_text(last);
-    assert!(text.contains("尾注"), "endnote page: {text}");
+    assert!(text.contains("Endnotes"), "endnote page: {text}");
     assert!(text.contains("这是尾注正文"), "endnote page: {text}");
     assert!(
         !text.contains("普通正文"),
         "regular body text should not be on the endnote page: {text}"
     );
+}
+
+#[test]
+fn endnote_title_is_configurable() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    flow.notes.push(Note::new(
+        NoteKind::Endnote,
+        7,
+        vec![Block::Paragraph(Paragraph::plain(
+            "这是尾注正文",
+            note_style(),
+        ))],
+    ));
+    flow.push(Block::Paragraph(paragraph_with_note(
+        "带尾注的段落",
+        NoteRef::new(NoteKind::Endnote, 7),
+    )));
+
+    let fixed = layout_with(
+        &flow,
+        &mut fonts,
+        LayoutOptions {
+            endnote_title: "尾注".to_owned(),
+            ..LayoutOptions::default()
+        },
+    )
+    .expect("layout");
+    let last = fixed.pages.last().expect("last page");
+    let text = page_text(last);
+    assert!(text.contains("尾注"), "configured title missing: {text}");
 }
 
 #[test]

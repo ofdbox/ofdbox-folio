@@ -137,7 +137,7 @@ page ─ margins ─► content area (width W)
 - When a note pushes body content past the bottom of the page, the line already placed does not roll back, and subsequent lines
   automatically move to the next column/page.
 - Endnotes: they do not occupy the page bottom; they are collected at the end of the document and laid out starting on a separate page, first with
-  an "Endnotes" heading line and then in order.
+  a configurable heading line (`LayoutOptions::endnote_title`, default `"Endnotes"`) and then in order.
 - When the note body cannot be found, a `DiagnosticCode::Unsupported` diagnostic is recorded and the note is skipped.
 
 ### 5.5 Floating objects
