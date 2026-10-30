@@ -20,13 +20,13 @@ ofdbox-folio                门面：格式探测、Reader、创建 API、便捷
 
 | crate | 公开职责 | 关键约束 |
 |---|---|---|
-| `ofdbox-folio-ir` | Flow IR、Fixed IR、几何/路径/画笔、资源、`TextLayer`、`DocumentSource`、诊断 | 无格式依赖，无 I/O |
+| `ofdbox-folio-ir` | Flow IR、Fixed IR、几何/路径/画笔、资源、`TextLayer`、`DocumentSource`、`FixedDocumentSource`、诊断 | 无格式依赖，无 I/O |
 | `ofdbox-folio-layout` | `layout()`、`LayoutSession`、`FontProvider`、布局选项与错误 | 只做 Flow → Fixed，不读时钟/随机数/系统字体 |
 | `ofdbox-folio-render` | `CpuRenderer`、渲染目标、瓦片、字形与图片缓存 | 只消费 Fixed IR，不感知源格式 |
 | `ofdbox-folio-ofd` | `OfdDocument`（`DocumentSource`）、`write_fixed()` | 对外不暴露 `ofdbox_core` 类型 |
 | `ofdbox-folio-pdf` | `PdfDocument`（`DocumentSource`）、`write_fixed()` | 对外不暴露 `lopdf` 类型 |
 | `ofdbox-folio-docx` | `read_flow()`/`read_flow_path()` → Flow、`write_flow()` → DOCX、`probe()` | 不接触 Fixed IR |
-| `ofdbox-folio` | `open_bytes()`/`open_path()`、`Document`、创建 API、便捷转换 | 统一错误、缓存与格式分发 |
+| `ofdbox-folio` | `Document::open_bytes()`/`open_path()`、`from_fixed()`/`from_flow()`、创建 API、便捷转换 | 统一错误、缓存与格式分发（DOCX → Flow → 排版） |
 
 ## 工作原理
 
@@ -50,6 +50,7 @@ OFD / PDF 读取 ──────┘
 - OFD/PDF 读取直接产出 Fixed IR，不经过 Flow IR 和布局。
 - Fixed IR 是位图渲染、OFD 写出与 PDF 写出的共同入口。
 - 打开文档时只解析元数据、页面表、大纲和资源索引；`DocumentSource::load_page()` 按需解析单页，Reader 使用带字节预算的 LRU 缓存。单页损坏只影响该页：阅读器显示占位内容并保留诊断。页面缓存、选择与搜索的实现见 [reader.zh-CN.md](reader.zh-CN.md)。
+- 同一个 Reader 也会分发 DOCX：把包读成 Flow IR，用调用方提供的 `FontProvider` 立即排版，再把 `FixedDocument` 包成 `FixedDocumentSource`，因此 DOCX 页面复用同一套缓存、选择与搜索 API。`Document::from_fixed`/`from_flow` 也以同样方式包装排版结果。
 
 ### 两种 IR
 
@@ -107,6 +108,7 @@ cargo run -p ofdbox-folio --example create_document -- out.docx  # 同时产出 
 - **页眉页脚**：`headerReference`/`footerReference` 读成 `HeaderFooterSet`，`fldSimple` 与复杂域中的 `PAGE`/`NUMPAGES` 转成 `Field`。
 - **元数据**：`docProps/core.xml` 与 `app.xml`。
 - **降级**：浮动图片按行内处理，合并单元格按普通单元格处理，VML、脚注、符号字体等记入 `FlowDocument.report` 诊断。
+- **Reader 集成**：`Document::open_bytes` 识别 DOCX 后调用 `read_flow()`，排版并包成 `FixedDocumentSource`；DOCX 页面因此与原生格式共用缓存、选择、搜索与命中测试 API。
 
 ### 文本与字体
 

@@ -1196,6 +1196,8 @@ dependencies = [
 [[package]]
 name = "ofdbox-algo"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed18f5cfef9b6a0844b1e6896e5cc4456471cf8f98133e021a5dcf8e408a0c99"
 dependencies = [
  "cbc",
  "der",
@@ -1209,6 +1211,8 @@ dependencies = [
 [[package]]
 name = "ofdbox-core"
 version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89d6c234217509395b5521fa5bb63a80b99d0bc2cf32f031d9dedf08952e2714"
 dependencies = [
  "base64",
  "ofdbox-algo",
@@ -1222,6 +1226,8 @@ dependencies = [
 [[package]]
 name = "ofdbox-crypto"
 version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5894a16d41e80dd16817886ea98bb848bc3a298d401943359b42f5476c95bc6"
 dependencies = [
  "base64",
  "cbc",

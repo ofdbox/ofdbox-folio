@@ -46,7 +46,10 @@ pub use paint::{
     RadialGradient, Rgba, StrokePaint, StrokeStyle,
 };
 pub use path::{Path, PathBuilder, PathSegment};
-pub use source::{DocumentError, DocumentInfo, DocumentSource, Limits, PageError, SourceFormat};
+pub use source::{
+    DocumentError, DocumentInfo, DocumentSource, FixedDocumentSource, Limits, PageError,
+    SourceFormat,
+};
 pub use text::{
     Cluster, Glyph, GlyphRun, SearchHit, SearchQuery, Selection, TextItem, TextLayer, TextLine,
     TextPosition, TextRange, hit_test, search, selection_rects, selection_text,

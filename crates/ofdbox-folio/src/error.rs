@@ -20,6 +20,14 @@ pub enum Error {
     #[cfg(feature = "pdf")]
     #[error(transparent)]
     Pdf(#[from] ofdbox_folio_pdf::PdfError),
+    /// DOCX adapter error.
+    #[cfg(feature = "docx")]
+    #[error(transparent)]
+    Docx(#[from] ofdbox_folio_docx::DocxError),
+    /// Flow → Fixed layout error.
+    #[cfg(feature = "layout")]
+    #[error(transparent)]
+    Layout(#[from] ofdbox_folio_layout::LayoutError),
     /// Render error.
     #[cfg(any(feature = "cpu", feature = "gpu"))]
     #[error(transparent)]

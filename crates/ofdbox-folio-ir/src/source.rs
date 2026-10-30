@@ -4,8 +4,10 @@
 //! demand; the facade layers page caching, search, and selection on top of it.
 //! Nothing here contains any format parsing or I/O implementation.
 
+use std::sync::Arc;
+
 use crate::asset::AttachmentId;
-use crate::fixed::{OutlineItem, Page, PageInfo};
+use crate::fixed::{FixedDocument, OutlineItem, Page, PageInfo};
 use crate::meta::{AttachmentInfo, Metadata};
 
 /// Source document format.
@@ -130,6 +132,91 @@ pub trait DocumentSource {
 
     /// Clear the source's internal caches; called by the reader after fonts or policies change.
     fn clear_caches(&mut self) {}
+}
+
+/// A [`DocumentSource`] backed by an already laid-out [`FixedDocument`].
+///
+/// This bridges the layout output back into the reader stack, so a document
+/// produced from DOCX (or any other Flow IR input) can use the same page cache,
+/// selection, search and hit-testing APIs as native OFD/PDF readers.
+pub struct FixedDocumentSource {
+    document: FixedDocument,
+    info: DocumentInfo,
+}
+
+impl FixedDocumentSource {
+    /// Wrap a laid-out document and record its source format.
+    pub fn new(document: FixedDocument, format: SourceFormat) -> Self {
+        let info = DocumentInfo {
+            format,
+            metadata: document.metadata.clone(),
+            page_count: document.pages.len(),
+            outline: document.outline.clone(),
+            attachments: document
+                .attachments
+                .iter()
+                .map(|attachment| attachment.info.clone())
+                .collect(),
+        };
+        Self { document, info }
+    }
+
+    /// Borrow the underlying fixed document.
+    pub fn document(&self) -> &FixedDocument {
+        &self.document
+    }
+
+    /// Consume the source and return the fixed document.
+    pub fn into_inner(self) -> FixedDocument {
+        self.document
+    }
+}
+
+impl DocumentSource for FixedDocumentSource {
+    fn info(&self) -> &DocumentInfo {
+        &self.info
+    }
+
+    fn page_info(&self, index: usize) -> Result<PageInfo, PageError> {
+        self.document
+            .pages
+            .get(index)
+            .map(|page| page.info.clone())
+            .ok_or(PageError::NotFound(index))
+    }
+
+    fn load_page(&mut self, index: usize) -> Result<Page, PageError> {
+        self.document
+            .pages
+            .get(index)
+            .cloned()
+            .ok_or(PageError::NotFound(index))
+    }
+
+    fn load_attachment(&mut self, id: AttachmentId) -> Result<Arc<[u8]>, PageError> {
+        self.document
+            .attachments
+            .iter()
+            .find(|attachment| attachment.info.id == id)
+            .map(|attachment| Arc::clone(&attachment.bytes))
+            .ok_or_else(|| PageError::Decode(format!("attachment {} not found", id.get())))
+    }
+
+    fn font_names(&mut self) -> Result<Vec<String>, PageError> {
+        let mut names: Vec<String> = Vec::new();
+        for font in self.document.resources.fonts() {
+            for name in [font.font_name.as_deref(), font.family.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                let name = name.trim();
+                if !name.is_empty() && !names.iter().any(|known| known == name) {
+                    names.push(name.to_owned());
+                }
+            }
+        }
+        Ok(names)
+    }
 }
 
 #[cfg(test)]

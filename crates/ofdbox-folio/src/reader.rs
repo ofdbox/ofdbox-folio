@@ -7,9 +7,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
-    AttachmentId, AttachmentInfo, DocumentError, DocumentInfo, DocumentSource, FontProvider,
-    Metadata, OutlineItem, Page, PageInfo, Point, SearchHit, SearchQuery, Selection, SourceFormat,
-    TextPosition, TextRange,
+    AttachmentId, AttachmentInfo, DocumentError, DocumentInfo, DocumentSource, FixedDocument,
+    FixedDocumentSource, FlowDocument, FontError, FontProvider, FontRequest, Metadata, OutlineItem,
+    Page, PageInfo, Point, SearchHit, SearchQuery, Selection, SourceFormat, TextPosition,
+    TextRange,
 };
 
 use crate::error::Error;
@@ -182,6 +183,38 @@ impl Document {
         }
     }
 
+    /// Creates a reader over an already laid-out fixed document.
+    ///
+    /// This lets output produced by the layout engine (for example from DOCX) use
+    /// the same page cache, selection, search and hit-testing APIs as native
+    /// OFD/PDF readers.
+    pub fn from_fixed(
+        document: FixedDocument,
+        format: SourceFormat,
+        options: ReaderOptions,
+    ) -> Self {
+        Self::from_source(
+            Box::new(FixedDocumentSource::new(document, format)),
+            options,
+        )
+    }
+
+    /// Lays out Flow IR and wraps the result in a reader.
+    #[cfg(feature = "layout")]
+    pub fn from_flow(
+        flow: &FlowDocument,
+        fonts: &mut dyn FontProvider,
+        format: SourceFormat,
+        options: ReaderOptions,
+    ) -> Result<Self, Error> {
+        let fixed = ofdbox_folio_layout::layout_with(
+            flow,
+            fonts,
+            ofdbox_folio_layout::LayoutOptions::default(),
+        )?;
+        Ok(Self::from_fixed(fixed, format, options))
+    }
+
     /// Opens a document from in-memory bytes.
     pub fn open_bytes(bytes: Vec<u8>, options: OpenOptions) -> Result<Self, Error> {
         let OpenOptions {
@@ -218,9 +251,24 @@ impl Document {
                     "PDF support is not enabled".to_owned(),
                 ));
             }
+            #[cfg(all(feature = "docx", feature = "layout"))]
+            SourceFormat::Docx => {
+                let flow = ofdbox_folio_docx::read_flow(
+                    &bytes,
+                    &ofdbox_folio_docx::DocxReadOptions::default(),
+                )?;
+                let mut fonts = font_provider.unwrap_or_else(|| Box::new(NoFonts));
+                let fixed = ofdbox_folio_layout::layout_with(
+                    &flow,
+                    fonts.as_mut(),
+                    ofdbox_folio_layout::LayoutOptions::default(),
+                )?;
+                Box::new(FixedDocumentSource::new(fixed, SourceFormat::Docx))
+            }
+            #[cfg(not(all(feature = "docx", feature = "layout")))]
             SourceFormat::Docx => {
                 return Err(Error::UnsupportedFormat(
-                    "DOCX support is not implemented yet".to_owned(),
+                    "DOCX support is not enabled".to_owned(),
                 ));
             }
             _ => {
@@ -483,13 +531,23 @@ fn detect_format(bytes: &[u8]) -> Result<SourceFormat, Error> {
     Err(DocumentError::UnsupportedFormat.into())
 }
 
+/// Font provider used when the caller does not supply one.
+struct NoFonts;
+
+impl FontProvider for NoFonts {
+    fn load(&mut self, _request: &FontRequest<'_>) -> Result<Option<Arc<[u8]>>, FontError> {
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CacheOptions, Document, OpenOptions, ReaderOptions};
     use ofdbox_folio_ir::{
-        AttachmentId, Cluster, DocumentInfo, DocumentSource, FontAsset, Glyph, GlyphRun, Matrix,
-        Page, PageError, PageInfo, Rect, Rotation, Scene, SearchQuery, Selection, Size,
-        SourceFormat, TextItem, TextLayer, TextLine, TextPosition,
+        AttachmentId, Block, Cluster, DocumentInfo, DocumentSource, FixedDocument,
+        FixedDocumentSource, FontAsset, Glyph, GlyphRun, Inline, Matrix, Metadata, Page, PageError,
+        PageInfo, ParaStyle, Paragraph, Rect, Rotation, Scene, SearchQuery, Selection, Size,
+        SourceFormat, TextItem, TextLayer, TextLine, TextPosition, TextRun, TextStyle,
     };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -749,5 +807,92 @@ mod tests {
         let page = reader.page(0).expect("page");
         assert!((page.display_size().width - 100.0).abs() < 0.01);
         assert!((page.display_size().height - 80.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn fixed_document_source_serves_reader_apis() {
+        let mut fixed = FixedDocument::default();
+        fixed.pages.push(sample_page(0));
+        fixed.pages.push(sample_page(1));
+        let source = FixedDocumentSource::new(fixed, SourceFormat::Docx);
+        assert_eq!(source.info().page_count, 2);
+        let mut document = Document::from_source(
+            Box::new(source),
+            ReaderOptions {
+                cache: CacheOptions {
+                    max_bytes: 1024 * 1024,
+                },
+            },
+        );
+        assert_eq!(document.format(), SourceFormat::Docx);
+        assert_eq!(document.page_count(), 2);
+        assert_eq!(document.page_text(0).expect("text"), "Hello");
+        let query = SearchQuery {
+            text: "Hello".to_owned(),
+            ..SearchQuery::default()
+        };
+        assert_eq!(document.search_all(&query).expect("search").len(), 2);
+    }
+
+    #[test]
+    fn from_fixed_document_uses_reader_apis() {
+        let mut fixed = FixedDocument::default();
+        fixed.pages.push(sample_page(3));
+        let mut document = Document::from_fixed(
+            fixed,
+            SourceFormat::Docx,
+            ReaderOptions {
+                cache: CacheOptions {
+                    max_bytes: 1024 * 1024,
+                },
+            },
+        );
+        assert_eq!(document.page_count(), 1);
+        assert_eq!(document.page_text(0).expect("text"), "Hello");
+    }
+
+    #[cfg(all(feature = "docx", feature = "layout"))]
+    #[test]
+    fn opens_docx_through_reader() {
+        let mut flow = ofdbox_folio_ir::FlowDocument::new(Metadata::default());
+        let mut paragraph = Paragraph::new(ParaStyle::default());
+        paragraph.runs.push(Inline::Text(TextRun::new(
+            "Hello DOCX",
+            TextStyle::default(),
+        )));
+        flow.push(Block::Paragraph(paragraph));
+        let bytes = crate::docx::write_flow(&flow, &crate::docx::DocxWriteOptions::default())
+            .expect("write docx");
+        let mut document = Document::open_bytes(bytes, OpenOptions::default()).expect("open docx");
+        assert_eq!(document.format(), SourceFormat::Docx);
+        assert!(document.page_count() >= 1);
+        let page = document.page(0).expect("page");
+        assert!(page.display_size().width > 0.0);
+        assert!(page.display_size().height > 0.0);
+    }
+
+    #[cfg(all(feature = "docx", feature = "layout"))]
+    #[test]
+    fn from_flow_lays_out_and_reads() {
+        let mut flow = ofdbox_folio_ir::FlowDocument::new(Metadata::default());
+        let mut paragraph = Paragraph::new(ParaStyle::default());
+        paragraph.runs.push(Inline::Text(TextRun::new(
+            "Hello Flow",
+            TextStyle::default(),
+        )));
+        flow.push(Block::Paragraph(paragraph));
+        let mut fonts = super::NoFonts;
+        let document = Document::from_flow(
+            &flow,
+            &mut fonts,
+            SourceFormat::Docx,
+            ReaderOptions {
+                cache: CacheOptions {
+                    max_bytes: 1024 * 1024,
+                },
+            },
+        )
+        .expect("layout");
+        assert_eq!(document.page_count(), 1);
     }
 }

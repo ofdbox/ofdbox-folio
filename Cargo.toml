@@ -26,6 +26,7 @@ missing_docs = "warn"
 [workspace.dependencies]
 thiserror = "2"
 ofdbox-core = ">=0.0.2, <0.1"
+ofdbox-crypto = ">=0.0.2, <0.1"
 quick-xml = "0.42"
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 lopdf = { version = "0.45", features = ["wasm_js"] }
@@ -49,6 +50,3 @@ ofdbox-folio-render = { path = "crates/ofdbox-folio-render", version = "0.0.1" }
 ofdbox-folio-ofd = { path = "crates/ofdbox-folio-ofd", version = "0.0.1" }
 ofdbox-folio-pdf = { path = "crates/ofdbox-folio-pdf", version = "0.0.1" }
 ofdbox-folio-docx = { path = "crates/ofdbox-folio-docx", version = "0.0.1" }
-
-[patch.crates-io]
-ofdbox-core = { path = "../ofdbox/crates/ofdbox-core" }

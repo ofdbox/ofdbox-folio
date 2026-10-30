@@ -92,4 +92,4 @@ let rgba = target.read_rgba(backend.context())?;
 
 ## DOCX 写出
 
-`ofdbox_folio::docx::write_flow()` 把 Flow IR 写成 DOCX 包（`[Content_Types].xml`、`document.xml`、`styles.xml`、页眉页脚、`footnotes.xml`/`endnotes.xml`、`media/*`、`docProps`），覆盖分节与页面设置（含分栏）、段落与字符格式、制表位与前导符、表格、行内与浮动图片、页眉页脚、`PAGE`/`NUMPAGES` 域、超链接、脚注尾注引用、自动目录域、书签与大纲级别。固定 ZIP 时间戳，相同输入产生相同字节；`write_flow_with_report()` 额外返回降级诊断。DOCX 排版与写出的当前状态见[主 README](../README.zh-CN.md)。
+`ofdbox_folio::docx::write_flow()` 把 Flow IR 写成 DOCX 包（`[Content_Types].xml`、`document.xml`、`styles.xml`、页眉页脚、`footnotes.xml`/`endnotes.xml`、`media/*`、`docProps`），覆盖分节与页面设置（含分栏）、段落与字符格式、制表位与前导符、表格、行内与浮动图片、页眉页脚、`PAGE`/`NUMPAGES` 域、超链接、脚注尾注引用、自动目录域、书签与大纲级别。固定 ZIP 时间戳，相同输入产生相同字节；`write_flow_with_report()` 额外返回降级诊断。DOCX 读取由统一 Reader 分发（`read_flow` + 排版 + `FixedDocumentSource`）；见 [reader.zh-CN.md](reader.zh-CN.md)。

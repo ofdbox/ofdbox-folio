@@ -6,9 +6,10 @@ OFDBox Folio is a page-centric multi-format document engine: it reads OFD, PDF a
 
 ## Features
 
-- Read OFD/PDF directly into Fixed IR, or DOCX into Flow IR and then lay it out to Fixed IR.
+- Open OFD, PDF and DOCX through one reader: OFD/PDF load pages on demand, DOCX is read into Flow IR and laid out eagerly.
 - Build Flow IR with one creation API: write DOCX directly, or write OFD/PDF/bitmaps after layout.
 - Fixed IR as the unified read model: lazy pages, text selection/search, page cache, incremental rendering.
+- Wrap any laid-out `FixedDocument` back into the reader (`FixedDocumentSource`) to reuse caching, selection and search.
 - Deterministic output for the same input, font bytes and engine version.
 - CPU renderer plus an optional wgpu backend; OFD/PDF writers with font subsetting.
 
@@ -52,30 +53,38 @@ Details: [architecture](docs/architecture.md) · [reader](docs/reader.md) · [fo
 cargo test --workspace
 ```
 
-Read a page:
+Read a page (OFD, PDF and DOCX use the same API):
 
 ```rust
-let mut document = ofdbox_folio::open_path("input.ofd", &OpenOptions::default())?;
+use ofdbox_folio::{Document, OpenOptions};
+
+let mut document = Document::open_path("input.ofd", OpenOptions::default())?;
 let page = document.page(0)?;
+
+// DOCX is read into Flow IR and laid out on open.
+let mut document = Document::open_path("input.docx", OpenOptions::default())?;
 ```
 
 Build Flow IR and write DOCX, or lay it out and write OFD:
 
 ```rust
-let mut builder = DocumentBuilder::new(Metadata::default());
-builder.heading(1, "Chapter 1");
-builder.paragraph(
-    ParagraphBuilder::new(ParaStyle::default())
-        .span("Hello, world", TextStyle::default())
-        .build(),
-);
-let flow = builder.build()?;
+use ofdbox_folio::{
+    docx::{DocxWriteOptions, write_flow},
+    ir::{Block, FlowDocument, Inline, ParaStyle, Paragraph, TextRun, TextStyle},
+    layout::layout,
+    ofd::{OfdWriteOptions, write_fixed},
+};
 
-let docx = ofdbox_folio::to_docx(&flow, &DocxWriteOptions::default())?;
+let mut flow = FlowDocument::new(Default::default());
+let mut paragraph = Paragraph::new(ParaStyle::default());
+paragraph.runs.push(Inline::Text(TextRun::new("Hello, world", TextStyle::default())));
+flow.push(Block::Paragraph(paragraph));
+
+let docx = write_flow(&flow, &DocxWriteOptions::default())?;
 
 let mut fonts = MyFontProvider::new();
-let fixed = ofdbox_folio::layout(&flow, &mut fonts, &LayoutOptions::default())?;
-let ofd = ofdbox_folio::to_ofd(&fixed, &OfdWriteOptions::default())?;
+let fixed = layout(&flow, &mut fonts)?;
+let ofd = write_fixed(&fixed, &OfdWriteOptions::default())?;
 ```
 
 Render or convert from the command line:
@@ -89,7 +98,7 @@ cargo run -p ofdbox-folio --example docx_to_ofd -- input.docx output.ofd
 
 - One-way: only Flow → Fixed; Fixed IR keeps no back-references to Flow.
 - Format-neutral: OFD/PDF/DOCX types never appear in IR, layout or rendering interfaces.
-- Immutable pages: a `Page` is cacheable and shareable; documents are not fully built on open.
+- Immutable pages: a `Page` is cacheable and shareable; OFD/PDF documents are not fully built on open (DOCX is laid out eagerly).
 - Units: Flow uses twips, Fixed uses millimetres, origin top-left, y down.
 - Determinism: no clock, randomness or environment reads; same input + fonts + options + version → identical output.
 - Failures are returned as errors or recorded as diagnostics; parsers do not panic on untrusted input.
@@ -101,6 +110,8 @@ Known limits:
 - The page cache accounts for page structure only; fonts and images are shared document resources.
 - The GPU backend covers solid fills, strokes, linear gradients, clipping and text outlines; images, radial gradients and blend modes are CPU-only.
 - OFD pattern/mesh fills are not written yet; PDF tiling patterns and JPEG2000 are not read yet.
+- DOCX is laid out eagerly when opened, so its page count and layout cost are paid up front; the page cache then caches laid-out pages instead of deferring parsing.
+- DOCX layout approximates Word (no line-by-line fidelity); table and header/footer fidelity is still being hardened.
 
 ## Status & Roadmap
 

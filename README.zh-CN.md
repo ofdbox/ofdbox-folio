@@ -6,9 +6,10 @@ OFDBox Folio 是以“页”为中心的多格式文档引擎：读取 OFD、PDF
 
 ## 特性
 
-- 直接读取 OFD/PDF 得到 Fixed IR；读取 DOCX 得到 Flow IR，再排版为 Fixed IR。
+- 用同一个 Reader 打开 OFD/PDF/DOCX：OFD/PDF 按需加载页面，DOCX 读入 Flow IR 后立即排版。
 - 用一套创建 API 构建 Flow IR：可直接写 DOCX，也可排版后写 OFD/PDF/位图。
 - 以 Fixed IR 作为统一读取模型：按需加载、文本选择/搜索、页面缓存、增量渲染。
+- 排版产出的 `FixedDocument` 可以包回 Reader（`FixedDocumentSource`），复用缓存、选择与搜索。
 - 相同输入、相同字体字节、相同引擎版本，输出确定。
 - CPU 渲染器 + 可选 wgpu 后端；OFD/PDF 写出支持字体子集化。
 
@@ -52,30 +53,38 @@ ofdbox-folio                门面：格式探测、Reader、创建 API、便捷
 cargo test --workspace
 ```
 
-读取页面：
+读取页面（OFD、PDF、DOCX 使用同一套 API）：
 
 ```rust
-let mut document = ofdbox_folio::open_path("input.ofd", &OpenOptions::default())?;
+use ofdbox_folio::{Document, OpenOptions};
+
+let mut document = Document::open_path("input.ofd", OpenOptions::default())?;
 let page = document.page(0)?;
+
+// DOCX 会在打开时读入 Flow IR 并完成排版。
+let mut document = Document::open_path("input.docx", OpenOptions::default())?;
 ```
 
 构建 Flow IR 并写 DOCX，或排版后写 OFD：
 
 ```rust
-let mut builder = DocumentBuilder::new(Metadata::default());
-builder.heading(1, "第一章");
-builder.paragraph(
-    ParagraphBuilder::new(ParaStyle::default())
-        .span("你好，世界", TextStyle::default())
-        .build(),
-);
-let flow = builder.build()?;
+use ofdbox_folio::{
+    docx::{DocxWriteOptions, write_flow},
+    ir::{Block, FlowDocument, Inline, ParaStyle, Paragraph, TextRun, TextStyle},
+    layout::layout,
+    ofd::{OfdWriteOptions, write_fixed},
+};
 
-let docx = ofdbox_folio::to_docx(&flow, &DocxWriteOptions::default())?;
+let mut flow = FlowDocument::new(Default::default());
+let mut paragraph = Paragraph::new(ParaStyle::default());
+paragraph.runs.push(Inline::Text(TextRun::new("你好，世界", TextStyle::default())));
+flow.push(Block::Paragraph(paragraph));
+
+let docx = write_flow(&flow, &DocxWriteOptions::default())?;
 
 let mut fonts = MyFontProvider::new();
-let fixed = ofdbox_folio::layout(&flow, &mut fonts, &LayoutOptions::default())?;
-let ofd = ofdbox_folio::to_ofd(&fixed, &OfdWriteOptions::default())?;
+let fixed = layout(&flow, &mut fonts)?;
+let ofd = write_fixed(&fixed, &OfdWriteOptions::default())?;
 ```
 
 命令行渲染或转换：
@@ -89,7 +98,7 @@ cargo run -p ofdbox-folio --example docx_to_ofd -- input.docx output.ofd
 
 - 单向：只允许 Flow → Fixed；Fixed IR 不保留对 Flow 的反向引用。
 - 格式中立：OFD/PDF/DOCX 类型不出现在 IR、排版或渲染接口中。
-- 页面不可变：`Page` 可缓存、可跨线程共享；打开文档时不会构建全部页面。
+- 页面不可变：`Page` 可缓存、可跨线程共享；OFD/PDF 打开时不会构建全部页面（DOCX 会立即排版）。
 - 单位固定：Flow 用 twip，Fixed 用毫米，原点左上、y 向下。
 - 确定性：不读时钟、随机数或环境变量；相同输入 + 字体 + 选项 + 版本 → 相同输出。
 - 失败以错误或诊断返回；解析器面对不可信输入不 panic。
@@ -101,6 +110,8 @@ cargo run -p ofdbox-folio --example docx_to_ofd -- input.docx output.ofd
 - 页面缓存只计算页面结构；字体和图片是文档级共享资源。
 - GPU 后端覆盖实色填充、描边、线性渐变、裁剪和文字轮廓；图片、径向渐变和混合模式仅 CPU 支持。
 - OFD 的 Pattern/Mesh 填充尚未写出；PDF 的平铺 Pattern 和 JPEG2000 尚未读取。
+- DOCX 在打开时立即排版，页数与排版耗时都在打开阶段支付；页面缓存缓存的是排版后的页面，而不是延迟解析。
+- DOCX 排版只是近似 Word（不保证逐行一致）；表格、页眉页脚的保真度仍在打磨。
 
 ## 状态与路线图
 

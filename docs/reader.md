@@ -6,19 +6,21 @@ The reader is the entry point for opening OFD, PDF and DOCX documents while keep
 
 ## Loading Model
 
-- **Metadata first**: opening a document parses only metadata, the page table, outlines and resource indexes; `DocumentSource::load_page()` parses a single page on demand.
-- **Immutable pages**: a `Page` can be cached and shared across threads; the document never builds all pages at once.
+- **Metadata first (OFD/PDF)**: opening a native document parses only metadata, the page table, outlines and resource indexes; `DocumentSource::load_page()` parses a single page on demand.
+- **DOCX is eager**: opening DOCX parses `word/document.xml` into Flow IR, runs layout with the supplied `FontProvider`, and wraps the resulting `FixedDocument` in `FixedDocumentSource`; all pages exist right after open.
+- **Layout output is a source**: `Document::from_fixed` and `Document::from_flow` expose the same cache, selection, search and hit-testing APIs for laid-out documents.
+- **Immutable pages**: a `Page` can be cached and shared across threads; OFD/PDF never build all pages at once, while DOCX pages already exist after layout.
 - **Shared resources**: fonts and images belong to the document, not to a page, so loading another page does not reload them.
 - **Local damage**: a page that fails to load shows a placeholder and keeps its diagnostics; the rest of the document stays readable.
 - **Untrusted input**: every format parser returns errors instead of panicking, bounded by limits on page count, decompression, image pixels and recursion depth.
 
 ## Reader Performance Model
 
-- **Lazy pages**: first-screen time is independent of the total page count; memory is determined by the cache budget and the visible pages.
+- **Lazy pages (OFD/PDF)**: first-screen time is independent of the total page count; memory is determined by the cache budget and the visible pages.
 - **Separated resources**: fonts and images are shared by content; images are decoded at the target scale tier, so thumbnails do not trigger full-resolution decoding.
 - **Render-list cache**: a flat render-command list is generated the first time a page is drawn and reused for scrolling and zooming.
 - **Independent text layer**: drawing order is not reading order; the text layer stores line boxes, baselines and character mappings, so selection/search does not re-parse the page.
-- **Progressive layout**: after DOCX is parsed into Flow IR, pages are produced in order, showing the first page first, with total-page fields arriving later.
+- **Eager DOCX layout**: DOCX is parsed into Flow IR and fully laid out when opened; page count and layout cost are paid up front, and the page cache then caches laid-out pages. Progressive first-page-first layout is not implemented yet.
 - **Error isolation**: a page-level error does not abort document loading.
 
 ## Reader Cache

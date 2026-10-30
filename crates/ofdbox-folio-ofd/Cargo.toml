@@ -14,7 +14,7 @@ categories = ["parser-implementations", "text-processing"]
 [dependencies]
 ofdbox-folio-ir.workspace = true
 ofdbox-core.workspace = true
-ofdbox-crypto = { path = "../../../ofdbox/crates/ofdbox-crypto", version = ">=0.0.2, <0.1" }
+ofdbox-crypto.workspace = true
 quick-xml.workspace = true
 ttf-parser.workspace = true
 zip.workspace = true

@@ -20,13 +20,13 @@ The dependency direction is fixed: the format adapters, layout and rendering all
 
 | crate | Public responsibility | Key constraints |
 |---|---|---|
-| `ofdbox-folio-ir` | Flow IR, Fixed IR, geometry/paths/pens, resources, `TextLayer`, `DocumentSource`, diagnostics | No format dependencies, no I/O |
+| `ofdbox-folio-ir` | Flow IR, Fixed IR, geometry/paths/pens, resources, `TextLayer`, `DocumentSource`, `FixedDocumentSource`, diagnostics | No format dependencies, no I/O |
 | `ofdbox-folio-layout` | `layout()`, `LayoutSession`, `FontProvider`, layout options and errors | Only Flow → Fixed; reads no clock/random numbers/system fonts |
 | `ofdbox-folio-render` | `CpuRenderer`, render targets, tiles, glyph and image caches | Consumes Fixed IR only, unaware of the source format |
 | `ofdbox-folio-ofd` | `OfdDocument` (`DocumentSource`), `write_fixed()` | Does not expose `ofdbox_core` types publicly |
 | `ofdbox-folio-pdf` | `PdfDocument` (`DocumentSource`), `write_fixed()` | Does not expose `lopdf` types publicly |
 | `ofdbox-folio-docx` | `read_flow()`/`read_flow_path()` → Flow, `write_flow()` → DOCX, `probe()` | Does not touch Fixed IR |
-| `ofdbox-folio` | `open_bytes()`/`open_path()`, `Document`, creation API, convenience conversions | Unified errors, caching and format dispatch |
+| `ofdbox-folio` | `Document::open_bytes()`/`open_path()`, `from_fixed()`/`from_flow()`, creation API, convenience conversions | Unified errors, caching and format dispatch (DOCX → Flow → layout) |
 
 ## How It Works
 
@@ -50,6 +50,7 @@ OFD / PDF read ─────────┘
 - OFD/PDF reading produces Fixed IR directly, bypassing Flow IR and layout.
 - Fixed IR is the common entry point for bitmap rendering, OFD writing and PDF writing.
 - Opening a document parses only metadata, the page table, outlines and resource indexes; `DocumentSource::load_page()` parses one page on demand, and the Reader keeps a byte-budgeted LRU cache. Damage to a single page affects only that page: the reader shows a placeholder and keeps the diagnostics. See [reader.md](reader.md) for page caching, selection and search.
+- The same Reader dispatches DOCX: it reads the package into Flow IR, lays it out eagerly with the supplied `FontProvider`, and wraps the resulting `FixedDocument` in `FixedDocumentSource`, so DOCX pages use the same cache, selection and search APIs. `Document::from_fixed`/`from_flow` wrap layout output the same way.
 
 ### The Two IRs
 
@@ -107,6 +108,7 @@ cargo run -p ofdbox-folio --example create_document -- out.docx  # also produces
 - **Headers and footers**: `headerReference`/`footerReference` become a `HeaderFooterSet`, and `PAGE`/`NUMPAGES` in `fldSimple` and complex fields become `Field`.
 - **Metadata**: `docProps/core.xml` and `app.xml`.
 - **Degradation**: floating images are treated as inline, merged cells as ordinary cells, and VML, footnotes, symbol fonts and the like are recorded as `FlowDocument.report` diagnostics.
+- **Reader integration**: `Document::open_bytes` detects DOCX, calls `read_flow()`, lays the result out and wraps it in `FixedDocumentSource`; DOCX pages then use the same cache, selection, search and hit-testing APIs as native formats.
 
 ### Text and Fonts
 
