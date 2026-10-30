@@ -16,17 +16,16 @@ OFDBox Folio is a page-centric multi-format document engine: it reads OFD, PDF a
 The engine is organized around a single flow:
 
 ```text
-Creation API ──┐
-               │
-DOCX read ─────┤
-               ├─► Flow IR ──► DOCX write
-                      │
-                      │ layout (one-way)
-                      ▼
-                  Fixed IR ──┬─► bitmap rendering
-                      ▲      ├─► OFD write
-                      │      └─► PDF write
-OFD / PDF read ───────┘
+Creation API ───┐
+                ├──► Flow IR ──────► DOCX write
+DOCX read ──────┘       │
+                        │ layout (one-way)
+                        ▼
+                    Fixed IR ─────┬──► bitmap rendering
+                        ▲         ├──► OFD write
+                        │         └──► PDF write
+                        │
+OFD / PDF read ─────────┘
 ```
 
 Flow IR is the semantic, editable model (twips, no absolute coordinates); Fixed IR is the immutable, cacheable page model (millimetres, origin top-left, y down). Layout is the only downward path; OFD/PDF reading bypasses it, and DOCX writing consumes Flow IR directly.

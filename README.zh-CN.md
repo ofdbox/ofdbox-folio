@@ -16,17 +16,16 @@ OFDBox Folio 是以“页”为中心的多格式文档引擎：读取 OFD、PDF
 整个引擎围绕一条主流程组织：
 
 ```text
-创建 API ──────┐
-               │
-DOCX 读取 ─────┤
-               ├─► Flow IR ──► DOCX 写出
-                      │
-                      │ 排版（单向）
-                      ▼
-                  Fixed IR ──┬─► 位图渲染
-                      ▲      ├─► OFD 写出
-                      │      └─► PDF 写出
-OFD / PDF 读取 ───────┘
+创建 API ───┐
+            ├──► Flow IR ──────► DOCX 写出
+DOCX 读取 ──┘        │
+                     │ 排版（单向）
+                     ▼
+                Fixed IR ──────┬──► 位图渲染
+                     ▲         ├──► OFD 写出
+                     │         └──► PDF 写出
+                     │
+OFD / PDF 读取 ──────┘
 ```
 
 Flow IR 是语义化、可编辑的流式模型（twip，无绝对坐标）；Fixed IR 是不可变、可缓存的页面模型（毫米，原点左上、y 向下）。排版是唯一向下路径；OFD/PDF 读取绕过排版，DOCX 写出直接消费 Flow IR。
