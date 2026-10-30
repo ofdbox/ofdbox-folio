@@ -3,11 +3,12 @@
 use std::io::Read as _;
 use std::sync::Arc;
 
+#[cfg(windows)]
+use ofdbox_folio_ir::{Cluster, FontAsset, Glyph, GlyphRun, TextElement};
 use ofdbox_folio_ir::{
-    Cluster, DocumentSource, Element, FillRule, FixedDocument, FontAsset, Glyph, GlyphRun,
-    GradientExtend, GradientStop, Group, ImageAsset, ImageElement, ImageFormat, LinearGradient,
-    Matrix, Metadata, Page, PageInfo, Paint, Path, PathElement, Point, Rect, ResourceStore, Rgba,
-    Rotation, Scene, Size, TextElement,
+    DocumentSource, Element, FillRule, FixedDocument, GradientExtend, GradientStop, Group,
+    ImageAsset, ImageElement, ImageFormat, LinearGradient, Matrix, Metadata, Page, PageInfo, Paint,
+    Path, PathElement, Point, Rect, ResourceStore, Rgba, Rotation, Scene, Size,
 };
 use ofdbox_folio_pdf::{PdfBackend, PdfDocument, PdfOptions, PdfReadOptions, probe, write_fixed};
 
