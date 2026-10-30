@@ -268,10 +268,8 @@ impl CpuRenderer {
             return Err(RenderError::InvalidPage);
         }
         let k = region.dpi / 25.4;
-        let device = Matrix::scale(k, k).then(Matrix::translate(
-            -region.origin_px.0,
-            -region.origin_px.1,
-        ));
+        let device =
+            Matrix::scale(k, k).then(Matrix::translate(-region.origin_px.0, -region.origin_px.1));
         self.render_scene_with(scene, target, device)
     }
 
@@ -849,7 +847,9 @@ mod tests {
         let scene = solid_rect_scene();
         let mut renderer = CpuRenderer::new(RenderOptions::default());
         let mut full = RasterTarget::from_size(scene.size, 96.0).expect("full target");
-        renderer.render_scene(&scene, &mut full).expect("full render");
+        renderer
+            .render_scene(&scene, &mut full)
+            .expect("full render");
 
         let mut tile = RasterTarget::from_pixels(10, 10, 96.0).expect("tile");
         renderer

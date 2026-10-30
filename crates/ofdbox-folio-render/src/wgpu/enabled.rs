@@ -492,11 +492,7 @@ fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-fn collect_paths(
-    scene: &Scene,
-    dpi: f64,
-    origin_px: (f64, f64),
-) -> (Vec<[f32; 4]>, Vec<DrawPath>) {
+fn collect_paths(scene: &Scene, dpi: f64, origin_px: (f64, f64)) -> (Vec<[f32; 4]>, Vec<DrawPath>) {
     let scale = dpi / 25.4;
     let mut edges = Vec::new();
     let mut paths = Vec::new();

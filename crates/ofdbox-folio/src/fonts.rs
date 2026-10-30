@@ -3,7 +3,7 @@
 //! Line breaking, page count and glyphs during layout all depend on the font that is
 //! actually resolved, so this mapping must have exactly one implementation and produce
 //! explainable results: resolved family names and the actual files are both recorded in
-//! [`SystemFonts::used_fonts`] for `--report` output.
+//! `SystemFonts::used_fonts` for `--report` output.
 //!
 //! Only the minimal "family name → file" mapping is done; font internals are not parsed.
 //! When nothing matches, resolution falls back through generic fonts that carry CJK
