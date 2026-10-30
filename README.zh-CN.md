@@ -44,7 +44,7 @@ ofdbox-folio                门面：格式探测、Reader、创建 API、便捷
 
 格式适配、排版与渲染都依赖 `ofdbox-folio-ir`；`ofdbox-folio-ir` 不依赖任何格式库或渲染后端。
 
-细节：[架构](docs/architecture.zh-CN.md) · [Reader](docs/reader.zh-CN.md) · [格式适配](docs/formats.zh-CN.md) · [布局契约](docs/layout-contract.zh-CN.md)。
+细节：[架构](docs/architecture.zh-CN.md) · [门面 & Reader](crates/ofdbox-folio/README.zh-CN.md) · [IR](crates/ofdbox-folio-ir/README.zh-CN.md) · [排版](crates/ofdbox-folio-layout/README.zh-CN.md) · [OFD](crates/ofdbox-folio-ofd/README.zh-CN.md) · [PDF](crates/ofdbox-folio-pdf/README.zh-CN.md) · [DOCX](crates/ofdbox-folio-docx/README.zh-CN.md) · [渲染](crates/ofdbox-folio-render/README.zh-CN.md)。
 
 ## 快速开始
 
@@ -131,8 +131,8 @@ cargo test --workspace
 
 ## 文档与许可
 
-- [架构](docs/architecture.zh-CN.md) · [Reader](docs/reader.zh-CN.md) · [格式适配](docs/formats.zh-CN.md) · [布局契约](docs/layout-contract.zh-CN.md)
-- English docs: [Architecture](docs/architecture.md) · [Reader](docs/reader.md) · [Format adapters](docs/formats.md) · [Layout contract](docs/layout-contract.md)
+- [架构](docs/architecture.zh-CN.md) · [门面 & Reader](crates/ofdbox-folio/README.zh-CN.md) · [IR](crates/ofdbox-folio-ir/README.zh-CN.md) · [排版](crates/ofdbox-folio-layout/README.zh-CN.md) · [OFD](crates/ofdbox-folio-ofd/README.zh-CN.md) · [PDF](crates/ofdbox-folio-pdf/README.zh-CN.md) · [DOCX](crates/ofdbox-folio-docx/README.zh-CN.md) · [渲染](crates/ofdbox-folio-render/README.zh-CN.md)
+- English docs: [Architecture](docs/architecture.md) · [Facade & Reader](crates/ofdbox-folio/README.md) · [IR](crates/ofdbox-folio-ir/README.md) · [Layout](crates/ofdbox-folio-layout/README.md) · [OFD](crates/ofdbox-folio-ofd/README.md) · [PDF](crates/ofdbox-folio-pdf/README.md) · [DOCX](crates/ofdbox-folio-docx/README.md) · [Render](crates/ofdbox-folio-render/README.md)
 - [English README](README.md)
 
 本项目采用 MIT 或 Apache-2.0 双许可，可任选其一：[LICENSE-MIT](LICENSE-MIT) · [LICENSE-APACHE](LICENSE-APACHE)。

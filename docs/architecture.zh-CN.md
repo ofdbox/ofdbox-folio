@@ -49,7 +49,7 @@ OFD / PDF 读取 ──────┘
 - DOCX 写出直接消费 Flow IR，不经过布局和 Fixed IR。
 - OFD/PDF 读取直接产出 Fixed IR，不经过 Flow IR 和布局。
 - Fixed IR 是位图渲染、OFD 写出与 PDF 写出的共同入口。
-- 打开文档时只解析元数据、页面表、大纲和资源索引；`DocumentSource::load_page()` 按需解析单页，Reader 使用带字节预算的 LRU 缓存。单页损坏只影响该页：阅读器显示占位内容并保留诊断。页面缓存、选择与搜索的实现见 [reader.zh-CN.md](reader.zh-CN.md)。
+- 打开文档时只解析元数据、页面表、大纲和资源索引；`DocumentSource::load_page()` 按需解析单页，Reader 使用带字节预算的 LRU 缓存。单页损坏只影响该页：阅读器显示占位内容并保留诊断。页面缓存、选择与搜索的实现见 [crates/ofdbox-folio/README.zh-CN.md](../crates/ofdbox-folio/README.zh-CN.md)。
 - 同一个 Reader 也会分发 DOCX：把包读成 Flow IR，用调用方提供的 `FontProvider` 立即排版，再把 `FixedDocument` 包成 `FixedDocumentSource`，因此 DOCX 页面复用同一套缓存、选择与搜索 API。`Document::from_fixed`/`from_flow` 也以同样方式包装排版结果。
 
 ### 两种 IR
@@ -67,7 +67,7 @@ OFD / PDF 读取 ──────┘
 
 ### 排版（A1）
 
-`ofdbox_folio::layout()` 把 Flow IR 排成 Fixed IR，规则冻结在 [layout-contract.zh-CN.md](layout-contract.zh-CN.md)。
+`ofdbox_folio::layout()` 把 Flow IR 排成 Fixed IR，规则冻结在 [CONTRACT.zh-CN.md](../crates/ofdbox-folio-layout/CONTRACT.zh-CN.md)。
 
 - **断行**：允许在 CJK 边界与空格处断行，行首/行尾禁则把标点回吞；行尾空格不占行宽。
 - **段落**：支持首行/左右缩进、单倍/多倍/固定/最小行距、段前段后、左/中/右与两端对齐；两端对齐优先拉伸空格，没有空格时把余量均摊到字间。

@@ -49,7 +49,7 @@ OFD / PDF read ─────────┘
 - DOCX writing consumes Flow IR directly, bypassing both layout and Fixed IR.
 - OFD/PDF reading produces Fixed IR directly, bypassing Flow IR and layout.
 - Fixed IR is the common entry point for bitmap rendering, OFD writing and PDF writing.
-- Opening a document parses only metadata, the page table, outlines and resource indexes; `DocumentSource::load_page()` parses one page on demand, and the Reader keeps a byte-budgeted LRU cache. Damage to a single page affects only that page: the reader shows a placeholder and keeps the diagnostics. See [reader.md](reader.md) for page caching, selection and search.
+- Opening a document parses only metadata, the page table, outlines and resource indexes; `DocumentSource::load_page()` parses one page on demand, and the Reader keeps a byte-budgeted LRU cache. Damage to a single page affects only that page: the reader shows a placeholder and keeps the diagnostics. See [crates/ofdbox-folio/README.md](../crates/ofdbox-folio/README.md) for page caching, selection and search.
 - The same Reader dispatches DOCX: it reads the package into Flow IR, lays it out eagerly with the supplied `FontProvider`, and wraps the resulting `FixedDocument` in `FixedDocumentSource`, so DOCX pages use the same cache, selection and search APIs. `Document::from_fixed`/`from_flow` wrap layout output the same way.
 
 ### The Two IRs
@@ -67,7 +67,7 @@ OFD / PDF read ─────────┘
 
 ### Layout (A1)
 
-`ofdbox_folio::layout()` lays Flow IR out into Fixed IR, with the rules frozen in [layout-contract.md](layout-contract.md):
+`ofdbox_folio::layout()` lays Flow IR out into Fixed IR, with the rules frozen in [CONTRACT.md](../crates/ofdbox-folio-layout/CONTRACT.md):
 
 - **Line breaking**: breaks are allowed at CJK boundaries and spaces, line-start/line-end prohibition rules pull punctuation back, and trailing spaces do not consume line width.
 - **Paragraphs**: first-line, left and right indents; single/multiple/fixed/minimum line spacing; space before/after; left, center, right and justified alignment, where justification stretches spaces first and shares the extra space between characters when there are none.

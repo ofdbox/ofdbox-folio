@@ -5,10 +5,11 @@
 //! to Fixed; no reverse conversion is provided, and no rendering or file IO is
 //! performed.
 //!
-//! The A1 milestone implements single-column layout: paragraphs (indent, line
-//! spacing, alignment and justification), inline images, block images, page
-//! breaks, page number fields and heading outlines. Tables and automatic tables
-//! of contents are left to A2; see the rules in `docs/layout-contract.md`.
+//! The engine covers paragraphs (indent, line spacing, alignment and
+//! justification), inline/block/floating images, tables, headers and footers,
+//! footnotes and endnotes, automatic tables of contents, page breaks, page
+//! number fields and heading outlines. The frozen rules live in
+//! `crates/ofdbox-folio-layout/CONTRACT.md`.
 
 mod font;
 mod linebreak;
