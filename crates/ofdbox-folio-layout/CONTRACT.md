@@ -256,7 +256,7 @@ Font resources: the bytes of every font used are registered as a `FontAsset` in 
 | Images (inline/floating) | Yes | Floating images go into Block::Floating, supporting page/margin/column references and three wrap modes; masked images are baked into alpha when written |
 | Headers and footers, page-number fields | Yes | Go into HeaderFooterSet and are laid out (top-pinned/bottom-pinned, PAGE/NUMPAGES fields) |
 | Automatic table of contents (TOC field) | Yes | Content controls map to TocBlock, and page numbers are filled in from headings during layout |
-| Lists | Partial | Marker text + hanging indent; multi-level markers use each referenced level's own number format; restarts/overrides and custom bullets remain approximations |
+| Lists | Partial | Marker text + hanging indent; multi-level markers use each referenced level's own number format; `startOverride` and full `lvlOverride` are supported; `lvlRestart` and custom bullets remain approximations |
 | Footnotes/endnotes | Yes | Read and written as separate parts; page-bottom note areas and end-of-document endnotes are both laid out |
 | Comments, form controls, SmartArt, VML, embedded objects | No | Recorded as Unsupported diagnostics |
 

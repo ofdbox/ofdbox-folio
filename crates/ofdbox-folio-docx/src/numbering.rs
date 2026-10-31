@@ -114,14 +114,32 @@ impl Counters {
     }
 }
 
+/// Per-instance overrides of one numbering level.
+#[derive(Clone, Debug, Default)]
+struct LevelOverride {
+    /// Replacement start value.
+    start: Option<u32>,
+    /// Replacement level definition.
+    level: Option<Level>,
+}
+
+/// Parsed `w:num` entry.
+#[derive(Clone, Debug, Default)]
+struct NumDef {
+    /// Referenced abstract numbering definition.
+    abstract_id: Option<u32>,
+    /// Per-level overrides.
+    overrides: HashMap<u8, LevelOverride>,
+}
+
 impl Numbering {
     /// Parse `numbering.xml`.
     pub fn parse(text: &str) -> Self {
         let mut numbering = Self::default();
         // abstractNumId → per-level definitions.
         let mut abstracts: HashMap<u32, HashMap<u8, Level>> = HashMap::new();
-        // numId → abstractNumId.
-        let mut nums: HashMap<u32, u32> = HashMap::new();
+        // numId → parsed num definition.
+        let mut nums: HashMap<u32, NumDef> = HashMap::new();
         let mut reader = XmlReader::from_str(text);
         loop {
             match reader.read_event() {
@@ -138,8 +156,8 @@ impl Numbering {
                             let Some(id) = attr_u32(&element, "numId") else {
                                 continue;
                             };
-                            if let Some(abstract_id) = parse_num(&mut reader) {
-                                nums.insert(id, abstract_id);
+                            if let Some(definition) = parse_num(&mut reader) {
+                                nums.insert(id, definition);
                             }
                         }
                         _ => {
@@ -153,12 +171,25 @@ impl Numbering {
                 _ => {}
             }
         }
-        for (num_id, abstract_id) in nums {
+        for (num_id, definition) in nums {
+            let Some(abstract_id) = definition.abstract_id else {
+                continue;
+            };
             if let Some(levels) = abstracts.get(&abstract_id) {
-                for (level, definition) in levels {
-                    numbering
-                        .levels
-                        .insert((num_id, *level), definition.clone());
+                for (level, base) in levels {
+                    let mut resolved = base.clone();
+                    if let Some(over) = definition.overrides.get(level) {
+                        if let Some(start) = over.start {
+                            resolved.start = start;
+                        }
+                        if let Some(replacement) = &over.level {
+                            resolved = replacement.clone();
+                            if let Some(start) = over.start {
+                                resolved.start = start;
+                            }
+                        }
+                    }
+                    numbering.levels.insert((num_id, *level), resolved);
                 }
             }
         }
@@ -282,16 +313,22 @@ fn parse_level_para(reader: &mut XmlReader<'_>, definition: &mut Level) {
     }
 }
 
-fn parse_num(reader: &mut XmlReader<'_>) -> Option<u32> {
-    let mut abstract_id = None;
+fn parse_num(reader: &mut XmlReader<'_>) -> Option<NumDef> {
+    let mut definition = NumDef::default();
     loop {
         match reader.read_event().ok()? {
             quick_xml::events::Event::Start(element) => {
-                let _ = skip_element(reader, &element);
+                if local_name(&element).as_str() == "lvlOverride"
+                    && let Some((level, over)) = parse_lvl_override(reader)
+                {
+                    definition.overrides.insert(level, over);
+                } else {
+                    let _ = skip_element(reader, &element);
+                }
             }
             quick_xml::events::Event::Empty(element) => {
                 if is_element(&element, "abstractNumId") {
-                    abstract_id = attr_u32(&element, "val");
+                    definition.abstract_id = attr_u32(&element, "val");
                 }
             }
             quick_xml::events::Event::End(_) => break,
@@ -299,7 +336,36 @@ fn parse_num(reader: &mut XmlReader<'_>) -> Option<u32> {
             _ => {}
         }
     }
-    abstract_id
+    Some(definition)
+}
+
+fn parse_lvl_override(reader: &mut XmlReader<'_>) -> Option<(u8, LevelOverride)> {
+    let mut level = 0_u8;
+    let mut over = LevelOverride::default();
+    loop {
+        match reader.read_event().ok()? {
+            quick_xml::events::Event::Start(element) => match local_name(&element).as_str() {
+                "lvl" => {
+                    level = attr_u32(&element, "ilvl").unwrap_or(0) as u8;
+                    if let Some(definition) = parse_level(reader) {
+                        over.level = Some(definition);
+                    }
+                }
+                _ => {
+                    let _ = skip_element(reader, &element);
+                }
+            },
+            quick_xml::events::Event::Empty(element) => {
+                if is_element(&element, "startOverride") {
+                    over.start = attr_u32(&element, "val");
+                }
+            }
+            quick_xml::events::Event::End(_) => break,
+            quick_xml::events::Event::Eof => break,
+            _ => {}
+        }
+    }
+    Some((level, over))
 }
 
 /// Format a counter value as text in that numbering format.
@@ -424,5 +490,42 @@ mod multi_level_tests {
             Some("1.a".to_owned()),
             "level 2 should use lowerLetter for its own placeholder"
         );
+    }
+
+    #[test]
+    fn start_override_restarts_a_list_instance() {
+        let xml = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:abstractNum w:abstractNumId="0">
+                <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+            </w:abstractNum>
+            <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+            <w:num w:numId="2">
+                <w:abstractNumId w:val="0"/>
+                <w:lvlOverride w:ilvl="0"><w:startOverride w:val="5"/></w:lvlOverride>
+            </w:num>
+        </w:numbering>"#;
+        let numbering = Numbering::parse(xml);
+        let mut counters = Counters::default();
+        assert_eq!(counters.next(&numbering, 1, 0), Some("1.".to_owned()));
+        assert_eq!(counters.next(&numbering, 2, 0), Some("5.".to_owned()));
+        assert_eq!(counters.next(&numbering, 2, 0), Some("6.".to_owned()));
+    }
+
+    #[test]
+    fn full_level_override_replaces_format_and_start() {
+        let xml = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:abstractNum w:abstractNumId="0">
+                <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+            </w:abstractNum>
+            <w:num w:numId="1">
+                <w:abstractNumId w:val="0"/>
+                <w:lvlOverride w:ilvl="0">
+                    <w:lvl w:ilvl="0"><w:start w:val="2"/><w:numFmt w:val="upperRoman"/><w:lvlText w:val="(%1)"/></w:lvl>
+                </w:lvlOverride>
+            </w:num>
+        </w:numbering>"#;
+        let numbering = Numbering::parse(xml);
+        let mut counters = Counters::default();
+        assert_eq!(counters.next(&numbering, 1, 0), Some("(II)".to_owned()));
     }
 }
