@@ -8,8 +8,8 @@ use ofdbox_folio_ir::{
     Cell, CellBorders, Column, ColumnWidth, Diagnostic, DiagnosticCode, Field, FieldKind,
     FloatingObject, FlowDocument, HeaderFooter, ImageAsset, ImageBlock, Inline, InlineImage, Link,
     LinkTarget, Margins, Metadata, Note, NoteKind, NoteRef, Paragraph, Point, Rgba, Row,
-    RowHeightRule, Section, Table, TextRun, TextStyle, TocBlock, Twips, VMerge, WrapMode,
-    detect_image_format, image_dimensions,
+    RowHeightRule, Section, Table, TextRun, TextStyle, TocBlock, Twips, VMerge, VerticalAlign,
+    WrapMode, detect_image_format, image_dimensions,
 };
 
 use crate::DocxError;
@@ -885,6 +885,7 @@ impl<'a> Builder<'a> {
         let mut v_merge = VMerge::None;
         let mut padding = None;
         let mut borders = CellBorders::default();
+        let mut vertical_align = VerticalAlign::Top;
         let mut blocks = Vec::new();
         loop {
             match reader.read_event().map_err(crate::xml::xml_error)? {
@@ -895,6 +896,7 @@ impl<'a> Builder<'a> {
                         v_merge = parsed.v_merge;
                         padding = parsed.padding;
                         borders = parsed.borders;
+                        vertical_align = parsed.vertical_align;
                     }
                     "p" => {
                         let (mut produced, _) = self.parse_paragraph(reader)?;
@@ -934,6 +936,7 @@ impl<'a> Builder<'a> {
         let mut cell = Cell::new(blocks).with_span(span).with_v_merge(v_merge);
         cell.padding = padding;
         cell.borders = borders;
+        cell.vertical_align = vertical_align;
         Ok(Some(cell))
     }
 
@@ -1372,6 +1375,7 @@ struct CellProps {
     v_merge: VMerge,
     padding: Option<Margins>,
     borders: CellBorders,
+    vertical_align: VerticalAlign,
 }
 
 /// Cell properties (`w:tcPr`).
@@ -1381,6 +1385,7 @@ fn parse_cell_props(reader: &mut XmlReader<'_>) -> Result<CellProps, DocxError> 
         v_merge: VMerge::None,
         padding: None,
         borders: CellBorders::default(),
+        vertical_align: VerticalAlign::Top,
     };
     loop {
         match reader.read_event().map_err(crate::xml::xml_error)? {
@@ -1399,6 +1404,13 @@ fn parse_cell_props(reader: &mut XmlReader<'_>) -> Result<CellProps, DocxError> 
                     props.v_merge = match attr(&element, "val").as_deref() {
                         Some("restart") => VMerge::Restart,
                         _ => VMerge::Continue,
+                    };
+                }
+                "vAlign" => {
+                    props.vertical_align = match attr(&element, "val").as_deref() {
+                        Some("center") => VerticalAlign::Center,
+                        Some("bottom") => VerticalAlign::Bottom,
+                        _ => VerticalAlign::Top,
                     };
                 }
                 _ => {}

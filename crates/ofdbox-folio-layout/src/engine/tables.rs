@@ -1,6 +1,20 @@
 //! tables layout.
 
+use std::ops::Range;
+
 use super::*;
+
+/// Per-cell bookkeeping for vertical alignment.
+struct CellAlignMetrics {
+    scene: Range<usize>,
+    items: Range<usize>,
+    lines: Range<usize>,
+    content_top: f64,
+    content_bottom: f64,
+    padding_top: f64,
+    padding_bottom: f64,
+    align: VerticalAlign,
+}
 
 impl<'a> Engine<'a> {
     // ---- Tables ----
@@ -241,6 +255,7 @@ impl<'a> Engine<'a> {
         let mut max_bottom = top;
         let mut placed_any = false;
         let mut continuation = vec![None; row.cells.len()];
+        let mut align_metrics: Vec<CellAlignMetrics> = Vec::new();
         // Column cursor: a merged cell occupies several columns according to its
         // span.
         let mut column = 0_usize;
@@ -258,6 +273,9 @@ impl<'a> Engine<'a> {
             let padding_right = padding.right.to_mm().max(0.0);
             let inner_left = x + padding_left;
             let inner_width = (width - padding_left - padding_right).max(1.0);
+            let scene_start = self.page.scene.children.len();
+            let items_start = self.page.items.len();
+            let lines_start = self.page.lines.len();
             let resume_at = resume.and_then(|items| items.get(cell_index).copied().flatten());
             // A vertically merged continuation cell has no content of its own; it
             // is covered by the starting cell above.
@@ -279,6 +297,16 @@ impl<'a> Engine<'a> {
                 force,
                 allow_floating,
             );
+            align_metrics.push(CellAlignMetrics {
+                scene: scene_start..self.page.scene.children.len(),
+                items: items_start..self.page.items.len(),
+                lines: lines_start..self.page.lines.len(),
+                content_top: top + padding_top,
+                content_bottom: outcome.bottom,
+                padding_top,
+                padding_bottom,
+                align: cell.vertical_align,
+            });
             placed_any |= outcome.placed_any;
             max_bottom = max_bottom.max(outcome.bottom + padding_bottom);
             continuation[cell_index] = outcome.continuation;
@@ -300,6 +328,20 @@ impl<'a> Engine<'a> {
                 ofdbox_folio_ir::RowHeightRule::Exact => fixed,
                 _ => height.max(fixed),
             };
+        }
+        if complete {
+            for metric in align_metrics {
+                let content = (metric.content_bottom - metric.content_top).max(0.0);
+                let available = (height - metric.padding_top - metric.padding_bottom).max(0.0);
+                let delta = match metric.align {
+                    VerticalAlign::Center => (available - content) / 2.0,
+                    VerticalAlign::Bottom => available - content,
+                    _ => 0.0,
+                };
+                if delta > 0.01 {
+                    self.shift_region_y(&metric.scene, &metric.items, &metric.lines, delta);
+                }
+            }
         }
         if placed_any {
             self.draw_row_borders(table, widths, index, top, top + height, table_left);
@@ -481,6 +523,27 @@ impl<'a> Engine<'a> {
             }
             x += width;
             column += span;
+        }
+    }
+
+    /// Shift the scene elements and text items emitted by one cell vertically.
+    pub(crate) fn shift_region_y(
+        &mut self,
+        scene: &Range<usize>,
+        items: &Range<usize>,
+        lines: &Range<usize>,
+        dy: f64,
+    ) {
+        for element in &mut self.page.scene.children[scene.clone()] {
+            shift_element_y(element, dy);
+        }
+        for item in &mut self.page.items[items.clone()] {
+            item.transform.f += dy;
+            item.bbox.y += dy;
+        }
+        for line in &mut self.page.lines[lines.clone()] {
+            line.bbox.y += dy;
+            line.baseline += dy;
         }
     }
 
@@ -1601,5 +1664,15 @@ impl<'a> Engine<'a> {
             alpha: 1.0,
         }));
         self.cursor += height;
+    }
+}
+
+fn shift_element_y(element: &mut Element, dy: f64) {
+    match element {
+        Element::Group(group) => group.transform.f += dy,
+        Element::Path(path) => path.transform.f += dy,
+        Element::Text(text) => text.transform.f += dy,
+        Element::Image(image) => image.transform.f += dy,
+        _ => {}
     }
 }

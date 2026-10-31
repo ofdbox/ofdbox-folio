@@ -649,3 +649,35 @@ fn cell_border_override_suppresses_table_border() {
         "the zero-width cell bottom border should suppress the table bottom line"
     );
 }
+
+#[test]
+fn cell_vertical_alignment_shifts_content() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    let mut row = Row::new(vec![cell("A"), cell("B")]);
+    row.height = Some(Twips::from_mm(40.0));
+    row.height_rule = RowHeightRule::Exact;
+    row.cells[1].vertical_align = ofdbox_folio_ir::VerticalAlign::Center;
+    let mut table = table(vec![row], 0);
+    table.cell_padding = Margins::uniform(Twips::from_mm(1.0));
+    flow.push(Block::Table(table));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let lines = texts(&fixed.pages[0]);
+    let y_a = lines
+        .iter()
+        .find(|(text, _, _)| text.contains('A'))
+        .map(|(_, _, y)| *y)
+        .expect("A");
+    let y_b = lines
+        .iter()
+        .find(|(text, _, _)| text.contains('B'))
+        .map(|(_, _, y)| *y)
+        .expect("B");
+    assert!(
+        y_b - y_a > 10.0,
+        "center-aligned cell should be lower than the top-aligned one: A={y_a} B={y_b}"
+    );
+}

@@ -32,7 +32,7 @@ use ofdbox_folio_ir::{
     LinkTarget, Matrix, NoteKind, NoteRef, OutlineItem, Page, PageInfo, PageSetup, Paint,
     ParaStyle, Paragraph, Path, PathElement, Point, Rect, Rgba, Rotation, Row, Scene, Severity,
     Size, StrokePaint, StrokeStyle, TabAlign, TabLeader, TabStop, Table, TextElement, TextItem,
-    TextLayer, TextLine, TextRun, TextStyle, Twips,
+    TextLayer, TextLine, TextRun, TextStyle, Twips, VerticalAlign,
 };
 
 use font::{FontKey, FontStore};

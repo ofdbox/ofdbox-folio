@@ -35,7 +35,7 @@ pub use flow::{
     Inline, InlineImage, LineSpacing, Link, LinkTarget, Margins, NamedStyle, Note, NoteKind,
     NoteRef, PageSetup, ParaStyle, Paragraph, PositionFrom, Row, RowHeightRule, Section,
     StyleSheet, TabAlign, TabLeader, TabStop, Table, TableBorders, TextRun, TextStyle, TocBlock,
-    TocStyle, VMerge, WrapMode,
+    TocStyle, VMerge, VerticalAlign, WrapMode,
 };
 pub use font::{FontError, FontProvider, FontRequest, extract_truetype_face, subset_truetype};
 pub use geometry::{Matrix, Point, Rect, Rotation, Size};

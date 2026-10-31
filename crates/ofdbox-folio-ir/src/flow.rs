@@ -784,6 +784,19 @@ impl Row {
     }
 }
 
+/// Vertical alignment of content inside a table cell.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum VerticalAlign {
+    /// Align to the top edge.
+    #[default]
+    Top,
+    /// Center vertically.
+    Center,
+    /// Align to the bottom edge.
+    Bottom,
+}
+
 /// Per-cell border overrides; `None` falls back to the table border.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CellBorders {
@@ -810,6 +823,8 @@ pub struct Cell {
     pub padding: Option<Margins>,
     /// Per-cell border overrides.
     pub borders: CellBorders,
+    /// Vertical alignment of the cell content.
+    pub vertical_align: VerticalAlign,
 }
 
 impl Cell {
@@ -821,6 +836,7 @@ impl Cell {
             v_merge: VMerge::None,
             padding: None,
             borders: CellBorders::default(),
+            vertical_align: VerticalAlign::Top,
         }
     }
 

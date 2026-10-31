@@ -16,7 +16,7 @@ use ofdbox_folio_ir::{
     Align, Block, Border, BorderStyle, Cell, CellBorders, ColumnWidth, Diagnostic, DiagnosticCode,
     Field, FieldKind, FlowDocument, FontFamily, HeaderFooter, ImageFormat, Inline, LineSpacing,
     LinkTarget, Margins, Metadata, NoteKind, PageSetup, ParaStyle, Paragraph, PositionFrom, Report,
-    Row, TabAlign, TabLeader, TableBorders, TextStyle, TocBlock, Twips, WrapMode,
+    Row, TabAlign, TabLeader, TableBorders, TextStyle, TocBlock, Twips, VerticalAlign, WrapMode,
 };
 
 use crate::DocxError;
@@ -669,6 +669,14 @@ impl<'a> Writer<'a> {
         }
         if cell.borders != CellBorders::default() {
             out.push_str(&cell_borders_xml(&cell.borders));
+        }
+        if cell.vertical_align != VerticalAlign::Top {
+            let value = match cell.vertical_align {
+                VerticalAlign::Center => "center",
+                VerticalAlign::Bottom => "bottom",
+                _ => "top",
+            };
+            out.push_str(&format!("<w:vAlign w:val=\"{value}\"/>"));
         }
         out.push_str("</w:tcPr>");
         let mut content = String::new();
