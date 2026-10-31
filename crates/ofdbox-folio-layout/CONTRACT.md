@@ -177,7 +177,8 @@ An empty paragraph still occupies one line. When it has no runs, layout uses the
     moves below the object instead of wrapping one character per line;
 - Square-wrap exclusion areas are scoped to the page/column container where the floating object was placed; they are cleared
   when the body flow moves to the next column or page, so text on later pages does not wrap around an object from an earlier page.
-- Floating objects embedded in a table cell or in a header/footer are treated as ordinary blocks and a diagnostic is recorded.
+- Floating objects inside a table cell or header/footer are positioned relative to that frame, with frame-local square-wrap exclusion
+  areas; cell paragraphs are re-broken line by line around them. An object overflowing its cell records a `DiagnosticCode::Geometry` warning.
 
 ## 6. Style resolution
 

@@ -253,32 +253,50 @@ fn square_wrap_releases_lines_below_the_object() {
 }
 
 #[test]
-fn floating_object_in_table_cell_falls_back_to_inline() {
+fn floating_object_inside_table_cell_wraps_text() {
     let Some(mut fonts) = fonts() else {
         return;
     };
     let mut flow = FlowDocument::new(Metadata::default());
-    let image = image_block(&mut flow);
-    let floating = FloatingObject::new(Point::new(10.0, 10.0), image);
+    let mut image = image_block(&mut flow);
+    if let Block::Image(block) = &mut image {
+        block.size = Some((Twips::from_mm(20.0), Twips::from_mm(20.0)));
+    }
+    let mut floating = FloatingObject::new(Point::new(0.0, 0.0), image);
+    floating.width = Some(Twips::from_mm(20.0));
+    floating.wrap = WrapMode::Square;
     let mut table = ofdbox_folio_ir::Table::new(vec![ofdbox_folio_ir::Column {
-        width: ofdbox_folio_ir::ColumnWidth::Twips(Twips::from_mm(60.0)),
+        width: ofdbox_folio_ir::ColumnWidth::Twips(Twips::from_mm(70.0)),
     }]);
     table.rows = vec![ofdbox_folio_ir::Row::new(vec![ofdbox_folio_ir::Cell::new(
-        vec![Block::Floating(Box::new(floating))],
+        vec![
+            Block::Floating(Box::new(floating)),
+            Block::Paragraph(paragraph(
+                "Cell text should wrap around the floating image inside the table cell.",
+            )),
+        ],
     )])];
     flow.push(Block::Table(table));
 
     let fixed = layout(&flow, &mut fonts).expect("layout");
     assert!(
-        fixed
+        !fixed
             .report
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("floating object nested in")),
-        "diagnostics: {:?}",
+            .any(|diagnostic| diagnostic.message.contains("nested in")),
+        "cell floats should no longer fall back to inline: {:?}",
         fixed.report.diagnostics
     );
-    assert!(!fixed.pages.is_empty());
+    let page = &fixed.pages[0];
+    let (image_x, _, image_w, _) = image_rect(page);
+    let first = page.text.lines.first().expect("cell line");
+    assert!(
+        first.bbox.x >= image_x + image_w - 1.0,
+        "cell text should wrap to the right of the image: line_x={} image_right={}",
+        first.bbox.x,
+        image_x + image_w
+    );
 }
 
 #[test]

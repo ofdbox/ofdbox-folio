@@ -512,6 +512,12 @@ struct Engine<'a> {
     placed_float_rects: Vec<(f64, f64, f64, f64)>,
     /// Whether an overlap diagnostic was already recorded for this container.
     float_overlap_reported: bool,
+    /// Square-wrap exclusion areas inside the current frame (table cell/header).
+    frame_exclusions: Vec<FloatExclusion>,
+    /// First scene element of the current frame, used for behind z-order.
+    frame_element_start: usize,
+    /// Bottom of floating objects placed inside the current frame.
+    frame_float_bottom: f64,
     /// Index of the first body element in `page.scene.children` (after the header).
     body_element_start: usize,
     headings: Vec<(u8, String, usize, f64)>,
@@ -573,6 +579,9 @@ impl<'a> Engine<'a> {
             front_elements: Vec::new(),
             placed_float_rects: Vec::new(),
             float_overlap_reported: false,
+            frame_exclusions: Vec::new(),
+            frame_element_start: 0,
+            frame_float_bottom: 0.0,
             body_element_start: 0,
             headings: Vec::new(),
             missing_chars: 0,
@@ -1187,6 +1196,9 @@ impl<'a> Engine<'a> {
         }
         let width = self.page_frame().width;
         let saved = (self.frame, self.cursor, self.in_frame);
+        let saved_exclusions = std::mem::take(&mut self.frame_exclusions);
+        let saved_element_start = self.frame_element_start;
+        let saved_float_bottom = self.frame_float_bottom;
         self.in_frame = true;
         self.frame = Frame {
             left: self.margins.left,
@@ -1195,6 +1207,8 @@ impl<'a> Engine<'a> {
             bottom: self.margins.top,
         };
         self.cursor = self.header_distance;
+        self.frame_element_start = self.page.scene.children.len();
+        self.frame_float_bottom = self.cursor;
         for block in &blocks {
             self.place_block(block);
         }
@@ -1204,6 +1218,9 @@ impl<'a> Engine<'a> {
         self.frame = saved.0;
         self.cursor = saved.1;
         self.in_frame = saved.2;
+        self.frame_exclusions = saved_exclusions;
+        self.frame_element_start = saved_element_start;
+        self.frame_float_bottom = saved_float_bottom;
     }
 
     /// Lay out the footer and return the top y it occupies (the body bottom edge
@@ -1225,6 +1242,9 @@ impl<'a> Engine<'a> {
         let bottom = (self.page_height - self.footer_distance).max(self.margins.bottom);
         let top = (bottom - height).max(0.0);
         let saved = (self.frame, self.cursor, self.in_frame);
+        let saved_exclusions = std::mem::take(&mut self.frame_exclusions);
+        let saved_element_start = self.frame_element_start;
+        let saved_float_bottom = self.frame_float_bottom;
         self.in_frame = true;
         self.frame = Frame {
             left: self.margins.left,
@@ -1233,12 +1253,17 @@ impl<'a> Engine<'a> {
             bottom,
         };
         self.cursor = top;
+        self.frame_element_start = self.page.scene.children.len();
+        self.frame_float_bottom = self.cursor;
         for block in &blocks {
             self.place_block(block);
         }
         self.frame = saved.0;
         self.cursor = saved.1;
         self.in_frame = saved.2;
+        self.frame_exclusions = saved_exclusions;
+        self.frame_element_start = saved_element_start;
+        self.frame_float_bottom = saved_float_bottom;
         top
     }
 
@@ -1251,8 +1276,7 @@ impl<'a> Engine<'a> {
     /// the plan is recorded again.
     fn place_floating(&mut self, floating: &ofdbox_folio_ir::FloatingObject) {
         if self.in_frame {
-            self.warn("floating object nested in a table/header; treated as normal content");
-            self.place_block(&floating.block);
+            self.place_floating_in_frame(floating);
             return;
         }
         let index = self.float_seen;
@@ -1320,6 +1344,75 @@ impl<'a> Engine<'a> {
                 });
             }
         }
+    }
+
+    /// Place a floating object inside a table cell or header/footer frame.
+    fn place_floating_in_frame(&mut self, floating: &ofdbox_folio_ir::FloatingObject) {
+        let frame = self.frame;
+        let width = floating
+            .width
+            .map(|width| width.to_mm())
+            .unwrap_or(frame.width)
+            .clamp(1.0, frame.width);
+        let (from_h, from_v) = floating.position_from;
+        let origin_x = match from_h {
+            ofdbox_folio_ir::PositionFrom::Page => 0.0,
+            _ => frame.left,
+        };
+        let origin_y = match from_v {
+            ofdbox_folio_ir::PositionFrom::Page => 0.0,
+            ofdbox_folio_ir::PositionFrom::Paragraph => self.cursor,
+            _ => frame.top,
+        };
+        let x = (origin_x + floating.position.x).clamp(
+            frame.left,
+            (frame.left + frame.width - width).max(frame.left),
+        );
+        let y = (origin_y + floating.position.y).max(frame.top);
+        let saved = (self.frame, self.cursor, self.in_frame);
+        self.in_frame = true;
+        self.frame = Frame {
+            left: x,
+            width,
+            top: y,
+            bottom: f64::MAX,
+        };
+        self.cursor = y;
+        let first_element = self.page.scene.children.len();
+        self.place_block(&floating.block);
+        let bottom = self.cursor;
+        self.frame = saved.0;
+        self.cursor = saved.1;
+        self.in_frame = saved.2;
+        if bottom > frame.bottom + 1e-6 {
+            self.diagnostic(
+                DiagnosticCode::Geometry,
+                "floating object inside a table cell/header overflows the cell",
+            );
+        }
+        if floating.behind_text {
+            let children = &mut self.page.scene.children;
+            let elements: Vec<_> = children.drain(first_element..).collect();
+            let insert_at = self.frame_element_start.min(children.len());
+            children.splice(insert_at..insert_at, elements);
+        }
+        match floating.wrap {
+            ofdbox_folio_ir::WrapMode::TopBottom => {
+                if bottom > self.cursor {
+                    self.cursor = bottom;
+                }
+            }
+            ofdbox_folio_ir::WrapMode::Square => {
+                self.frame_exclusions.push(FloatExclusion {
+                    top: y,
+                    bottom,
+                    left: x,
+                    right: x + width,
+                });
+            }
+            _ => {}
+        }
+        self.frame_float_bottom = self.frame_float_bottom.max(bottom);
     }
 
     /// Place a floating object, deferring it to the next page when it does not
@@ -1603,18 +1696,23 @@ impl<'a> Engine<'a> {
     /// of the page the paragraph shifts right, if it is on the right half the
     /// right margin shrinks.
     fn floating_insets(&self, top: f64, bottom: f64) -> (f64, f64) {
-        let page = self.page_frame();
+        let (container_left, container_width, exclusions) = if self.in_frame {
+            (self.frame.left, self.frame.width, &self.frame_exclusions)
+        } else {
+            let page = self.page_frame();
+            (page.left, page.width, &self.float_exclusions)
+        };
         let mut left = 0.0_f64;
         let mut right = 0.0_f64;
-        for exclusion in &self.float_exclusions {
+        for exclusion in exclusions {
             if exclusion.bottom <= top || exclusion.top >= bottom {
                 continue;
             }
-            let middle = page.left + page.width / 2.0;
+            let middle = container_left + container_width / 2.0;
             if exclusion.left + exclusion.right < 2.0 * middle {
-                left = left.max(exclusion.right - page.left);
+                left = left.max(exclusion.right - container_left);
             } else {
-                right = right.max(page.left + page.width - exclusion.left);
+                right = right.max(container_left + container_width - exclusion.left);
             }
         }
         (left, right)
@@ -1901,6 +1999,9 @@ impl<'a> Engine<'a> {
         let saved_notes = self.page_notes.len();
         let saved_inset = self.bottom_inset;
         let saved_exclusions = self.float_exclusions.len();
+        let saved_frame_exclusions = std::mem::take(&mut self.frame_exclusions);
+        let saved_element_start = self.frame_element_start;
+        let saved_float_bottom = self.frame_float_bottom;
         self.in_frame = true;
         self.frame = Frame {
             left: 0.0,
@@ -1909,6 +2010,8 @@ impl<'a> Engine<'a> {
             bottom: f64::MAX,
         };
         self.cursor = 0.0;
+        self.frame_element_start = 0;
+        self.frame_float_bottom = 0.0;
         for block in blocks {
             self.place_block(block);
         }
@@ -1921,6 +2024,9 @@ impl<'a> Engine<'a> {
         self.page_notes.truncate(saved_notes);
         self.bottom_inset = saved_inset;
         self.float_exclusions.truncate(saved_exclusions);
+        self.frame_exclusions = saved_frame_exclusions;
+        self.frame_element_start = saved_element_start;
+        self.frame_float_bottom = saved_float_bottom;
         height
     }
 
@@ -2154,9 +2260,22 @@ impl<'a> Engine<'a> {
         let saved_frame = self.frame;
         let saved_cursor = self.cursor;
         let saved_in_frame = self.in_frame;
+        let saved_exclusions = std::mem::take(&mut self.frame_exclusions);
+        let saved_element_start = self.frame_element_start;
+        let saved_float_bottom = self.frame_float_bottom;
         self.frame = frame;
         self.cursor = top;
         self.in_frame = true;
+        self.frame_element_start = self.page.scene.children.len();
+        self.frame_float_bottom = top;
+
+        if resume.is_none() {
+            for block in &cell.blocks {
+                if let Block::Floating(floating) = block {
+                    self.place_floating_in_frame(floating);
+                }
+            }
+        }
 
         let mut block_index = resume.map(|item| item.block).unwrap_or(0);
         let mut line = resume.map(|item| item.line).unwrap_or(0);
@@ -2164,28 +2283,56 @@ impl<'a> Engine<'a> {
         let mut continuation = None;
         while block_index < cell.blocks.len() {
             match &cell.blocks[block_index] {
+                Block::Floating(_) => {
+                    block_index += 1;
+                    line = 0;
+                }
                 Block::Paragraph(paragraph) => {
                     // Only the first continued block needs `force`; later blocks
                     // are left for the next page when they do not fit.
                     let force_this = force && block_index == resume.map_or(0, |item| item.block);
-                    let (next, total) =
-                        self.place_paragraph_bounded(paragraph, line, frame.bottom, force_this);
-                    placed_any |= next > line;
-                    if next < total {
-                        continuation = Some(CellContinuation {
-                            block: block_index,
-                            line: next,
-                        });
-                        break;
+                    let wrapped = !self.frame_exclusions.is_empty()
+                        || resume.is_some_and(|item| item.wrapped);
+                    if wrapped {
+                        let (next, total, placed) = self.place_paragraph_bounded_wrapped(
+                            paragraph,
+                            line,
+                            frame.bottom,
+                            force_this,
+                        );
+                        placed_any |= placed;
+                        if next < total {
+                            continuation = Some(CellContinuation {
+                                block: block_index,
+                                line: next,
+                                wrapped: true,
+                            });
+                            break;
+                        }
+                        block_index += 1;
+                        line = 0;
+                    } else {
+                        let (next, total) =
+                            self.place_paragraph_bounded(paragraph, line, frame.bottom, force_this);
+                        placed_any |= next > line;
+                        if next < total {
+                            continuation = Some(CellContinuation {
+                                block: block_index,
+                                line: next,
+                                wrapped: false,
+                            });
+                            break;
+                        }
+                        block_index += 1;
+                        line = 0;
                     }
-                    block_index += 1;
-                    line = 0;
                 }
                 block => {
                     if self.cursor > frame.bottom + 1e-6 && placed_any {
                         continuation = Some(CellContinuation {
                             block: block_index,
                             line: 0,
+                            wrapped: false,
                         });
                         break;
                     }
@@ -2198,10 +2345,13 @@ impl<'a> Engine<'a> {
             }
         }
 
-        let bottom = self.cursor;
+        let bottom = self.cursor.max(self.frame_float_bottom);
         self.frame = saved_frame;
         self.cursor = saved_cursor;
         self.in_frame = saved_in_frame;
+        self.frame_exclusions = saved_exclusions;
+        self.frame_element_start = saved_element_start;
+        self.frame_float_bottom = saved_float_bottom;
         CellOutcome {
             bottom,
             continuation,
@@ -2588,6 +2738,87 @@ impl<'a> Engine<'a> {
             self.cursor += style.space_after.to_mm().max(0.0);
         }
         (index, line_count)
+    }
+
+    /// Lay out a cell/header paragraph with frame-local floating exclusions.
+    ///
+    /// Uses a piece index as the continuation position so a paragraph split
+    /// across row fragments resumes at the right character.
+    fn place_paragraph_bounded_wrapped(
+        &mut self,
+        paragraph: &Paragraph,
+        start_piece: usize,
+        limit: f64,
+        force: bool,
+    ) -> (usize, usize, bool) {
+        let LaidParagraph {
+            style,
+            pieces,
+            links,
+            images,
+            lines: _,
+            inset_left: _,
+        } = self.lay_out_paragraph(paragraph, self.total_pages);
+        let total = pieces.len();
+        if start_piece == 0 {
+            self.advance_space(style.space_before);
+        }
+        let mut from = start_piece;
+        let mut placed = false;
+        while from < total {
+            let estimate = self.max_size(
+                &pieces,
+                &LineSpan {
+                    start: from,
+                    end: (from + 1).min(total),
+                },
+            ) * 1.2;
+            let (left, right) = self.floating_insets(self.cursor, self.cursor + estimate);
+            let indent_left = style.left_indent.to_mm().max(0.0) + left;
+            let indent_right = style.right_indent.to_mm().max(0.0) + right;
+            let width = (self.frame.width - indent_left - indent_right).max(1.0);
+            let first_indent = if from == 0 {
+                style.first_line_indent.to_mm()
+            } else {
+                0.0
+            };
+            let first_width = (width - first_indent).max(1.0);
+            let lines = linebreak::break_lines(&pieces[from..], first_width, width);
+            let Some(relative) = lines.first() else {
+                break;
+            };
+            let span = LineSpan {
+                start: from + relative.start,
+                end: from + relative.end,
+            };
+            if span.end <= from {
+                break;
+            }
+            let line_box = self.line_box(&style, &pieces, &images, &span);
+            let fits = self.cursor + line_box.height <= limit + 1e-6;
+            if !fits && !(force && from == start_piece) {
+                break;
+            }
+            let baseline = self.cursor + line_box.ascent;
+            self.emit_line(
+                &style,
+                &pieces,
+                &span,
+                from == 0,
+                span.end >= total,
+                baseline,
+                &links,
+                &images,
+                left,
+            );
+            self.cursor += line_box.height;
+            from = span.end;
+            placed = true;
+        }
+        if from >= total {
+            self.cursor += style.space_after.to_mm().max(0.0);
+        }
+        (from, total, placed)
     }
 
     /// Height of one line: single spacing is computed from the font's
@@ -3529,8 +3760,11 @@ struct LaidParagraph {
 struct CellContinuation {
     /// Index of the next block not yet laid out.
     block: usize,
-    /// When that block is a paragraph, the number of lines already laid out.
+    /// When that block is a paragraph, the number of lines already laid out
+    /// (or pieces, when the paragraph is laid out with local wrapping).
     line: usize,
+    /// Whether `line` is a piece index from a wrapped paragraph.
+    wrapped: bool,
 }
 
 /// Layout result of one row (or a fragment of one).
