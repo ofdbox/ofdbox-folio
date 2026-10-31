@@ -463,6 +463,7 @@ impl CpuRenderer {
         parent: Matrix,
     ) -> Result<(), RenderError> {
         let path = to_bez_path(&element.path);
+        let transform = element.transform.then(parent);
         if let Some(paint) = &element.fill {
             if let Paint::RadialGradient(radial) = paint
                 && let Some(ellipse) = ellipse_transform(radial)
@@ -470,21 +471,22 @@ impl CpuRenderer {
             {
                 let mut ellipse_path = path.clone();
                 ellipse_path.apply_affine(affine(inverse));
-                context.set_transform(affine(ellipse.then(parent)));
+                context.set_transform(affine(ellipse.then(transform)));
                 context.set_fill_rule(rule(element.rule));
                 context.set_paint(Brush::Gradient(gradient_radial_transformed(
                     radial, inverse,
                 )));
                 context.fill_path(&ellipse_path);
-                context.set_transform(affine(parent));
+                context.set_transform(affine(transform));
             } else {
+                context.set_transform(affine(transform));
                 context.set_fill_rule(rule(element.rule));
                 context.set_paint(brush(paint));
                 context.fill_path(&path);
             }
         }
         if let Some(stroke) = &element.stroke {
-            context.set_transform(affine(parent));
+            context.set_transform(affine(transform));
             context.set_paint(brush(&stroke.paint));
             context.set_stroke(kurbo_stroke(&stroke.style));
             context.stroke_path(&path);
@@ -1074,6 +1076,49 @@ mod tests {
             .expect("render before");
         let (compacted, stats) = scene.compact();
         assert_eq!(stats.after, 1);
+        let mut after = RasterTarget::from_size(scene.size, 96.0).expect("after");
+        renderer
+            .render_scene(&compacted, &mut after)
+            .expect("render after");
+        assert_eq!(before.data(), after.data());
+    }
+
+    #[test]
+    fn compacted_nested_transforms_render_identically() {
+        let mut path = Path::new();
+        path.move_to(Point::new(0.0, 0.0));
+        path.line_to(Point::new(5.0, 0.0));
+        path.line_to(Point::new(5.0, 5.0));
+        path.line_to(Point::new(0.0, 5.0));
+        path.close();
+        let scene = Scene {
+            size: Size::new(40.0, 40.0),
+            root: Group {
+                children: vec![Element::Group(Group {
+                    transform: Matrix::translate(10.0, 10.0),
+                    children: vec![Element::Group(Group {
+                        transform: Matrix::scale(2.0, 2.0),
+                        children: vec![Element::Path(PathElement {
+                            path: Arc::new(path),
+                            transform: Matrix::IDENTITY,
+                            fill: Some(Paint::Color(Rgba::from_rgb(20, 120, 220))),
+                            stroke: None,
+                            rule: FillRule::NonZero,
+                        })],
+                        ..Group::default()
+                    })],
+                    ..Group::default()
+                })],
+                ..Group::default()
+            },
+            diagnostics: Vec::new(),
+        };
+        let mut renderer = CpuRenderer::new(RenderOptions::default());
+        let mut before = RasterTarget::from_size(scene.size, 96.0).expect("before");
+        renderer
+            .render_scene(&scene, &mut before)
+            .expect("render before");
+        let (compacted, _stats) = scene.compact();
         let mut after = RasterTarget::from_size(scene.size, 96.0).expect("after");
         renderer
             .render_scene(&compacted, &mut after)
