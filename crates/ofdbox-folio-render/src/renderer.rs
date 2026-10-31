@@ -1031,6 +1031,57 @@ mod tests {
     }
 
     #[test]
+    fn compacted_disjoint_paths_render_identically() {
+        let mut first_path = Path::new();
+        first_path.move_to(Point::new(0.0, 0.0));
+        first_path.line_to(Point::new(4.0, 0.0));
+        first_path.line_to(Point::new(4.0, 4.0));
+        first_path.line_to(Point::new(0.0, 4.0));
+        first_path.close();
+        let mut second_path = Path::new();
+        second_path.move_to(Point::new(10.0, 0.0));
+        second_path.line_to(Point::new(14.0, 0.0));
+        second_path.line_to(Point::new(14.0, 4.0));
+        second_path.line_to(Point::new(10.0, 4.0));
+        second_path.close();
+        let scene = Scene {
+            size: Size::new(20.0, 20.0),
+            root: Group {
+                children: vec![
+                    Element::Path(PathElement {
+                        path: Arc::new(first_path),
+                        transform: Matrix::IDENTITY,
+                        fill: Some(Paint::Color(Rgba::from_rgb(20, 120, 220))),
+                        stroke: None,
+                        rule: FillRule::NonZero,
+                    }),
+                    Element::Path(PathElement {
+                        path: Arc::new(second_path),
+                        transform: Matrix::IDENTITY,
+                        fill: Some(Paint::Color(Rgba::from_rgb(20, 120, 220))),
+                        stroke: None,
+                        rule: FillRule::NonZero,
+                    }),
+                ],
+                ..Group::default()
+            },
+            diagnostics: Vec::new(),
+        };
+        let mut renderer = CpuRenderer::new(RenderOptions::default());
+        let mut before = RasterTarget::from_size(scene.size, 96.0).expect("before");
+        renderer
+            .render_scene(&scene, &mut before)
+            .expect("render before");
+        let (compacted, stats) = scene.compact();
+        assert_eq!(stats.after, 1);
+        let mut after = RasterTarget::from_size(scene.size, 96.0).expect("after");
+        renderer
+            .render_scene(&compacted, &mut after)
+            .expect("render after");
+        assert_eq!(before.data(), after.data());
+    }
+
+    #[test]
     fn renders_solid_path_pixels() {
         let mut path = Path::new();
         path.move_to(Point::new(0.0, 0.0));
