@@ -35,6 +35,46 @@ pub struct RasterTarget {
     data: Vec<u8>,
 }
 
+/// A rectangle in whole-page device pixel coordinates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PixelRect {
+    /// Left edge.
+    pub x: u32,
+    /// Top edge.
+    pub y: u32,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+}
+
+impl PixelRect {
+    /// Creates a pixel rectangle.
+    pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// Right edge (exclusive).
+    pub const fn right(self) -> u32 {
+        self.x.saturating_add(self.width)
+    }
+
+    /// Bottom edge (exclusive).
+    pub const fn bottom(self) -> u32 {
+        self.y.saturating_add(self.height)
+    }
+
+    /// Whether the rectangle has no area.
+    pub const fn is_empty(self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+}
+
 /// Raster parameters for a region within a page.
 ///
 /// After the display core splits a page into tiles it calls
@@ -125,6 +165,32 @@ impl RasterTarget {
     /// Takes out the pixel data.
     pub fn into_data(self) -> Vec<u8> {
         self.data
+    }
+
+    /// Copies a sub-rectangle of this target into a new target.
+    ///
+    /// The rectangle is in this target's pixel coordinates and must be fully
+    /// inside it.
+    pub fn crop(&self, rect: PixelRect) -> Result<Self, RenderError> {
+        if rect.is_empty()
+            || rect.right() > u32::from(self.width)
+            || rect.bottom() > u32::from(self.height)
+        {
+            return Err(RenderError::InvalidRegion);
+        }
+        let mut target = Self::from_pixels(rect.width, rect.height, self.dpi)?;
+        let source_stride = usize::from(self.width) * 4;
+        let dest_stride = usize::try_from(rect.width).unwrap_or(0) * 4;
+        let row_bytes = dest_stride;
+        for row in 0..usize::try_from(rect.height).unwrap_or(0) {
+            let source_start = usize::try_from(rect.y).unwrap_or(0) + row;
+            let source_index =
+                source_start * source_stride + usize::try_from(rect.x).unwrap_or(0) * 4;
+            let dest_index = row * dest_stride;
+            target.data[dest_index..dest_index + row_bytes]
+                .copy_from_slice(&self.data[source_index..source_index + row_bytes]);
+        }
+        Ok(target)
     }
 }
 
@@ -249,6 +315,44 @@ impl CpuRenderer {
     ) -> Result<(), RenderError> {
         let device = Matrix::scale(target.dpi / 25.4, target.dpi / 25.4);
         self.render_scene_with(scene, target, device)
+    }
+
+    /// Renders a union rectangle of a scene once, for later cropping.
+    ///
+    /// `rect` is expressed in whole-page device pixels; the scene is traversed
+    /// once and rasterized into the returned target. Callers can then use
+    /// [`RasterTarget::crop`] to cut individual tiles out of it.
+    pub fn render_union(
+        &mut self,
+        scene: &Scene,
+        dpi: f64,
+        rect: PixelRect,
+    ) -> Result<RasterTarget, RenderError> {
+        if !(dpi.is_finite() && dpi > 0.0) || rect.is_empty() {
+            return Err(RenderError::InvalidRegion);
+        }
+        let device_width = (scene.size.width * dpi / 25.4).ceil().max(1.0);
+        let device_height = (scene.size.height * dpi / 25.4).ceil().max(1.0);
+        if f64::from(rect.x) >= device_width || f64::from(rect.y) >= device_height {
+            return Err(RenderError::InvalidRegion);
+        }
+        let width = rect
+            .width
+            .min((device_width - f64::from(rect.x)).max(0.0).ceil() as u32);
+        let height = rect
+            .height
+            .min((device_height - f64::from(rect.y)).max(0.0).ceil() as u32);
+        if width == 0 || height == 0 {
+            return Err(RenderError::InvalidRegion);
+        }
+        let clipped = PixelRect::new(rect.x, rect.y, width, height);
+        let mut target = RasterTarget::from_pixels(clipped.width, clipped.height, dpi)?;
+        self.render_scene_region(
+            scene,
+            &mut target,
+            RenderRegion::new((f64::from(clipped.x), f64::from(clipped.y)), dpi),
+        )?;
+        Ok(target)
     }
 
     /// Renders the given region of a scene into the target.
@@ -695,7 +799,7 @@ fn to_bez_path(path: &Path) -> BezPath {
 
 #[cfg(test)]
 mod tests {
-    use super::{CpuRenderer, PixmapCache, RasterTarget};
+    use super::{CpuRenderer, PixelRect, PixmapCache, RasterTarget};
     use crate::options::RenderOptions;
     use ofdbox_folio_ir::{
         DiagnosticCode, Element, FillRule, Group, ImageAsset, ImageElement, ImageFormat, Matrix,
@@ -882,6 +986,48 @@ mod tests {
             .render_scene_region(&scene, &mut tile, RenderRegion::new((60.0, 60.0), 96.0))
             .expect("region render");
         assert_eq!(&tile.data()[..4], [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn union_crop_matches_direct_region_render() {
+        use super::RenderRegion;
+
+        let mut path = Path::new();
+        path.move_to(Point::new(2.0, 3.0));
+        path.line_to(Point::new(18.0, 3.0));
+        path.line_to(Point::new(18.0, 17.0));
+        path.line_to(Point::new(2.0, 17.0));
+        path.close();
+        let scene = Scene {
+            size: Size::new(20.0, 20.0),
+            root: Group {
+                children: vec![Element::Path(PathElement {
+                    path: Arc::new(path),
+                    transform: Matrix::IDENTITY,
+                    fill: Some(Paint::Color(Rgba::from_rgb(20, 120, 220))),
+                    stroke: None,
+                    rule: FillRule::NonZero,
+                })],
+                ..Group::default()
+            },
+            diagnostics: Vec::new(),
+        };
+        let mut renderer = CpuRenderer::new(RenderOptions::default());
+        let union = renderer
+            .render_union(&scene, 96.0, PixelRect::new(5, 5, 50, 50))
+            .expect("union render");
+
+        let mut direct = RasterTarget::from_pixels(20, 15, 96.0).expect("direct");
+        renderer
+            .render_scene_region(&scene, &mut direct, RenderRegion::new((20.0, 25.0), 96.0))
+            .expect("direct region");
+
+        let cropped = union.crop(PixelRect::new(15, 20, 20, 15)).expect("crop");
+        assert_eq!(cropped.data(), direct.data());
+        assert!(matches!(
+            union.crop(PixelRect::new(49, 5, 2, 2)),
+            Err(crate::RenderError::InvalidRegion)
+        ));
     }
 
     #[test]

@@ -19,6 +19,9 @@ pub enum RenderError {
     /// Invalid page size.
     #[error("invalid page size")]
     InvalidPage,
+    /// Invalid render region.
+    #[error("invalid render region")]
+    InvalidRegion,
     /// Backend execution failed.
     #[error("render backend error: {0}")]
     Backend(String),
