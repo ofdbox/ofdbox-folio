@@ -24,6 +24,18 @@ pub(crate) enum MarkerFormat {
     None,
 }
 
+/// When a numbering level restarts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RestartRule {
+    /// Restart when any higher level is used (Word default).
+    #[default]
+    Default,
+    /// Never restart automatically.
+    Never,
+    /// Restart only when a level at or above this zero-based level is used.
+    At(u8),
+}
+
 /// Definition of one numbering level.
 #[derive(Clone, Debug)]
 pub(crate) struct Level {
@@ -37,6 +49,8 @@ pub(crate) struct Level {
     pub left: Option<i64>,
     /// Hanging indent (twip).
     pub hanging: Option<i64>,
+    /// When this level restarts.
+    pub restart: RestartRule,
 }
 
 /// Per-level numbering definitions.
@@ -60,9 +74,23 @@ impl Counters {
         if definition.format == MarkerFormat::None {
             return None;
         }
-        // When returning to a level, deeper levels restart their count.
-        self.values
-            .retain(|(id, ilvl), _| !(*id == num_id && *ilvl > level));
+        // When returning to a level, deeper levels restart according to their
+        // `lvlRestart` rules.
+        self.values.retain(|(id, ilvl), _| {
+            if *id != num_id || *ilvl <= level {
+                return true;
+            }
+            match numbering
+                .levels
+                .get(&(num_id, *ilvl))
+                .map(|definition| definition.restart)
+                .unwrap_or_default()
+            {
+                RestartRule::Default => false,
+                RestartRule::Never => true,
+                RestartRule::At(threshold) => level > threshold,
+            }
+        });
         let entry = self
             .values
             .entry((num_id, level))
@@ -253,6 +281,7 @@ fn parse_level(reader: &mut XmlReader<'_>) -> Option<Level> {
         start: 1,
         left: None,
         hanging: None,
+        restart: RestartRule::Default,
     };
     loop {
         match reader.read_event().ok()? {
@@ -279,6 +308,12 @@ fn parse_level(reader: &mut XmlReader<'_>) -> Option<Level> {
                         };
                     }
                     "lvlText" => definition.text = attr(&element, "val").unwrap_or_default(),
+                    "lvlRestart" => {
+                        definition.restart = match attr_u32(&element, "val") {
+                            Some(0) | None => RestartRule::Never,
+                            Some(value) => RestartRule::At(value.saturating_sub(1) as u8),
+                        };
+                    }
                     _ => {}
                 }
             }
@@ -527,5 +562,59 @@ mod multi_level_tests {
         let numbering = Numbering::parse(xml);
         let mut counters = Counters::default();
         assert_eq!(counters.next(&numbering, 1, 0), Some("(II)".to_owned()));
+    }
+
+    #[test]
+    fn lvl_restart_zero_never_resets_deeper_levels() {
+        let xml = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:abstractNum w:abstractNumId="0">
+                <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+                <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/></w:lvl>
+                <w:lvl w:ilvl="2"><w:start w:val="1"/><w:lvlRestart w:val="0"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%3."/></w:lvl>
+            </w:abstractNum>
+            <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+        </w:numbering>"#;
+        let numbering = Numbering::parse(xml);
+        let mut counters = Counters::default();
+        assert_eq!(counters.next(&numbering, 1, 0), Some("1.".to_owned()));
+        assert_eq!(counters.next(&numbering, 1, 1), Some("1.".to_owned()));
+        assert_eq!(counters.next(&numbering, 1, 2), Some("1.".to_owned()));
+        assert_eq!(counters.next(&numbering, 1, 0), Some("2.".to_owned()));
+        assert_eq!(counters.next(&numbering, 1, 1), Some("1.".to_owned()));
+        assert_eq!(
+            counters.next(&numbering, 1, 2),
+            Some("2.".to_owned()),
+            "lvlRestart=0 should keep the level-2 counter across level-0 restarts"
+        );
+    }
+
+    #[test]
+    fn lvl_restart_at_parent_only_keeps_intermediate_levels() {
+        let xml = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:abstractNum w:abstractNumId="0">
+                <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+                <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/></w:lvl>
+                <w:lvl w:ilvl="2"><w:start w:val="1"/><w:lvlRestart w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%3."/></w:lvl>
+            </w:abstractNum>
+            <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+        </w:numbering>"#;
+        let numbering = Numbering::parse(xml);
+        let mut counters = Counters::default();
+        assert_eq!(counters.next(&numbering, 1, 0), Some("1.".to_owned()));
+        assert_eq!(counters.next(&numbering, 1, 1), Some("1.".to_owned()));
+        assert_eq!(counters.next(&numbering, 1, 2), Some("1.".to_owned()));
+        assert_eq!(counters.next(&numbering, 1, 1), Some("2.".to_owned()));
+        assert_eq!(
+            counters.next(&numbering, 1, 2),
+            Some("2.".to_owned()),
+            "lvlRestart=1 should not reset level 2 when only level 1 increments"
+        );
+        assert_eq!(counters.next(&numbering, 1, 0), Some("2.".to_owned()));
+        assert_eq!(counters.next(&numbering, 1, 1), Some("1.".to_owned()));
+        assert_eq!(
+            counters.next(&numbering, 1, 2),
+            Some("1.".to_owned()),
+            "level 2 should reset when level 0 increments"
+        );
     }
 }
