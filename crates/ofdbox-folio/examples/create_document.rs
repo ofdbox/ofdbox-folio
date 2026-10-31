@@ -181,6 +181,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         cells: vec![cell("列一"), cell("列二"), cell("列三")],
         height: None,
         is_header: true,
+        ..Row::new(Vec::new())
     };
     let data = Row::new(vec![cell("R1C0"), cell("第二列的内容"), cell("R1C2")]);
     table.rows = vec![

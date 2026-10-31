@@ -7,8 +7,8 @@ use ofdbox_folio_ir::{
     Align, AnchorId, AssetId, Attachment, AttachmentId, AttachmentInfo, Block, Cell, Column,
     ColumnWidth, Diagnostic, DiagnosticCode, Field, FieldKind, FloatingObject, FlowDocument,
     HeaderFooter, ImageAsset, ImageBlock, Inline, InlineImage, Link, LinkTarget, Metadata, Note,
-    NoteKind, NoteRef, Paragraph, Point, Row, Section, Table, TextRun, TextStyle, TocBlock, Twips,
-    VMerge, WrapMode, detect_image_format, image_dimensions,
+    NoteKind, NoteRef, Paragraph, Point, Row, RowHeightRule, Section, Table, TextRun, TextStyle,
+    TocBlock, Twips, VMerge, WrapMode, detect_image_format, image_dimensions,
 };
 
 use crate::DocxError;
@@ -845,13 +845,17 @@ impl<'a> Builder<'a> {
         let mut cells = Vec::new();
         let mut is_header = false;
         let mut height = None;
+        let mut height_rule = RowHeightRule::AtLeast;
+        let mut cant_split = false;
         loop {
             match reader.read_event().map_err(crate::xml::xml_error)? {
                 quick_xml::events::Event::Start(element) => match local_name(&element).as_str() {
                     "trPr" => {
-                        let (header, row_height) = parse_row_props(reader)?;
-                        is_header = header;
-                        height = row_height;
+                        let props = parse_row_props(reader)?;
+                        is_header = props.header;
+                        height = props.height;
+                        height_rule = props.height_rule;
+                        cant_split = props.cant_split;
                     }
                     "tc" => {
                         if let Some(cell) = self.parse_cell(reader)? {
@@ -868,6 +872,8 @@ impl<'a> Builder<'a> {
         let mut row = Row::new(cells);
         row.is_header = is_header;
         row.height = height;
+        row.height_rule = height_rule;
+        row.cant_split = cant_split;
         Ok(row)
     }
 
@@ -1311,19 +1317,37 @@ fn is_toc_gallery(gallery: &str) -> bool {
     lower.contains("table of contents") || gallery.contains("目录")
 }
 
+/// Parsed row properties (`w:trPr`).
+struct RowProps {
+    header: bool,
+    height: Option<Twips>,
+    height_rule: RowHeightRule,
+    cant_split: bool,
+}
+
 /// Row properties (`w:trPr`).
-fn parse_row_props(reader: &mut XmlReader<'_>) -> Result<(bool, Option<Twips>), DocxError> {
-    let mut header = false;
-    let mut height = None;
+fn parse_row_props(reader: &mut XmlReader<'_>) -> Result<RowProps, DocxError> {
+    let mut props = RowProps {
+        header: false,
+        height: None,
+        height_rule: RowHeightRule::AtLeast,
+        cant_split: false,
+    };
     loop {
         match reader.read_event().map_err(crate::xml::xml_error)? {
             quick_xml::events::Event::Start(element) => skip_element(reader, &element)?,
             quick_xml::events::Event::Empty(element) => match local_name(&element).as_str() {
-                "tblHeader" => header = crate::xml::attr_on_off(&element).unwrap_or(true),
+                "tblHeader" => props.header = crate::xml::attr_on_off(&element).unwrap_or(true),
+                "cantSplit" => props.cant_split = crate::xml::attr_on_off(&element).unwrap_or(true),
                 "trHeight" => {
                     if let Some(value) = attr_i32(&element, "val") {
-                        height = Some(Twips::new(i64::from(value)));
+                        props.height = Some(Twips::new(i64::from(value)));
                     }
+                    props.height_rule = match attr(&element, "hRule").as_deref() {
+                        Some("exact") => RowHeightRule::Exact,
+                        Some("auto") => RowHeightRule::Auto,
+                        _ => RowHeightRule::AtLeast,
+                    };
                 }
                 _ => {}
             },
@@ -1332,7 +1356,7 @@ fn parse_row_props(reader: &mut XmlReader<'_>) -> Result<(bool, Option<Twips>), 
             _ => {}
         }
     }
-    Ok((header, height))
+    Ok(props)
 }
 
 /// Cell properties (`w:tcPr`): returns `(column span, whether this is a vertically

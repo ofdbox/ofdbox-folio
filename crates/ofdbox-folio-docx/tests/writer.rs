@@ -154,6 +154,7 @@ fn round_trips_tables_and_tabs() {
             cells: vec![cell("表头甲"), cell("表头乙")],
             height: None,
             is_header: true,
+            ..Row::new(Vec::new())
         },
         Row::new(vec![cell("单元一"), cell("单元二")]),
     ];

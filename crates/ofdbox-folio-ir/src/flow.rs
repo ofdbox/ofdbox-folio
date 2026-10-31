@@ -737,6 +737,19 @@ pub struct Column {
     pub width: ColumnWidth,
 }
 
+/// How a table row's declared height is interpreted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RowHeightRule {
+    /// Height is determined by the content; the declared value is ignored.
+    Auto,
+    /// The row is at least the declared height.
+    #[default]
+    AtLeast,
+    /// The row is exactly the declared height (content may overflow).
+    Exact,
+}
+
 /// A table row.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Row {
@@ -744,6 +757,10 @@ pub struct Row {
     pub cells: Vec<Cell>,
     /// Optional fixed row height.
     pub height: Option<Twips>,
+    /// How `height` is interpreted.
+    pub height_rule: RowHeightRule,
+    /// Whether the row may be split across pages.
+    pub cant_split: bool,
     /// Whether this is a header row.
     pub is_header: bool,
 }
@@ -754,6 +771,8 @@ impl Row {
         Self {
             cells,
             height: None,
+            height_rule: RowHeightRule::AtLeast,
+            cant_split: false,
             is_header: false,
         }
     }

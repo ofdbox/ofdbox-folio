@@ -48,6 +48,32 @@ impl<'a> Engine<'a> {
                 resume = None;
                 continue;
             }
+            if table.rows[index].cant_split && !complete && top > self.page_frame().top + 1e-6 {
+                // The row must stay on one page: move it as a whole and retry.
+                self.restore(snapshot);
+                self.new_flow();
+                self.repeat_header_rows(table, &widths, header_rows, page_bottom);
+                let retry = self.layout_row(
+                    table,
+                    &widths,
+                    index,
+                    self.cursor,
+                    page_bottom,
+                    None,
+                    true,
+                    true,
+                );
+                if retry.continuation.iter().any(Option::is_some) {
+                    self.diagnostic(
+                        DiagnosticCode::Geometry,
+                        "row cannot be split and is taller than the page; allowed to overflow",
+                    );
+                }
+                self.cursor = retry.bottom;
+                index += 1;
+                resume = None;
+                continue;
+            }
             if !fragment.placed_any {
                 // Not a single line was placed: move the whole row to the next
                 // page, repeat the header and try again.
@@ -243,7 +269,13 @@ impl<'a> Engine<'a> {
         let complete = continuation.iter().all(Option::is_none);
         let mut height = (max_bottom - top).max(1.0);
         if complete && let Some(fixed) = row.height {
-            height = height.max(fixed.to_mm());
+            let fixed = fixed.to_mm().max(1.0);
+            height = match row.height_rule {
+                ofdbox_folio_ir::RowHeightRule::Auto => height,
+                ofdbox_folio_ir::RowHeightRule::AtLeast => height.max(fixed),
+                ofdbox_folio_ir::RowHeightRule::Exact => fixed,
+                _ => height.max(fixed),
+            };
         }
         if placed_any {
             self.draw_row_borders(table, widths, index, top, top + height);

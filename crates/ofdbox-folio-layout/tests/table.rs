@@ -8,7 +8,8 @@ use std::sync::Arc;
 use ofdbox_folio_ir::{
     Align, Block, Border, Cell, Column, ColumnWidth, Element, Field, FieldKind, FlowDocument,
     FontError, FontProvider, FontRequest, HeaderFooter, Inline, LineSpacing, Margins, Metadata,
-    PageSetup, ParaStyle, Paragraph, Row, Table, TableBorders, TextRun, TextStyle, Twips,
+    PageSetup, ParaStyle, Paragraph, Row, RowHeightRule, Table, TableBorders, TextRun, TextStyle,
+    Twips,
 };
 use ofdbox_folio_layout::{LayoutOptions, layout, layout_with};
 
@@ -153,6 +154,7 @@ fn repeats_table_header_rows_on_the_next_page() {
         cells: vec![cell("表头甲"), cell("表头乙"), cell("表头丙")],
         is_header: true,
         height: None,
+        ..Row::new(Vec::new())
     }];
     for index in 0..80 {
         rows.push(Row::new(vec![
@@ -187,6 +189,7 @@ fn splits_a_row_taller_than_a_page_across_pages() {
         cells: vec![cell("表头甲"), cell("表头乙")],
         is_header: true,
         height: None,
+        ..Row::new(Vec::new())
     }];
     // Stuff 90 short paragraphs into the cell so the whole row is far taller than
     // one page.
@@ -552,5 +555,36 @@ fn empty_table_row_keeps_line_height_and_borders() {
     assert!(
         min_gap > 3.0,
         "empty row collapsed to a borderless strip: borders at {ys:?}"
+    );
+}
+
+#[test]
+fn exact_row_height_is_respected() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    let mut rows = vec![Row::new(vec![cell("A")]), Row::new(vec![cell("B")])];
+    rows[0].height = Some(Twips::from_mm(30.0));
+    rows[0].height_rule = RowHeightRule::Exact;
+    let mut table = table(rows, 0);
+    table.cell_padding = Margins::uniform(Twips::from_mm(1.0));
+    flow.push(Block::Table(table));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let lines = texts(&fixed.pages[0]);
+    let y_a = lines
+        .iter()
+        .find(|(text, _, _)| text.contains('A'))
+        .map(|(_, _, y)| *y)
+        .expect("row A text");
+    let y_b = lines
+        .iter()
+        .find(|(text, _, _)| text.contains('B'))
+        .map(|(_, _, y)| *y)
+        .expect("row B text");
+    assert!(
+        y_b - y_a > 20.0,
+        "the exact 30 mm row height should push row B down: y_a={y_a} y_b={y_b}"
     );
 }

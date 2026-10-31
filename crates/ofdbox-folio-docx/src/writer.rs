@@ -611,14 +611,23 @@ impl<'a> Writer<'a> {
 
     fn row_xml(&mut self, row: &Row, out: &mut String) {
         out.push_str("<w:tr>");
-        if row.is_header || row.height.is_some() {
+        if row.is_header || row.height.is_some() || row.cant_split {
             out.push_str("<w:trPr>");
             if row.is_header {
                 out.push_str("<w:tblHeader/>");
             }
+            if row.cant_split {
+                out.push_str("<w:cantSplit/>");
+            }
             if let Some(height) = row.height {
+                let rule = match row.height_rule {
+                    ofdbox_folio_ir::RowHeightRule::Auto => "auto",
+                    ofdbox_folio_ir::RowHeightRule::AtLeast => "atLeast",
+                    ofdbox_folio_ir::RowHeightRule::Exact => "exact",
+                    _ => "atLeast",
+                };
                 out.push_str(&format!(
-                    "<w:trHeight w:val=\"{}\" w:hRule=\"atLeast\"/>",
+                    "<w:trHeight w:val=\"{}\" w:hRule=\"{rule}\"/>",
                     height.0
                 ));
             }
