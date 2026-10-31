@@ -15,7 +15,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Instant;
 
-use ofdbox_folio_ir::{DocumentSource, Element, Group};
+use ofdbox_folio_ir::{CompactLevel, CompactOptions, DocumentSource, Element, Group};
 use ofdbox_folio_ofd::{OfdDocument, OfdReadOptions};
 use ofdbox_folio_render::{CpuRenderer, RasterTarget, RenderOptions};
 
@@ -40,6 +40,7 @@ fn run() -> Result<usize, Box<dyn std::error::Error>> {
     let mut dpi = 96.0_f64;
     let mut paths = Vec::new();
     let mut inspect = false;
+    let mut level = CompactLevel::Safe;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -49,12 +50,26 @@ fn run() -> Result<usize, Box<dyn std::error::Error>> {
                 };
                 dpi = value.parse()?;
             }
+            "--level" => {
+                let Some(value) = args.next() else {
+                    return Err("--level requires off|safe|balanced|aggressive".into());
+                };
+                level = match value.as_str() {
+                    "off" => CompactLevel::Off,
+                    "safe" => CompactLevel::Safe,
+                    "balanced" => CompactLevel::Balanced,
+                    "aggressive" => CompactLevel::Aggressive,
+                    _ => return Err(format!("unknown level: {value}").into()),
+                };
+            }
             "--inspect" => inspect = true,
             _ => paths.push(arg),
         }
     }
     if paths.is_empty() {
-        eprintln!("usage: compact_regression [--dpi 96] <file.ofd>...");
+        eprintln!(
+            "usage: compact_regression [--dpi 96] [--level off|safe|balanced|aggressive] <file.ofd>..."
+        );
         return Ok(0);
     }
     if !(dpi.is_finite() && dpi > 0.0) {
@@ -76,17 +91,20 @@ fn run() -> Result<usize, Box<dyn std::error::Error>> {
             let start = Instant::now();
             renderer.render_scene(&page.content, &mut original)?;
             let original_time = start.elapsed();
-            let (compacted, stats) = page.content.compact();
+            let (compacted, stats) = page.content.compact_with(&CompactOptions::for_level(level));
             let mut merged = RasterTarget::from_size(size, dpi)?;
             let start = Instant::now();
             renderer.render_scene(&compacted, &mut merged)?;
             let merged_time = start.elapsed();
             let diff = diff_pixels(original.data(), merged.data());
             println!(
-                "  page {index}: elements {} -> {} ({:.1}%), diff pixels {}, render {:.1} ms -> {:.1} ms",
+                "  page {index}: elements {} -> {} ({:.1}%), flattened {}, merged paths {}, text runs {}, diff pixels {}, render {:.1} ms -> {:.1} ms",
                 stats.before,
                 stats.after,
                 reduction(stats.before, stats.after),
+                stats.flattened_groups,
+                stats.merged_paths,
+                stats.merged_text_runs,
                 diff,
                 original_time.as_secs_f64() * 1000.0,
                 merged_time.as_secs_f64() * 1000.0,
