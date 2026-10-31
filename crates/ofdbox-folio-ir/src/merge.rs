@@ -3,16 +3,18 @@
 //! PDF-to-OFD converters often emit one text element per glyph. That is correct
 //! but expensive to rasterize: the renderer has to traverse and build a glyph run
 //! for every single glyph. [`Scene::compact`] produces a copy of a scene with
-//! adjacent, visually equivalent text elements merged into one run.
+//! adjacent, visually equivalent text elements merged into one run, and disjoint
+//! opaque paths with identical paint merged into one path.
 //!
 //! The original scene is never modified: the text layer, export and document
 //! conversion paths keep using the original IR. This is a render-only optimization.
 
 use std::sync::Arc;
 
-use crate::fixed::{Element, Group, Scene, TextElement};
-use crate::geometry::Matrix;
+use crate::fixed::{Element, Group, PathElement, Scene, TextElement};
+use crate::geometry::{Matrix, Rect};
 use crate::paint::{Paint, StrokePaint};
+use crate::path::Path;
 use crate::text::{Cluster, Glyph, GlyphRun};
 
 /// Element counts before and after [`Scene::compact`].
@@ -70,6 +72,10 @@ fn merge_group(group: &mut Group) {
                 Element::Text(second) => merge_text(first, second),
                 _ => false,
             },
+            Element::Path(first) => match &second {
+                Element::Path(second) => merge_path(first, second),
+                _ => false,
+            },
             _ => false,
         };
         if merged {
@@ -115,6 +121,59 @@ fn merge_text(first: &mut TextElement, second: &TextElement) -> bool {
     }));
     first.run = Arc::new(GlyphRun::new(text, glyphs, clusters));
     true
+}
+
+/// Merge two disjoint, opaque paths with identical paint.
+///
+/// Overlapping paths are rejected: a combined nonzero/even-odd fill can cancel
+/// an overlap that would have been painted by two separate opaque fills.
+fn merge_path(first: &mut PathElement, second: &PathElement) -> bool {
+    if first.transform != second.transform
+        || first.rule != second.rule
+        || first.fill != second.fill
+        || first.stroke != second.stroke
+        || !opaque_fill(&first.fill)
+        || !opaque_stroke(&first.stroke)
+        || (first.fill.is_none() && first.stroke.is_none())
+    {
+        return false;
+    }
+    let (Some(first_bounds), Some(second_bounds)) = (first.path.bounds(), second.path.bounds())
+    else {
+        return false;
+    };
+    // Include stroke extent so two strokes cannot meet at their antialiased edges.
+    let pad = first
+        .stroke
+        .as_ref()
+        .map(|stroke| stroke.style.width.max(0.0))
+        .unwrap_or(0.0)
+        .max(
+            second
+                .stroke
+                .as_ref()
+                .map(|stroke| stroke.style.width.max(0.0))
+                .unwrap_or(0.0),
+        )
+        + 0.5;
+    let first_bounds = expand(first_bounds, pad);
+    let second_bounds = expand(second_bounds, pad);
+    if first_bounds.intersects(second_bounds) {
+        return false;
+    }
+    let mut segments = first.path.segments().to_vec();
+    segments.extend_from_slice(second.path.segments());
+    first.path = Arc::new(Path::from_segments(segments));
+    true
+}
+
+fn expand(rect: Rect, pad: f64) -> Rect {
+    Rect::new(
+        rect.x - pad,
+        rect.y - pad,
+        rect.width + pad * 2.0,
+        rect.height + pad * 2.0,
+    )
 }
 
 /// Translation delta when both matrices are pure translations; `None` otherwise.
@@ -279,5 +338,46 @@ mod tests {
             scene(vec![text("A", 0.0, 0.0), path, text("B", 10.0, 0.0)]).compact();
         assert_eq!(stats.after, 3);
         assert_eq!(compacted.root.children.len(), 3);
+    }
+
+    fn rect_path(x: f64, y: f64, width: f64, height: f64) -> Element {
+        let mut path = Path::new();
+        path.move_to(Point::new(x, y));
+        path.line_to(Point::new(x + width, y));
+        path.line_to(Point::new(x + width, y + height));
+        path.line_to(Point::new(x, y + height));
+        path.close();
+        Element::Path(PathElement {
+            path: Arc::new(path),
+            transform: Matrix::IDENTITY,
+            fill: Some(Paint::Color(Rgba::BLACK)),
+            stroke: None,
+            rule: FillRule::NonZero,
+        })
+    }
+
+    #[test]
+    fn merges_disjoint_opaque_paths() {
+        let (compacted, stats) = scene(vec![
+            rect_path(0.0, 0.0, 10.0, 10.0),
+            rect_path(20.0, 0.0, 10.0, 10.0),
+        ])
+        .compact();
+        assert_eq!(stats.after, 1);
+        let Element::Path(path) = &compacted.root.children[0] else {
+            panic!("expected path");
+        };
+        assert_eq!(path.path.segments().len(), 10);
+    }
+
+    #[test]
+    fn does_not_merge_overlapping_paths() {
+        let (compacted, stats) = scene(vec![
+            rect_path(0.0, 0.0, 10.0, 10.0),
+            rect_path(5.0, 5.0, 10.0, 10.0),
+        ])
+        .compact();
+        assert_eq!(stats.after, 2);
+        assert_eq!(compacted.root.children.len(), 2);
     }
 }
