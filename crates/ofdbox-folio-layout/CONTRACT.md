@@ -163,7 +163,8 @@ An empty paragraph still occupies one line. When it has no runs, layout uses the
 - Floating objects with `behind_text` (`wp:anchor/@behindDoc="1"`) are painted behind the body text.
 - When the document contains floating objects, layout runs a probe pass and then a replay pass: the probe records each object's page,
   position and size; the replay pre-places them before the page's body content, so text before the anchor also wraps around them.
-  The passes repeat until the plan is stable (at most 4 passes).
+  The passes repeat until the plan is stable (at most 4 passes). If the probe pass finds no deferred object and no object starting above the
+  body cursor, its result is used directly without a replay pass.
 - The width comes from `FloatingObject::width`, defaulting to the full text block; content is laid out within that width inside a bounded box (without pagination).
 - Wrapping:
   - `WrapMode::None`: overlay directly, body unchanged;

@@ -77,6 +77,15 @@ struct FloatPlan {
     object: ofdbox_folio_ir::FloatingObject,
 }
 
+/// Result of one layout pass for floating objects.
+struct FloatPassResult {
+    /// Recorded placements.
+    plan: Vec<FloatPlan>,
+    /// Whether a replay pass is required (an object was deferred or overlaps
+    /// text that was already placed before its anchor).
+    replay_needed: bool,
+}
+
 /// A floating object deferred to the next page during a probe pass.
 #[derive(Clone, Debug)]
 struct PendingFloat {
@@ -208,12 +217,13 @@ pub fn layout_with(
     let mut float_plan: Option<Vec<FloatPlan>> = None;
     let mut last = None;
     for _ in 0..4 {
-        let (fixed, headings, next_plan) = Engine::new(document, options.clone()).run(
+        let (fixed, headings, result) = Engine::new(document, options.clone()).run(
             fonts,
             total_pages,
             toc_entries.clone(),
             float_plan.clone(),
         );
+        let next_plan = result.plan;
         let next_entries: Option<Vec<TocEntry>> = needs_toc.then(|| {
             headings
                 .iter()
@@ -221,10 +231,18 @@ pub fn layout_with(
                 .collect()
         });
         let next_total = needs_total.then_some(fixed.pages.len());
-        let floats_stable = !needs_floats
-            || float_plan
-                .as_ref()
-                .is_some_and(|previous| same_float_plan(previous, &next_plan));
+        let floats_stable = if !needs_floats {
+            true
+        } else if float_plan.is_none() {
+            // Probe pass: no replay is needed when no object was deferred and
+            // no object overlaps text placed before its anchor.
+            !result.replay_needed
+        } else {
+            !result.replay_needed
+                && float_plan
+                    .as_ref()
+                    .is_some_and(|previous| same_float_plan(previous, &next_plan))
+        };
         let stable = next_entries == toc_entries && next_total == total_pages && floats_stable;
         total_pages = next_total;
         toc_entries = next_entries;
@@ -475,6 +493,8 @@ struct Engine<'a> {
     float_plan_out: Vec<FloatPlan>,
     /// Number of floating objects encountered so far in this pass.
     float_seen: usize,
+    /// Whether a replay pass is needed.
+    float_replay_needed: bool,
     /// Geometry of the objects pre-placed on the current page, keyed by index.
     applied_geometry: HashMap<usize, (usize, f64, f64, f64, f64)>,
     /// Foreground floating elements waiting to be appended at page end.
@@ -535,6 +555,7 @@ impl<'a> Engine<'a> {
             float_plan_in: None,
             float_plan_out: Vec::new(),
             float_seen: 0,
+            float_replay_needed: false,
             applied_geometry: HashMap::new(),
             front_elements: Vec::new(),
             body_element_start: 0,
@@ -549,7 +570,7 @@ impl<'a> Engine<'a> {
         total_pages: Option<usize>,
         toc_entries: Option<Vec<TocEntry>>,
         float_plan: Option<Vec<FloatPlan>>,
-    ) -> (FixedDocument, Vec<HeadingEntry>, Vec<FloatPlan>) {
+    ) -> (FixedDocument, Vec<HeadingEntry>, FloatPassResult) {
         self.prepare_fonts(provider);
         self.total_pages = total_pages;
         self.toc_entries = toc_entries;
@@ -592,7 +613,14 @@ impl<'a> Engine<'a> {
 
         self.fixed.outline = self.build_outline();
         self.fixed.engine.layout_version = LAYOUT_VERSION;
-        (self.fixed, self.headings, self.float_plan_out)
+        (
+            self.fixed,
+            self.headings,
+            FloatPassResult {
+                plan: self.float_plan_out,
+                replay_needed: self.float_replay_needed,
+            },
+        )
     }
 
     // ---- Fonts ----
@@ -1238,6 +1266,7 @@ impl<'a> Engine<'a> {
             // normally); fall through and place it inline as a fallback.
         }
 
+        let anchor_cursor = self.cursor;
         match self.place_floating_impl(floating, true) {
             FloatPlacement::Placed {
                 x,
@@ -1245,6 +1274,11 @@ impl<'a> Engine<'a> {
                 width,
                 height,
             } => {
+                if y + 1e-6 < anchor_cursor {
+                    // The object starts above the current body position, so text
+                    // already placed on this page must be re-laid out around it.
+                    self.float_replay_needed = true;
+                }
                 self.float_plan_out.push(FloatPlan {
                     index,
                     page: self.fixed.pages.len(),
@@ -1258,6 +1292,7 @@ impl<'a> Engine<'a> {
                 });
             }
             FloatPlacement::Deferred => {
+                self.float_replay_needed = true;
                 self.pending_floats.push(PendingFloat {
                     index,
                     object: floating.clone(),
