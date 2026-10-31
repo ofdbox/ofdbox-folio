@@ -409,6 +409,10 @@ pub(crate) struct RawTableProps {
     pub indent: Option<Twips>,
     /// Declared table width.
     pub width: Option<TableWidth>,
+    /// Whether the first-row conditional format is enabled.
+    pub first_row: Option<bool>,
+    /// Whether horizontal row banding is enabled.
+    pub band_rows: Option<bool>,
 }
 
 impl RawTableProps {
@@ -437,6 +441,12 @@ impl RawTableProps {
         }
         if over.width.is_some() {
             self.width = over.width;
+        }
+        if over.first_row.is_some() {
+            self.first_row = over.first_row;
+        }
+        if over.band_rows.is_some() {
+            self.band_rows = over.band_rows;
         }
     }
 
@@ -655,6 +665,18 @@ pub(crate) fn parse_table_props(
                             _ => Some(TableWidth::Twips(Twips::new(width as i64))),
                         }
                     });
+                }
+                if is_element(&element, "tblLook") {
+                    let on = |value: Option<String>| {
+                        value.map(|value| {
+                            !matches!(
+                                value.trim().to_ascii_lowercase().as_str(),
+                                "0" | "false" | "off"
+                            )
+                        })
+                    };
+                    props.first_row = on(attr(&element, "firstRow"));
+                    props.band_rows = on(attr(&element, "noHBand")).map(|no_band| !no_band);
                 }
             }
             quick_xml::events::Event::End(_) => break,

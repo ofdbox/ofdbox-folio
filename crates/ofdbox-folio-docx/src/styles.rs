@@ -1,11 +1,13 @@
-//! `styles.xml`, `theme1.xml` and style cascade resolution.
+﻿//! `styles.xml`, `theme1.xml` and style cascade resolution.
 
 use std::collections::HashMap;
 
+use ofdbox_folio_ir::Rgba;
+
 use crate::DocxError;
 use crate::props::{
-    RawParaProps, RawRunProps, RawTableProps, ThemeFonts, parse_para_props, parse_run_props,
-    parse_table_props,
+    RawParaProps, RawRunProps, RawTableProps, ThemeFonts, parse_color, parse_para_props,
+    parse_run_props, parse_table_props,
 };
 use crate::xml::{XmlReader, attr, local_name, skip_element};
 
@@ -29,6 +31,13 @@ struct RunStyleDef {
     props: RawRunProps,
 }
 
+/// Conditional table style overrides.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CellConditional {
+    /// Conditional cell shading.
+    pub shading: Option<Rgba>,
+}
+
 /// Parsed style sheet.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Styles {
@@ -42,6 +51,8 @@ pub(crate) struct Styles {
     character: HashMap<String, RunStyleDef>,
     /// Named table styles.
     table: HashMap<String, RawTableProps>,
+    /// Conditional table style overrides, keyed by style ID and condition type.
+    table_conditional: HashMap<String, HashMap<String, CellConditional>>,
     /// Implicit default paragraph style ID (w:default="1").
     default_para_id: Option<String>,
     /// Implicit default character style ID.
@@ -129,6 +140,11 @@ impl Styles {
         }
         resolved.merge(direct);
         resolved
+    }
+
+    /// Conditional overrides of a named table style.
+    pub fn table_conditional(&self, id: &str) -> Option<&HashMap<String, CellConditional>> {
+        self.table_conditional.get(id)
     }
 
     fn para_chain(&self, id: Option<&str>) -> Vec<&ParaStyleDef> {
@@ -228,12 +244,17 @@ fn parse_style(
     let mut para = RawParaProps::default();
     let mut run = RawRunProps::default();
     let mut table = RawTableProps::default();
+    let mut conditional: HashMap<String, CellConditional> = HashMap::new();
     loop {
         match reader.read_event().map_err(crate::xml::xml_error)? {
             quick_xml::events::Event::Start(element) => match local_name(&element).as_str() {
                 "pPr" => para = parse_para_props(reader, &element)?,
                 "rPr" => run = parse_run_props(reader, &element)?,
                 "tblPr" => table = parse_table_props(reader, &element)?,
+                "tblStylePr" => {
+                    let (kind, cond) = parse_table_conditional(reader, &element)?;
+                    conditional.insert(kind, cond);
+                }
                 _ => skip_element(reader, &element)?,
             },
             quick_xml::events::Event::Empty(element) => match local_name(&element).as_str() {
@@ -280,11 +301,54 @@ fn parse_style(
         }
         "table" => {
             table.style_id = based_on;
-            styles.table.insert(id, table);
+            styles.table.insert(id.clone(), table);
+            if !conditional.is_empty() {
+                styles.table_conditional.insert(id, conditional);
+            }
         }
         _ => {}
     }
     Ok(())
+}
+
+/// Parse one `w:tblStylePr` block and return its condition type.
+fn parse_table_conditional(
+    reader: &mut XmlReader<'_>,
+    start: &quick_xml::events::BytesStart<'_>,
+) -> Result<(String, CellConditional), DocxError> {
+    let kind = attr(start, "type").unwrap_or_default();
+    let mut conditional = CellConditional::default();
+    loop {
+        match reader.read_event().map_err(crate::xml::xml_error)? {
+            quick_xml::events::Event::Start(element) => match local_name(&element).as_str() {
+                "tcPr" => conditional.shading = parse_conditional_shading(reader)?,
+                _ => skip_element(reader, &element)?,
+            },
+            quick_xml::events::Event::End(_) => break,
+            quick_xml::events::Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok((kind, conditional))
+}
+
+/// Parse the shading inside a conditional `w:tcPr`.
+fn parse_conditional_shading(reader: &mut XmlReader<'_>) -> Result<Option<Rgba>, DocxError> {
+    let mut shading = None;
+    loop {
+        match reader.read_event().map_err(crate::xml::xml_error)? {
+            quick_xml::events::Event::Start(element) => skip_element(reader, &element)?,
+            quick_xml::events::Event::Empty(element) => {
+                if local_name(&element).as_str() == "shd" {
+                    shading = attr(&element, "fill").as_deref().and_then(parse_color);
+                }
+            }
+            quick_xml::events::Event::End(_) => break,
+            quick_xml::events::Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(shading)
 }
 
 /// Parse the font scheme in `theme1.xml`.
@@ -430,5 +494,29 @@ mod tests {
         assert_eq!(heading_level_from_name("标题 2"), Some(2));
         assert_eq!(heading_level_from_name("Normal"), None);
         assert_eq!(heading_level_from_name("Title"), None);
+    }
+}
+
+#[cfg(test)]
+mod conditional_tests {
+    use super::*;
+
+    #[test]
+    fn parses_conditional_table_shading() {
+        let xml = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:style w:type="table" w:styleId="Grid">
+                <w:tblPr/>
+                <w:tblStylePr w:type="firstRow">
+                    <w:tcPr><w:shd w:val="clear" w:fill="FF0000"/></w:tcPr>
+                </w:tblStylePr>
+            </w:style>
+        </w:styles>"#;
+        let styles = Styles::parse(xml, ThemeFonts::default()).expect("styles");
+        let conditional = styles.table_conditional("Grid").expect("conditional");
+        let shading = conditional
+            .get("firstRow")
+            .and_then(|value| value.shading)
+            .expect("first row shading");
+        assert_eq!((shading.r, shading.g, shading.b), (255, 0, 0));
     }
 }

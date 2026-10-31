@@ -812,6 +812,36 @@ impl<'a> Builder<'a> {
                 })
                 .collect();
         }
+        if let Some(style_id) = resolved.style_id.as_deref()
+            && let Some(conditional) = self.styles.table_conditional(style_id)
+        {
+            let first_row = conditional
+                .get("firstRow")
+                .and_then(|value| value.shading)
+                .filter(|_| resolved.first_row.unwrap_or(true));
+            let band1 = conditional
+                .get("band1Horz")
+                .and_then(|value| value.shading)
+                .filter(|_| resolved.band_rows.unwrap_or(true));
+            let band2 = conditional
+                .get("band2Horz")
+                .and_then(|value| value.shading)
+                .filter(|_| resolved.band_rows.unwrap_or(true));
+            for (row_index, row) in rows.iter_mut().enumerate() {
+                let color = if row_index == 0 {
+                    first_row
+                } else if row_index % 2 == 1 {
+                    band1
+                } else {
+                    band2
+                };
+                if let Some(color) = color {
+                    for cell in &mut row.cells {
+                        cell.shading.get_or_insert(color);
+                    }
+                }
+            }
+        }
         let mut table = Table::new(columns);
         table.rows = rows;
         table.header_rows = header_rows;
