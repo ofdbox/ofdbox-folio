@@ -1296,6 +1296,7 @@ dependencies = [
  "ofdbox-core",
  "ofdbox-crypto",
  "ofdbox-folio-ir",
+ "ofdbox-folio-render",
  "quick-xml",
  "thiserror",
  "ttf-parser",

@@ -1,21 +1,25 @@
 //! Render-time scene compaction.
 //!
-//! PDF-to-OFD converters often emit one text element per glyph. That is correct
-//! but expensive to rasterize: the renderer has to traverse and build a glyph run
-//! for every single glyph. [`Scene::compact`] produces a copy of a scene with
-//! adjacent, visually equivalent text elements merged into one run, and disjoint
-//! opaque paths with identical paint merged into one path.
+//! PDF-to-OFD converters often emit one wrapper group per object, even when the
+//! object is a single glyph or a tiny path. That is correct but expensive to
+//! rasterize: the renderer traverses thousands of groups and elements.
+//! [`Scene::compact`] produces a copy of a scene with transparent wrapper groups
+//! flattened and disjoint, opaque paths with identical paint merged.
+//!
+//! Text elements are intentionally not merged in the default path: combining
+//! separate glyph runs changes anti-aliasing by a few pixels, which violates the
+//! strict pixel-regression contract. Flattening alone already removes most of the
+//! traversal cost for PDF-to-OFD documents.
 //!
 //! The original scene is never modified: the text layer, export and document
 //! conversion paths keep using the original IR. This is a render-only optimization.
 
 use std::sync::Arc;
 
-use crate::fixed::{Element, Group, PathElement, Scene, TextElement};
+use crate::fixed::{Element, Group, PathElement, Scene};
 use crate::geometry::{Matrix, Rect};
 use crate::paint::{Paint, StrokePaint};
 use crate::path::Path;
-use crate::text::{Cluster, Glyph, GlyphRun};
 
 /// Element counts before and after [`Scene::compact`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -42,6 +46,7 @@ impl Scene {
     pub fn compact(&self) -> (Self, MergeStats) {
         let mut scene = self.clone();
         let before = count_elements(&scene.root);
+        flatten_group(&mut scene.root);
         merge_group(&mut scene.root);
         let after = count_elements(&scene.root);
         (scene, MergeStats { before, after })
@@ -49,12 +54,63 @@ impl Scene {
 }
 
 impl Group {
-    /// Merges adjacent render-equivalent text elements in this group and its
-    /// descendants, returning the number of removed elements.
+    /// Merges adjacent disjoint opaque paths and flattens plain wrapper groups
+    /// in this group and its descendants, returning the number of removed elements.
     pub fn merge_adjacent(&mut self) -> usize {
         let before = count_elements(self);
+        flatten_group(self);
         merge_group(self);
         before.saturating_sub(count_elements(self))
+    }
+}
+
+/// Remove groups that are only transform wrappers.
+///
+/// Groups without a clip or opacity do not create a layer; their children can be
+/// spliced into the parent with the group transform baked into each child. This
+/// exposes sequences of leaf elements inside the usual PDF-to-OFD wrapper shape
+/// (object → transform group → clip group) to the path merge pass.
+///
+/// Groups with a clip are kept: dropping a clip layer changes anti-aliasing in
+/// some documents, which would violate the strict pixel-regression contract.
+fn flatten_group(group: &mut Group) {
+    for child in &mut group.children {
+        if let Element::Group(child) = child {
+            flatten_group(child);
+        }
+    }
+    let mut index = 0;
+    while index < group.children.len() {
+        let flattenable = match &group.children[index] {
+            Element::Group(inner) => can_flatten(inner),
+            _ => false,
+        };
+        if !flattenable {
+            index += 1;
+            continue;
+        }
+        let Element::Group(mut inner) = group.children.remove(index) else {
+            index += 1;
+            continue;
+        };
+        for mut child in inner.children.drain(..) {
+            bake_transform(&mut child, &inner.transform);
+            group.children.insert(index, child);
+            index += 1;
+        }
+    }
+}
+
+fn can_flatten(group: &Group) -> bool {
+    group.clip.is_none() && group.opacity >= 1.0 - f32::EPSILON
+}
+
+fn bake_transform(element: &mut Element, parent: &Matrix) {
+    match element {
+        Element::Text(text) => text.transform = text.transform.then(*parent),
+        Element::Path(path) => path.transform = path.transform.then(*parent),
+        Element::Image(image) => image.transform = image.transform.then(*parent),
+        Element::Group(group) => group.transform = group.transform.then(*parent),
     }
 }
 
@@ -68,10 +124,6 @@ fn merge_group(group: &mut Group) {
     while index + 1 < group.children.len() {
         let second = group.children[index + 1].clone();
         let merged = match &mut group.children[index] {
-            Element::Text(first) => match &second {
-                Element::Text(second) => merge_text(first, second),
-                _ => false,
-            },
             Element::Path(first) => match &second {
                 Element::Path(second) => merge_path(first, second),
                 _ => false,
@@ -84,43 +136,6 @@ fn merge_group(group: &mut Group) {
             index += 1;
         }
     }
-}
-
-/// Merge `second` into `first` when both are visually equivalent.
-fn merge_text(first: &mut TextElement, second: &TextElement) -> bool {
-    if !Arc::ptr_eq(&first.font, &second.font)
-        || first.font_size != second.font_size
-        || first.fill != second.fill
-        || first.stroke != second.stroke
-        || !opaque_fill(&first.fill)
-        || !opaque_stroke(&first.stroke)
-        || first.run.glyphs.is_empty()
-        || second.run.glyphs.is_empty()
-    {
-        return false;
-    }
-    let Some((dx, dy)) = translation_delta(&first.transform, &second.transform) else {
-        return false;
-    };
-    let char_offset = u32::try_from(first.run.text.chars().count()).unwrap_or(u32::MAX);
-    let glyph_offset = u32::try_from(first.run.glyphs.len()).unwrap_or(u32::MAX);
-    let mut text = first.run.text.clone();
-    text.push_str(&second.run.text);
-    let mut glyphs = first.run.glyphs.clone();
-    glyphs.extend(second.run.glyphs.iter().map(|glyph| Glyph {
-        x: glyph.x + dx,
-        y: glyph.y + dy,
-        ..*glyph
-    }));
-    let mut clusters = first.run.clusters.clone();
-    clusters.extend(second.run.clusters.iter().map(|cluster| Cluster {
-        text_start: cluster.text_start.saturating_add(char_offset),
-        text_end: cluster.text_end.saturating_add(char_offset),
-        glyph_start: cluster.glyph_start.saturating_add(glyph_offset),
-        glyph_end: cluster.glyph_end.saturating_add(glyph_offset),
-    }));
-    first.run = Arc::new(GlyphRun::new(text, glyphs, clusters));
-    true
 }
 
 /// Merge two disjoint, opaque paths with identical paint.
@@ -176,19 +191,6 @@ fn expand(rect: Rect, pad: f64) -> Rect {
     )
 }
 
-/// Translation delta when both matrices are pure translations; `None` otherwise.
-fn translation_delta(first: &Matrix, second: &Matrix) -> Option<(f64, f64)> {
-    if first == second {
-        return Some((0.0, 0.0));
-    }
-    (is_translation(first) && is_translation(second))
-        .then_some((second.e - first.e, second.f - first.f))
-}
-
-fn is_translation(matrix: &Matrix) -> bool {
-    matrix.a == 1.0 && matrix.b == 0.0 && matrix.c == 0.0 && matrix.d == 1.0
-}
-
 /// Only opaque solid colors are merged: translucent fills/strokes composite
 /// differently when drawn as separate elements.
 fn opaque_fill(fill: &Option<Paint>) -> bool {
@@ -223,44 +225,10 @@ fn count_elements(group: &Group) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::FontAsset;
     use crate::fixed::PathElement;
     use crate::geometry::Point;
     use crate::paint::{FillRule, Rgba};
     use crate::path::Path;
-
-    fn font() -> Arc<FontAsset> {
-        Arc::new(FontAsset::new(Arc::from(&[][..]), 0))
-    }
-
-    fn text(run_text: &str, x: f64, glyph_x: f64) -> Element {
-        text_with(&font(), run_text, x, glyph_x)
-    }
-
-    fn text_with(font: &Arc<FontAsset>, run_text: &str, x: f64, glyph_x: f64) -> Element {
-        Element::Text(TextElement {
-            font: Arc::clone(font),
-            font_size: 10.0,
-            transform: Matrix::translate(x, 0.0),
-            run: Arc::new(GlyphRun::new(
-                run_text,
-                vec![Glyph {
-                    id: 1,
-                    x: glyph_x,
-                    y: 0.0,
-                    advance: 10.0,
-                }],
-                vec![Cluster {
-                    text_start: 0,
-                    text_end: 1,
-                    glyph_start: 0,
-                    glyph_end: 1,
-                }],
-            )),
-            fill: Some(Paint::Color(Rgba::BLACK)),
-            stroke: None,
-        })
-    }
 
     fn scene(children: Vec<Element>) -> Scene {
         Scene {
@@ -271,73 +239,6 @@ mod tests {
             },
             diagnostics: Vec::new(),
         }
-    }
-
-    #[test]
-    fn merges_translation_adjacent_text() {
-        let font = font();
-        let (compacted, stats) = scene(vec![
-            text_with(&font, "A", 0.0, 0.0),
-            text_with(&font, "B", 10.0, 0.0),
-        ])
-        .compact();
-        assert_eq!(stats.before, 2);
-        assert_eq!(stats.after, 1);
-        let Element::Text(text) = &compacted.root.children[0] else {
-            panic!("expected text");
-        };
-        assert_eq!(text.run.text, "AB");
-        assert_eq!(text.run.glyphs.len(), 2);
-        assert_eq!(text.run.glyphs[1].x, 10.0);
-        assert_eq!(text.run.clusters[1].text_start, 1);
-        assert_eq!(text.run.clusters[1].glyph_start, 1);
-    }
-
-    #[test]
-    fn does_not_merge_different_styles_or_rotations() {
-        let mut second = text("B", 10.0, 0.0);
-        let Element::Text(second_text) = &mut second else {
-            panic!("expected text");
-        };
-        second_text.fill = Some(Paint::Color(Rgba::from_rgb(255, 0, 0)));
-        let (_compacted, stats) = scene(vec![text("A", 0.0, 0.0), second]).compact();
-        assert_eq!(stats.after, 2);
-
-        let mut rotated = text("C", 20.0, 0.0);
-        let Element::Text(rotated_text) = &mut rotated else {
-            panic!("expected text");
-        };
-        rotated_text.transform = Matrix::scale(1.0, 1.0).then(Matrix::translate(20.0, 0.0));
-        rotated_text.transform = Matrix {
-            a: 0.0,
-            b: 1.0,
-            c: -1.0,
-            d: 0.0,
-            e: 20.0,
-            f: 0.0,
-        };
-        let (_compacted, stats) = scene(vec![text("A", 0.0, 0.0), rotated]).compact();
-        assert_eq!(stats.after, 2);
-    }
-
-    #[test]
-    fn does_not_merge_across_paths() {
-        let mut path = Path::new();
-        path.move_to(Point::new(0.0, 0.0));
-        path.line_to(Point::new(1.0, 0.0));
-        path.line_to(Point::new(1.0, 1.0));
-        path.close();
-        let path = Element::Path(PathElement {
-            path: Arc::new(path),
-            transform: Matrix::IDENTITY,
-            fill: Some(Paint::Color(Rgba::BLACK)),
-            stroke: None,
-            rule: FillRule::NonZero,
-        });
-        let (compacted, stats) =
-            scene(vec![text("A", 0.0, 0.0), path, text("B", 10.0, 0.0)]).compact();
-        assert_eq!(stats.after, 3);
-        assert_eq!(compacted.root.children.len(), 3);
     }
 
     fn rect_path(x: f64, y: f64, width: f64, height: f64) -> Element {

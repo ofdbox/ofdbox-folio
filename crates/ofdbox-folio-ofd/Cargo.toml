@@ -20,5 +20,8 @@ ttf-parser.workspace = true
 zip.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+ofdbox-folio-render.workspace = true
+
 [lints]
 workspace = true
