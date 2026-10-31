@@ -1084,17 +1084,22 @@ impl<'a> Engine<'a> {
             .map(|width| width.to_mm())
             .unwrap_or(page.width)
             .clamp(1.0, page.width);
-        // Convert the top-left corner according to the reference base: `page` is
-        // relative to the page origin, `margin`/`column` relative to the text
-        // area, and `paragraph` is currently treated as the text area (a known
-        // approximation).
+        // Convert the top-left corner according to the reference base. A
+        // paragraph-relative anchor starts at the anchor paragraph's current
+        // position, so a floating image does not jump to the top of the page.
         let (from_h, from_v) = floating.position_from;
         let origin_x = match from_h {
             ofdbox_folio_ir::PositionFrom::Page => 0.0,
+            ofdbox_folio_ir::PositionFrom::Margin => page.left,
+            ofdbox_folio_ir::PositionFrom::Column => self.frame.left,
+            ofdbox_folio_ir::PositionFrom::Paragraph => self.frame.left,
             _ => page.left,
         };
         let origin_y = match from_v {
             ofdbox_folio_ir::PositionFrom::Page => 0.0,
+            ofdbox_folio_ir::PositionFrom::Margin => page.top,
+            ofdbox_folio_ir::PositionFrom::Column => self.frame.top,
+            ofdbox_folio_ir::PositionFrom::Paragraph => self.cursor,
             _ => page.top,
         };
         let x = (origin_x + floating.position.x).clamp(0.0, page.left + page.width);
@@ -1108,11 +1113,20 @@ impl<'a> Engine<'a> {
             bottom: f64::MAX,
         };
         self.cursor = y;
+        let first_element = self.page.scene.children.len();
         self.place_block(&floating.block);
         let bottom = self.cursor;
         self.frame = saved.0;
         self.cursor = saved.1;
         self.in_frame = saved.2;
+
+        if floating.behind_text {
+            // `behindDoc="1"`: paint the floating content behind the body text
+            // that was already placed on this page.
+            let children = &mut self.page.scene.children;
+            let floating_elements: Vec<_> = children.drain(first_element..).collect();
+            children.splice(0..0, floating_elements);
+        }
 
         match floating.wrap {
             ofdbox_folio_ir::WrapMode::None => {

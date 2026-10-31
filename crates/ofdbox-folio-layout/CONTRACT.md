@@ -158,7 +158,8 @@ An empty paragraph still occupies one line. When it has no runs, layout uses the
 - `Block::Floating` is absolutely positioned in page coordinates (relative to the top-left corner of the text block, in mm), does not participate
   in the body cursor, and does not paginate or change columns.
 - The position reference comes from `position_from`: `Page` is relative to the page origin, `Margin`/`Column` are relative to the text block
-  (identical in a single-column layout), and `Paragraph` is currently treated as the text block (a known approximation).
+  (identical in a single-column layout), and `Paragraph` is relative to the anchoring paragraph's top-left corner (its current layout position).
+- Floating objects with `behind_text` (`wp:anchor/@behindDoc="1"`) are painted behind the body text.
 - The width comes from `FloatingObject::width`, defaulting to the full text block; content is laid out within that width inside a bounded box (without pagination).
 - Wrapping:
   - `WrapMode::None`: overlay directly, body unchanged;

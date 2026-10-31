@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
-    Block, FloatingObject, FlowDocument, FontError, FontProvider, FontRequest, ImageAsset,
+    Block, Element, FloatingObject, FlowDocument, FontError, FontProvider, FontRequest, ImageAsset,
     ImageBlock, ImageFormat, Metadata, Paragraph, Point, PositionFrom, TextStyle, Twips, WrapMode,
 };
 use ofdbox_folio_layout::layout;
@@ -311,5 +311,67 @@ fn page_break_clears_square_wrap_exclusions() {
         line.bbox.width > 100.0,
         "square-wrap exclusion leaked to the next page: line bbox {:?}",
         line.bbox
+    );
+}
+
+#[test]
+fn paragraph_relative_anchor_starts_at_the_paragraph_position() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    flow.push(Block::Paragraph(paragraph(
+        "A paragraph occupying the top of the page.",
+    )));
+    let mut image = image_block(&mut flow);
+    if let Block::Image(block) = &mut image {
+        block.size = Some((Twips::from_mm(20.0), Twips::from_mm(20.0)));
+    }
+    let mut floating = FloatingObject::new(Point::new(0.0, 0.0), image);
+    floating.position_from = (PositionFrom::Paragraph, PositionFrom::Paragraph);
+    floating.width = Some(Twips::from_mm(20.0));
+    flow.push(Block::Floating(Box::new(floating)));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let page = &fixed.pages[0];
+    let (_, image_y, _, _) = image_rect(page);
+    let paragraph_bottom = page
+        .text
+        .lines
+        .iter()
+        .map(|line| line.bbox.y + line.bbox.height)
+        .fold(0.0_f64, f64::max);
+    assert!(
+        image_y >= paragraph_bottom - 1.0,
+        "paragraph-relative anchor should start at the anchor position: image_y={image_y} paragraph_bottom={paragraph_bottom}"
+    );
+}
+
+#[test]
+fn behind_text_floating_image_is_painted_before_text() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    flow.push(Block::Paragraph(paragraph("Text in front of the image.")));
+    let image = image_block(&mut flow);
+    let mut floating = FloatingObject::new(Point::new(30.0, 30.0), image);
+    floating.width = Some(Twips::from_mm(20.0));
+    floating.behind_text = true;
+    flow.push(Block::Floating(Box::new(floating)));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let children = &fixed.pages[0].content.root.children;
+    let image_index = children
+        .iter()
+        .position(|element| matches!(element, Element::Image(_)))
+        .expect("floating image");
+    let text_index = children
+        .iter()
+        .position(|element| matches!(element, Element::Text(_)))
+        .expect("body text");
+    assert!(
+        image_index < text_index,
+        "behindDoc image should be painted before text: image={image_index} text={text_index}"
     );
 }

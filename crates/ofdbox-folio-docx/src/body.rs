@@ -932,6 +932,7 @@ impl<'a> Builder<'a> {
         let mut embed = None;
         let mut alt = None;
         let mut anchor = false;
+        let mut behind_text = false;
         let mut wrap = WrapMode::None;
         let mut offset_x: Option<f64> = None;
         let mut offset_y: Option<f64> = None;
@@ -947,7 +948,13 @@ impl<'a> Builder<'a> {
             match reader.read_event().map_err(crate::xml::xml_error)? {
                 quick_xml::events::Event::Start(element) => {
                     match local_name(&element).as_str() {
-                        "anchor" => anchor = true,
+                        "anchor" => {
+                            anchor = true;
+                            behind_text = matches!(
+                                attr(&element, "behindDoc").as_deref(),
+                                Some("1") | Some("true")
+                            );
+                        }
                         "positionH" => {
                             horizontal = true;
                             from_h = position_from(attr(&element, "relativeFrom").as_deref());
@@ -1048,6 +1055,7 @@ impl<'a> Builder<'a> {
         object.position_from = (from_h, from_v);
         object.width = size.map(|(width, _)| width);
         object.wrap = wrap;
+        object.behind_text = behind_text;
         Ok(Some(Drawing::Floating(object)))
     }
 

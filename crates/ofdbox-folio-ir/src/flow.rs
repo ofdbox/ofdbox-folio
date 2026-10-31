@@ -221,7 +221,7 @@ pub enum PositionFrom {
     Margin,
     /// Relative to the top-left corner of the current column (identical to the text area for a single column).
     Column,
-    /// Relative to the anchoring paragraph (treated as the text area during layout; this is a known approximation).
+    /// Relative to the anchoring paragraph's top-left corner.
     Paragraph,
 }
 
@@ -238,6 +238,8 @@ pub struct FloatingObject {
     pub block: Box<Block>,
     /// Wrapping mode.
     pub wrap: WrapMode,
+    /// Draw behind body text (`wp:anchor/@behindDoc`).
+    pub behind_text: bool,
 }
 
 impl FloatingObject {
@@ -249,6 +251,7 @@ impl FloatingObject {
             width: None,
             block: Box::new(block),
             wrap: WrapMode::None,
+            behind_text: false,
         }
     }
 }
