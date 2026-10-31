@@ -22,8 +22,8 @@ use ofdbox_folio_ir::{
     FixedDocument, FlowDocument, FontAsset, FontProvider, Group, HeaderFooter, HeaderFooterSet,
     ImageAsset, ImageBlock, ImageElement, Inline, LineCap, LineJoin, LineSpacing, LinkArea,
     LinkTarget, Matrix, NoteKind, NoteRef, OutlineItem, Page, PageInfo, PageSetup, Paint,
-    ParaStyle, Paragraph, Path, PathElement, Point, Rect, Rgba, Rotation, Row, Scene, Size,
-    StrokePaint, StrokeStyle, TabAlign, TabLeader, TabStop, Table, TextElement, TextItem,
+    ParaStyle, Paragraph, Path, PathElement, Point, Rect, Rgba, Rotation, Row, Scene, Severity,
+    Size, StrokePaint, StrokeStyle, TabAlign, TabLeader, TabStop, Table, TextElement, TextItem,
     TextLayer, TextLine, TextRun, TextStyle, Twips,
 };
 
@@ -216,6 +216,7 @@ pub fn layout_with(
     let mut toc_entries: Option<Vec<TocEntry>> = None;
     let mut float_plan: Option<Vec<FloatPlan>> = None;
     let mut last = None;
+    let mut stable = false;
     for _ in 0..4 {
         let (fixed, headings, result) = Engine::new(document, options.clone()).run(
             fonts,
@@ -243,7 +244,7 @@ pub fn layout_with(
                     .as_ref()
                     .is_some_and(|previous| same_float_plan(previous, &next_plan))
         };
-        let stable = next_entries == toc_entries && next_total == total_pages && floats_stable;
+        stable = next_entries == toc_entries && next_total == total_pages && floats_stable;
         total_pages = next_total;
         toc_entries = next_entries;
         float_plan = Some(next_plan);
@@ -252,7 +253,15 @@ pub fn layout_with(
             break;
         }
     }
-    Ok(last.expect("laid out at least once"))
+    let mut fixed = last.expect("laid out at least once");
+    if needs_floats && !stable {
+        fixed.report.diagnostics.push(Diagnostic::new(
+            Severity::Warning,
+            DiagnosticCode::Geometry,
+            "floating object placement did not stabilize after 4 passes",
+        ));
+    }
+    Ok(fixed)
 }
 
 /// Whether two float plans describe the same placement (object content is

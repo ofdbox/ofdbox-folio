@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use ofdbox_folio_ir::{
     Block, Element, FloatingObject, FlowDocument, FontError, FontProvider, FontRequest, ImageAsset,
-    ImageBlock, ImageFormat, Metadata, Paragraph, Point, PositionFrom, TextStyle, Twips, WrapMode,
+    ImageBlock, ImageFormat, Metadata, PageSetup, Paragraph, Point, PositionFrom, TextStyle, Twips,
+    WrapMode,
 };
 use ofdbox_folio_layout::layout;
 
@@ -537,5 +538,55 @@ fn two_floating_objects_are_placed_once() {
     assert_eq!(
         images, 2,
         "each floating object should be drawn exactly once"
+    );
+}
+
+#[test]
+fn float_in_left_column_does_not_indent_right_column() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    let mut setup = PageSetup::a4();
+    setup.columns = 2;
+    setup.column_gap = Twips::from_mm(8.0);
+    flow.sections[0].setup = setup;
+
+    let mut image = image_block(&mut flow);
+    if let Block::Image(block) = &mut image {
+        block.size = Some((Twips::from_mm(20.0), Twips::from_mm(20.0)));
+    }
+    let mut floating = FloatingObject::new(Point::new(0.0, 0.0), image);
+    floating.position_from = (PositionFrom::Column, PositionFrom::Column);
+    floating.width = Some(Twips::from_mm(20.0));
+    floating.wrap = WrapMode::Square;
+    flow.push(Block::Floating(Box::new(floating)));
+    for index in 0..40 {
+        flow.push(Block::Paragraph(paragraph(&format!(
+            "Column text {index}: the left column should wrap around the float."
+        ))));
+    }
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let page = &fixed.pages[0];
+    let right_lines: Vec<f64> = page
+        .text
+        .lines
+        .iter()
+        .filter(|line| line.bbox.x > 90.0)
+        .map(|line| line.bbox.x)
+        .collect();
+    assert!(
+        !right_lines.is_empty(),
+        "expected text in the right column, lines: {:?}",
+        page.text
+            .lines
+            .iter()
+            .map(|line| line.bbox.x)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        right_lines.iter().all(|x| *x < 120.0),
+        "the right column was indented by a float from the left column: {right_lines:?}"
     );
 }
