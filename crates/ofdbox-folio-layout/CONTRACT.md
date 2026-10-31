@@ -155,8 +155,9 @@ An empty paragraph still occupies one line. When it has no runs, layout uses the
 
 ### 5.5 Floating objects
 
-- `Block::Floating` is absolutely positioned in page coordinates (relative to the top-left corner of the text block, in mm), does not participate
-  in the body cursor, and does not paginate or change columns.
+- `Block::Floating` is absolutely positioned in page coordinates (relative to the top-left corner of the text block, in mm) and does not participate
+  in the body cursor. A non-page-relative object that does not fit in the remaining page height is deferred to the top of the next page; an object
+  taller than one page overflows with a `DiagnosticCode::Geometry` diagnostic.
 - The position reference comes from `position_from`: `Page` is relative to the page origin, `Margin`/`Column` are relative to the text block
   (identical in a single-column layout), and `Paragraph` is relative to the anchoring paragraph's top-left corner (its current layout position).
 - Floating objects with `behind_text` (`wp:anchor/@behindDoc="1"`) are painted behind the body text.
@@ -166,7 +167,8 @@ An empty paragraph still occupies one line. When it has no runs, layout uses the
   - `WrapMode::TopBottom`: the body continues below the object;
   - `WrapMode::Square`: paragraphs that vertically overlap the object wrap **line by line**: each line is re-broken using the available width
     at that moment, lines falling inside the wrap band move to the other side of the object, and the full width is restored once past the object;
-    when the object is in the right half of the page, the right margin is reduced;
+    when the object is in the right half of the page, the right margin is reduced; when less than 8 mm remains beside the object, the paragraph
+    moves below the object instead of wrapping one character per line;
 - Square-wrap exclusion areas are scoped to the page/column container where the floating object was placed; they are cleared
   when the body flow moves to the next column or page, so text on later pages does not wrap around an object from an earlier page.
 - Floating objects embedded in a table cell or in a header/footer are treated as ordinary blocks and a diagnostic is recorded.

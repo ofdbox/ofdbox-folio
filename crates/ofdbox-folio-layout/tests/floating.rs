@@ -375,3 +375,97 @@ fn behind_text_floating_image_is_painted_before_text() {
         "behindDoc image should be painted before text: image={image_index} text={text_index}"
     );
 }
+
+#[test]
+fn floating_object_that_does_not_fit_moves_to_next_page() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    flow.push(Block::Paragraph(paragraph(
+        "A paragraph at the top of the page.",
+    )));
+    let mut image = image_block(&mut flow);
+    if let Block::Image(block) = &mut image {
+        block.size = Some((Twips::from_mm(20.0), Twips::from_mm(245.0)));
+    }
+    let mut floating = FloatingObject::new(Point::new(0.0, 0.0), image);
+    floating.position_from = (PositionFrom::Paragraph, PositionFrom::Paragraph);
+    floating.width = Some(Twips::from_mm(20.0));
+    flow.push(Block::Floating(Box::new(floating)));
+    flow.push(Block::Paragraph(paragraph(
+        "Text after the floating image should stay visible on the next page.",
+    )));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    assert!(
+        fixed.pages.len() >= 2,
+        "the tall floating object should move to a second page"
+    );
+    assert!(
+        fixed.pages[0]
+            .content
+            .root
+            .children
+            .iter()
+            .all(|element| !matches!(element, Element::Image(_))),
+        "the first page should not contain the floating image"
+    );
+    let image_page = fixed
+        .pages
+        .iter()
+        .position(|page| {
+            page.content
+                .root
+                .children
+                .iter()
+                .any(|element| matches!(element, Element::Image(_)))
+        })
+        .expect("floating image page");
+    let (_, image_y, _, _) = image_rect(&fixed.pages[image_page]);
+    assert!(
+        (image_y - 25.4).abs() < 1.0,
+        "the image should start at the top of its page: y={image_y}"
+    );
+    let total_lines: usize = fixed.pages.iter().map(|page| page.text.lines.len()).sum();
+    assert!(
+        total_lines >= 2,
+        "both paragraphs should still be laid out: total lines={total_lines}"
+    );
+}
+
+#[test]
+fn full_width_square_wrap_moves_paragraph_below() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    let mut image = image_block(&mut flow);
+    if let Block::Image(block) = &mut image {
+        block.size = Some((Twips::from_mm(155.0), Twips::from_mm(20.0)));
+    }
+    let mut floating = FloatingObject::new(Point::new(0.0, 0.0), image);
+    floating.width = Some(Twips::from_mm(155.0));
+    floating.wrap = WrapMode::Square;
+    flow.push(Block::Floating(Box::new(floating)));
+    flow.push(Block::Paragraph(paragraph(
+        "This paragraph should be placed below the full-width image instead of \
+         wrapping one character per line.",
+    )));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let page = &fixed.pages[0];
+    let (_, image_y, _, image_h) = image_rect(page);
+    let first = page.text.lines.first().expect("body line");
+    assert!(
+        first.bbox.y >= image_y + image_h - 1.0,
+        "the paragraph should move below the image: line_y={} image_bottom={}",
+        first.bbox.y,
+        image_y + image_h
+    );
+    assert!(
+        first.bbox.width > 100.0,
+        "the line should use the full text width: {:?}",
+        first.bbox
+    );
+}

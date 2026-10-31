@@ -378,6 +378,9 @@ struct Engine<'a> {
     endnotes: Vec<PendingNote>,
     /// Square wrapping exclusion areas on this page.
     float_exclusions: Vec<FloatExclusion>,
+    /// Floating objects that did not fit on their anchor page and wait for the
+    /// next page.
+    pending_floats: Vec<ofdbox_folio_ir::FloatingObject>,
     headings: Vec<(u8, String, usize, f64)>,
     /// Count of characters missing glyphs in their font, summarized into one
     /// diagnostic at the end.
@@ -428,6 +431,7 @@ impl<'a> Engine<'a> {
             bottom_inset: 0.0,
             endnotes: Vec::new(),
             float_exclusions: Vec::new(),
+            pending_floats: Vec::new(),
             headings: Vec::new(),
             missing_chars: 0,
         }
@@ -445,6 +449,10 @@ impl<'a> Engine<'a> {
         for section in &self.document.sections {
             self.begin_section(&section.setup, &section.headers, &section.footers);
             self.place_blocks(&section.blocks);
+            if !self.pending_floats.is_empty() {
+                self.new_page();
+                self.start_page_body();
+            }
             self.finish_page();
         }
         if self.fixed.pages.is_empty() {
@@ -981,6 +989,7 @@ impl<'a> Engine<'a> {
         }
         self.page_started = true;
         self.layout_header();
+        self.flush_pending_floats();
     }
 
     /// Which header/footer set this page uses: different first page → default;
@@ -1078,7 +1087,19 @@ impl<'a> Engine<'a> {
             self.place_block(&floating.block);
             return;
         }
+        self.place_floating_impl(floating, true);
+    }
+
+    /// Place a floating object, deferring it to the next page when it does not
+    /// fit in the remaining page height.
+    fn place_floating_impl(
+        &mut self,
+        floating: &ofdbox_folio_ir::FloatingObject,
+        allow_defer: bool,
+    ) {
         let page = self.page_frame();
+        let content_height = page.bottom - page.top;
+        let snapshot = self.snapshot();
         let width = floating
             .width
             .map(|width| width.to_mm())
@@ -1120,6 +1141,24 @@ impl<'a> Engine<'a> {
         self.cursor = saved.1;
         self.in_frame = saved.2;
 
+        if allow_defer
+            && !matches!(from_v, ofdbox_folio_ir::PositionFrom::Page)
+            && bottom > page.bottom + 1e-6
+            && bottom - y <= content_height + 1e-6
+        {
+            // Move the object to the next page instead of letting it overflow;
+            // the next page places it at the top before its body content.
+            self.restore(snapshot);
+            self.pending_floats.push(floating.clone());
+            return;
+        }
+        if bottom > page.bottom + 1e-6 {
+            self.diagnostic(
+                DiagnosticCode::Geometry,
+                "floating object does not fit on the page; allowed to overflow",
+            );
+        }
+
         if floating.behind_text {
             // `behindDoc="1"`: paint the floating content behind the body text
             // that was already placed on this page.
@@ -1149,6 +1188,17 @@ impl<'a> Engine<'a> {
                 });
             }
             _ => {}
+        }
+    }
+
+    /// Place deferred floating objects at the top of a new page.
+    fn flush_pending_floats(&mut self) {
+        if self.pending_floats.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_floats);
+        for floating in pending {
+            self.place_floating_impl(&floating, false);
         }
     }
 
@@ -1892,8 +1942,22 @@ impl<'a> Engine<'a> {
             let (probe_left, probe_right) =
                 self.floating_insets(self.cursor, self.cursor + estimate);
             if probe_left > 0.0 || probe_right > 0.0 {
-                self.place_paragraph_wrapped(&style, &pieces, &links, &images);
-                return;
+                // When the object covers almost the whole text width there is no
+                // usable side band; move the paragraph below the object instead
+                // of wrapping it one character per line.
+                let available = self.content_width() - probe_left - probe_right;
+                if available < 8.0 {
+                    let mut below = self.cursor;
+                    for exclusion in &self.float_exclusions {
+                        if exclusion.bottom > below && exclusion.top < self.cursor + estimate {
+                            below = below.max(exclusion.bottom);
+                        }
+                    }
+                    self.cursor = below;
+                } else {
+                    self.place_paragraph_wrapped(&style, &pieces, &links, &images);
+                    return;
+                }
             }
         }
 
@@ -2001,6 +2065,11 @@ impl<'a> Engine<'a> {
                 start: from + relative.start,
                 end: from + relative.end,
             };
+            // Trailing whitespace produces an empty span; stop instead of
+            // re-emitting the same (empty) line forever.
+            if span.end <= from {
+                break;
+            }
             let line_box = self.line_box(style, pieces, images, &span);
             if self.cursor + line_box.height > self.bottom() + 1e-6 && self.page_body {
                 self.new_flow();
