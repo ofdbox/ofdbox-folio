@@ -38,6 +38,7 @@ impl<'a> Engine<'a> {
             _ => (content_width, false),
         };
         let widths = self.table_widths(table, target_width, scale_fixed);
+        let min_heights = self.table_row_min_heights(table, &widths);
         let table_width: f64 = widths.iter().sum();
         let indent = table.indent.to_mm();
         let offset = match table.alignment {
@@ -73,6 +74,7 @@ impl<'a> Engine<'a> {
                 false,
                 true,
                 table_left,
+                min_heights[index],
             );
             let complete = fragment.continuation.iter().all(Option::is_none);
             if complete && fragment.bottom <= page_bottom + 1e-6 {
@@ -86,7 +88,14 @@ impl<'a> Engine<'a> {
                 // The row must stay on one page: move it as a whole and retry.
                 self.restore(snapshot);
                 self.new_flow();
-                self.repeat_header_rows(table, &widths, header_rows, page_bottom, table_left);
+                self.repeat_header_rows(
+                    table,
+                    &widths,
+                    header_rows,
+                    page_bottom,
+                    table_left,
+                    &min_heights,
+                );
                 let retry = self.layout_row(
                     table,
                     &widths,
@@ -97,6 +106,7 @@ impl<'a> Engine<'a> {
                     true,
                     true,
                     table_left,
+                    min_heights[index],
                 );
                 if retry.continuation.iter().any(Option::is_some) {
                     self.diagnostic(
@@ -114,7 +124,14 @@ impl<'a> Engine<'a> {
                 // page, repeat the header and try again.
                 self.restore(snapshot);
                 self.new_flow();
-                self.repeat_header_rows(table, &widths, header_rows, page_bottom, table_left);
+                self.repeat_header_rows(
+                    table,
+                    &widths,
+                    header_rows,
+                    page_bottom,
+                    table_left,
+                    &min_heights,
+                );
                 let retry = self.layout_row(
                     table,
                     &widths,
@@ -125,6 +142,7 @@ impl<'a> Engine<'a> {
                     true,
                     true,
                     table_left,
+                    min_heights[index],
                 );
                 if retry.bottom > page_bottom + 1e-6 {
                     self.diagnostic(
@@ -141,7 +159,14 @@ impl<'a> Engine<'a> {
             // the rest on the next page.
             self.cursor = fragment.bottom;
             self.new_flow();
-            self.repeat_header_rows(table, &widths, header_rows, page_bottom, table_left);
+            self.repeat_header_rows(
+                table,
+                &widths,
+                header_rows,
+                page_bottom,
+                table_left,
+                &min_heights,
+            );
             if complete {
                 // Only padding / fixed row height overflows; the row itself is
                 // already complete.
@@ -179,6 +204,7 @@ impl<'a> Engine<'a> {
         count: usize,
         limit: f64,
         table_left: f64,
+        min_heights: &[f64],
     ) {
         for header in 0..count {
             let fragment = self.layout_row(
@@ -191,6 +217,7 @@ impl<'a> Engine<'a> {
                 true,
                 false,
                 table_left,
+                min_heights.get(header).copied().unwrap_or(1.0),
             );
             self.cursor = fragment.bottom;
         }
@@ -303,6 +330,89 @@ impl<'a> Engine<'a> {
         }
     }
 
+    /// Minimum row heights derived from cell content and vertical merges.
+    fn table_row_min_heights(&mut self, table: &Table, widths: &[f64]) -> Vec<f64> {
+        let mut heights = vec![0.0_f64; table.rows.len()];
+        let mut baseline = vec![0.0_f64; table.rows.len()];
+        for (row_index, row) in table.rows.iter().enumerate() {
+            let mut column = 0_usize;
+            let mut content = 0.0_f64;
+            for cell in &row.cells {
+                let span = usize::try_from(cell.span.max(1)).unwrap_or(1);
+                let width: f64 = widths.iter().skip(column).take(span).sum();
+                if width > 0.0 && cell.v_merge != ofdbox_folio_ir::VMerge::Continue {
+                    content = content.max(self.measure_cell_height(cell, width, table));
+                }
+                column += span;
+            }
+            baseline[row_index] = match row.height {
+                Some(fixed) => match row.height_rule {
+                    ofdbox_folio_ir::RowHeightRule::Auto => content,
+                    ofdbox_folio_ir::RowHeightRule::Exact => fixed.to_mm().max(1.0),
+                    _ => content.max(fixed.to_mm().max(1.0)),
+                },
+                None => content,
+            }
+            .max(1.0);
+        }
+        let max_row_height = (self.bottom() - self.frame.top).max(1.0);
+        // Stretch rows that a vertical-merge start cell spans so its content fits.
+        for row_index in 0..table.rows.len() {
+            let mut column = 0_usize;
+            for cell in &table.rows[row_index].cells {
+                let span = usize::try_from(cell.span.max(1)).unwrap_or(1);
+                let width: f64 = widths.iter().skip(column).take(span).sum();
+                if width > 0.0 && cell.v_merge == ofdbox_folio_ir::VMerge::Restart {
+                    let required = self.measure_cell_height(cell, width, table);
+                    let mut end = row_index + 1;
+                    while end < table.rows.len()
+                        && cell_at_column(&table.rows[end], column)
+                            .is_some_and(|next| next.v_merge == ofdbox_folio_ir::VMerge::Continue)
+                    {
+                        end += 1;
+                    }
+                    let exact = table.rows[row_index..end].iter().any(|row| {
+                        matches!(row.height_rule, ofdbox_folio_ir::RowHeightRule::Exact)
+                    });
+                    if !exact
+                        && end > row_index
+                        && required <= max_row_height
+                        && required > baseline[row_index..end].iter().sum::<f64>()
+                    {
+                        let current: f64 = baseline[row_index..end]
+                            .iter()
+                            .zip(&heights[row_index..end])
+                            .map(|(base, extra)| base + extra)
+                            .sum();
+                        if required > current {
+                            let extra = (required - current) / (end - row_index) as f64;
+                            for height in &mut heights[row_index..end] {
+                                *height += extra;
+                            }
+                        }
+                    }
+                }
+                column += span;
+            }
+        }
+        heights
+    }
+
+    /// Content height of one cell at the given cell width.
+    fn measure_cell_height(
+        &mut self,
+        cell: &ofdbox_folio_ir::Cell,
+        width: f64,
+        table: &Table,
+    ) -> f64 {
+        let padding = cell.padding.unwrap_or(table.cell_padding);
+        let inner =
+            (width - padding.left.to_mm().max(0.0) - padding.right.to_mm().max(0.0)).max(1.0);
+        self.measure_blocks(&cell.blocks, inner)
+            + padding.top.to_mm().max(0.0)
+            + padding.bottom.to_mm().max(0.0)
+    }
+
     /// Lay out one row (possibly only part of it) and return the bottom occupied
     /// on this page plus the continuation position of each cell.
     ///
@@ -323,6 +433,7 @@ impl<'a> Engine<'a> {
         force: bool,
         allow_floating: bool,
         table_left: f64,
+        min_height: f64,
     ) -> RowFragment {
         let row: &Row = &table.rows[index];
         let saved_frame = self.frame;
@@ -410,6 +521,9 @@ impl<'a> Engine<'a> {
                 ofdbox_folio_ir::RowHeightRule::Exact => fixed,
                 _ => height.max(fixed),
             };
+        }
+        if !matches!(row.height_rule, ofdbox_folio_ir::RowHeightRule::Exact) {
+            height = height.max(min_height);
         }
         if complete {
             for metric in &align_metrics {
@@ -1788,6 +1902,17 @@ impl<'a> Engine<'a> {
         }));
         self.cursor += height;
     }
+}
+
+fn cell_at_column(row: &Row, column: usize) -> Option<&ofdbox_folio_ir::Cell> {
+    let mut current = 0_usize;
+    for cell in &row.cells {
+        if current == column {
+            return Some(cell);
+        }
+        current += usize::try_from(cell.span.max(1)).unwrap_or(1);
+    }
+    None
 }
 
 fn shift_element_y(element: &mut Element, dy: f64) {

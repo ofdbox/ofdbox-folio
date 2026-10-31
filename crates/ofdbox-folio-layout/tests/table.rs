@@ -1,4 +1,4 @@
-﻿//! Additional A2 tests: tables, headers and footers.
+//! Additional A2 tests: tables, headers and footers.
 //!
 //! Like `layout.rs` these rely on the system's Arial for metrics and are skipped
 //! when the font is unavailable.
@@ -9,7 +9,7 @@ use ofdbox_folio_ir::{
     Align, Block, Border, Cell, Column, ColumnWidth, Element, Field, FieldKind, FlowDocument,
     FontError, FontProvider, FontRequest, HeaderFooter, Inline, LineSpacing, Margins, Metadata,
     PageSetup, Paint, ParaStyle, Paragraph, Rgba, Row, RowHeightRule, Table, TableBorders,
-    TableWidth, TextRun, TextStyle, Twips,
+    TableWidth, TextRun, TextStyle, Twips, VMerge,
 };
 use ofdbox_folio_layout::{LayoutOptions, layout, layout_with};
 
@@ -768,5 +768,47 @@ fn autofit_columns_follow_content_width() {
     assert!(
         max_width < 80.0,
         "autofit should keep the table close to the text width, got {max_width}"
+    );
+}
+
+#[test]
+fn vertical_merge_stretches_spanned_rows() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    let mut merged_blocks = Vec::new();
+    for index in 0..12 {
+        merged_blocks.push(Block::Paragraph(paragraph(&format!(
+            "Merged cell paragraph {index} makes the vertical merge tall."
+        ))));
+    }
+    let row0 = Row::new(vec![
+        Cell::new(merged_blocks).with_v_merge(VMerge::Restart),
+        cell("A"),
+        cell(""),
+    ]);
+    let row1 = Row::new(vec![
+        Cell::new(Vec::new()).with_v_merge(VMerge::Continue),
+        cell("B"),
+        cell(""),
+    ]);
+    flow.push(Block::Table(table(vec![row0, row1], 0)));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let lines = texts(&fixed.pages[0]);
+    let y_a = lines
+        .iter()
+        .find(|(text, _, _)| text.contains('A'))
+        .map(|(_, _, y)| *y)
+        .expect("A");
+    let y_b = lines
+        .iter()
+        .find(|(text, _, _)| text.contains('B'))
+        .map(|(_, _, y)| *y)
+        .expect("B");
+    assert!(
+        y_b - y_a > 20.0,
+        "the vertical merge should stretch row 0: A={y_a} B={y_b}"
     );
 }
