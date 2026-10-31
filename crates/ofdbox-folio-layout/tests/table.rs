@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
-    Align, Block, Border, Cell, Column, ColumnWidth, Field, FieldKind, FlowDocument, FontError,
-    FontProvider, FontRequest, HeaderFooter, Inline, LineSpacing, Margins, Metadata, PageSetup,
-    ParaStyle, Paragraph, Row, Table, TableBorders, TextRun, TextStyle, Twips,
+    Align, Block, Border, Cell, Column, ColumnWidth, Element, Field, FieldKind, FlowDocument,
+    FontError, FontProvider, FontRequest, HeaderFooter, Inline, LineSpacing, Margins, Metadata,
+    PageSetup, ParaStyle, Paragraph, Row, Table, TableBorders, TextRun, TextStyle, Twips,
 };
 use ofdbox_folio_layout::{LayoutOptions, layout, layout_with};
 
@@ -509,4 +509,48 @@ fn justifies_and_indents_inside_cells() {
             line.bbox.right()
         );
     }
+}
+
+#[test]
+fn empty_table_row_keeps_line_height_and_borders() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    let empty_cell = || Cell::new(vec![Block::Paragraph(paragraph(""))]);
+    let table = table(
+        vec![
+            Row::new(vec![cell("A"), cell(""), cell("")]),
+            Row::new(vec![empty_cell(), empty_cell(), empty_cell()]),
+            Row::new(vec![cell("B"), cell(""), cell("")]),
+        ],
+        0,
+    );
+    flow.push(Block::Table(table));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let page = &fixed.pages[0];
+    let mut ys: Vec<f64> = page
+        .content
+        .root
+        .children
+        .iter()
+        .filter_map(|element| match element {
+            Element::Path(path) if path.stroke.is_some() => path.path.bounds(),
+            _ => None,
+        })
+        .filter(|bounds| bounds.height < 0.01 && bounds.width > 1.0)
+        .map(|bounds| bounds.y)
+        .collect();
+    ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    ys.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+    assert!(ys.len() >= 4, "horizontal borders: {ys:?}");
+    let min_gap = ys
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        min_gap > 3.0,
+        "empty row collapsed to a borderless strip: borders at {ys:?}"
+    );
 }

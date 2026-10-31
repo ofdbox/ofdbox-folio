@@ -2127,8 +2127,16 @@ impl<'a> Engine<'a> {
     /// Vertical metrics of the line's primary font: (ascent, single line height),
     /// in em.
     fn font_metrics(&self, pieces: &[Piece], line: &LineSpan) -> (f64, f64) {
+        // An empty line (an empty paragraph or a whitespace-only one) has no
+        // pieces in its span; fall back to all pieces of the paragraph so the
+        // line still uses the paragraph's font metrics.
+        let range = if line.start < line.end {
+            &pieces[line.start..line.end]
+        } else {
+            pieces
+        };
         let mut best: Option<(f64, (f64, f64))> = None;
-        for piece in &pieces[line.start..line.end] {
+        for piece in range {
             let Some(style) = self.styles.get(piece.style) else {
                 continue;
             };
@@ -2170,12 +2178,24 @@ impl<'a> Engine<'a> {
     }
 
     fn max_size(&self, pieces: &[Piece], line: &LineSpan) -> f64 {
-        pieces[line.start..line.end]
+        // Empty lines fall back to all pieces of the paragraph, and a fully
+        // empty paragraph falls back to the default text size so it still
+        // occupies a normal line.
+        let range = if line.start < line.end {
+            &pieces[line.start..line.end]
+        } else {
+            pieces
+        };
+        let size = range
             .iter()
             .filter_map(|piece| self.styles.get(piece.style))
             .map(|style| style.size.to_mm())
-            .fold(0.0_f64, f64::max)
-            .max(1.0)
+            .fold(0.0_f64, f64::max);
+        if size > 0.0 {
+            size
+        } else {
+            TextStyle::default().size.to_mm()
+        }
     }
 
     // ---- Measurement ----

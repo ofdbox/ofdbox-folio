@@ -165,6 +165,11 @@ pub(crate) fn break_lines(pieces: &[Piece], first_width: f64, width: f64) -> Vec
         available = width.max(1.0);
     }
 
+    // An empty paragraph still occupies one line, like Word's paragraph mark.
+    if lines.is_empty() {
+        lines.push(LineSpan { start: 0, end: 0 });
+    }
+
     lines
 }
 

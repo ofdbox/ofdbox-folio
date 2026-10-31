@@ -72,6 +72,8 @@ page ─ margins ─► content area (width W)
      characters (for Chinese lines); the last line is aligned Left;
    - after stretching, word spacing may range from negative to 0 (glyphs are not compressed).
 
+An empty paragraph still occupies one line. When it has no runs, layout uses the default text size for that line, so empty table rows keep a normal row height and their borders.
+
 ### 4.1 Line height and font fallback
 
 - Line height: single spacing = font size × (ascent − descent + lineGap), taken from the font's `hhea` (via `ttf-parser`);
