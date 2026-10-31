@@ -86,15 +86,20 @@ impl Counters {
                 continue;
             }
             let index: u8 = digits.parse::<u8>().unwrap_or(1).saturating_sub(1);
+            let referenced = numbering.levels.get(&(num_id, index));
+            let referenced_format = referenced
+                .map(|level| level.format)
+                .unwrap_or(definition.format);
             let number = if index == level {
                 value
+            } else if let Some(value) = self.values.get(&(num_id, index)) {
+                *value
             } else {
-                self.values
-                    .get(&(num_id, index))
-                    .copied()
+                referenced
+                    .map(|level| level.start)
                     .unwrap_or(definition.start)
             };
-            marker.push_str(&format_number(definition.format, number));
+            marker.push_str(&format_number(referenced_format, number));
         }
         if definition.format == MarkerFormat::Bullet {
             marker = normalise_bullet(&marker);
@@ -395,5 +400,29 @@ mod tests {
         assert_eq!(super::format_number(MarkerFormat::UpperRoman, 9), "IX");
         assert_eq!(super::format_number(MarkerFormat::LowerLetter, 2), "b");
         assert_eq!(super::format_number(MarkerFormat::UpperLetter, 27), "Z");
+    }
+}
+
+#[cfg(test)]
+mod multi_level_tests {
+    use super::*;
+
+    #[test]
+    fn marker_uses_each_levels_own_format() {
+        let xml = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+            <w:abstractNum w:abstractNumId="0">
+                <w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>
+                <w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/><w:lvlText w:val="%1.%2"/></w:lvl>
+            </w:abstractNum>
+            <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+        </w:numbering>"#;
+        let numbering = Numbering::parse(xml);
+        let mut counters = Counters::default();
+        assert_eq!(counters.next(&numbering, 1, 0), Some("1.".to_owned()));
+        assert_eq!(
+            counters.next(&numbering, 1, 1),
+            Some("1.a".to_owned()),
+            "level 2 should use lowerLetter for its own placeholder"
+        );
     }
 }
