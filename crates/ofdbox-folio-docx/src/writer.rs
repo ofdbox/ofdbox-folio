@@ -566,6 +566,9 @@ impl<'a> Writer<'a> {
             _ => format!("<w:tblW w:type=\"dxa\" w:w=\"{total}\"/>"),
         };
         out.push_str(&format!("<w:tbl><w:tblPr>{width_xml}"));
+        if table.autofit {
+            out.push_str("<w:tblLayout w:type=\"autofit\"/>");
+        }
         out.push_str(&table_borders_xml(&table.borders));
         out.push_str(&margins_xml(&table.cell_padding));
         if table.alignment != Align::Left {

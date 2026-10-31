@@ -1,4 +1,4 @@
-//! Additional A2 tests: tables, headers and footers.
+﻿//! Additional A2 tests: tables, headers and footers.
 //!
 //! Like `layout.rs` these rely on the system's Arial for metrics and are skipped
 //! when the font is unavailable.
@@ -737,4 +737,36 @@ fn cell_shading_draws_a_filled_rectangle() {
             _ => false,
         });
     assert!(shaded, "expected a filled cell background rectangle");
+}
+
+#[test]
+fn autofit_columns_follow_content_width() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    let mut table = table(vec![Row::new(vec![cell("short")])], 0);
+    table.columns = vec![Column {
+        width: ColumnWidth::Weight(1),
+    }];
+    table.autofit = true;
+    flow.push(Block::Table(table));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let max_width = fixed.pages[0]
+        .content
+        .root
+        .children
+        .iter()
+        .filter_map(|element| match element {
+            Element::Path(path) if path.stroke.is_some() => path.path.bounds(),
+            _ => None,
+        })
+        .filter(|bounds| bounds.height < 0.01)
+        .map(|bounds| bounds.width)
+        .fold(0.0_f64, f64::max);
+    assert!(
+        max_width < 80.0,
+        "autofit should keep the table close to the text width, got {max_width}"
+    );
 }

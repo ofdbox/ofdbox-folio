@@ -413,6 +413,8 @@ pub(crate) struct RawTableProps {
     pub first_row: Option<bool>,
     /// Whether horizontal row banding is enabled.
     pub band_rows: Option<bool>,
+    /// Whether column widths are content-driven (`tblLayout=autofit`).
+    pub autofit: Option<bool>,
 }
 
 impl RawTableProps {
@@ -447,6 +449,9 @@ impl RawTableProps {
         }
         if over.band_rows.is_some() {
             self.band_rows = over.band_rows;
+        }
+        if over.autofit.is_some() {
+            self.autofit = over.autofit;
         }
     }
 
@@ -665,6 +670,9 @@ pub(crate) fn parse_table_props(
                             _ => Some(TableWidth::Twips(Twips::new(width as i64))),
                         }
                     });
+                }
+                if is_element(&element, "tblLayout") {
+                    props.autofit = attr(&element, "type").map(|value| value != "fixed");
                 }
                 if is_element(&element, "tblLook") {
                     let on = |value: Option<String>| {

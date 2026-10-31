@@ -724,6 +724,8 @@ pub struct Table {
     pub indent: Twips,
     /// Declared table width.
     pub width: TableWidth,
+    /// Whether column widths should be derived from cell content.
+    pub autofit: bool,
 }
 
 impl Table {
@@ -738,6 +740,7 @@ impl Table {
             alignment: Align::Left,
             indent: Twips::default(),
             width: TableWidth::Auto,
+            autofit: false,
         }
     }
 }

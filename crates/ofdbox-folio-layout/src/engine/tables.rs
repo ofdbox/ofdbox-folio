@@ -198,12 +198,17 @@ impl<'a> Engine<'a> {
 
     /// Table column widths (millimeters), scaled to `target_width`.
     pub(crate) fn table_widths(
-        &self,
+        &mut self,
         table: &Table,
         target_width: f64,
         scale_fixed: bool,
     ) -> Vec<f64> {
         let total = target_width.max(1.0);
+        if table.autofit
+            && let Some(widths) = self.autofit_widths(table, total)
+        {
+            return widths;
+        }
         let mut widths = vec![0.0_f64; table.columns.len()];
         let mut fixed = 0.0;
         let mut weights = 0_u32;
@@ -237,6 +242,65 @@ impl<'a> Engine<'a> {
             }
         }
         widths
+    }
+
+    /// Content-derived column widths for autofit tables.
+    fn autofit_widths(&mut self, table: &Table, target: f64) -> Option<Vec<f64>> {
+        let mut desired = vec![0.0_f64; table.columns.len()];
+        for row in &table.rows {
+            let mut column = 0_usize;
+            for cell in &row.cells {
+                let span = usize::try_from(cell.span.max(1)).unwrap_or(1);
+                if span == 1 && column < desired.len() {
+                    let padding = cell.padding.unwrap_or(table.cell_padding);
+                    let mut width = 0.0_f64;
+                    for block in &cell.blocks {
+                        width = width.max(self.intrinsic_block_width(block));
+                    }
+                    let width =
+                        width + padding.left.to_mm().max(0.0) + padding.right.to_mm().max(0.0);
+                    desired[column] = desired[column].max(width);
+                }
+                column += span;
+            }
+        }
+        if desired.iter().all(|width| *width <= 0.0) {
+            return None;
+        }
+        let total: f64 = desired.iter().sum();
+        let scale = if total > 0.0
+            && (total > target || !matches!(table.width, ofdbox_folio_ir::TableWidth::Auto))
+        {
+            target / total
+        } else {
+            1.0
+        };
+        for width in &mut desired {
+            *width = (*width * scale).max(1.0);
+        }
+        Some(desired)
+    }
+
+    /// Natural width of a block when it is not wrapped.
+    fn intrinsic_block_width(&mut self, block: &Block) -> f64 {
+        match block {
+            Block::Paragraph(paragraph) => {
+                let laid = self.lay_out_paragraph(paragraph, self.total_pages);
+                let mut width = 0.0_f64;
+                for line in &laid.lines {
+                    let line_width: f64 = laid.pieces[line.start..line.end]
+                        .iter()
+                        .map(|piece| piece.width)
+                        .sum();
+                    width = width.max(line_width);
+                }
+                width
+                    + laid.style.left_indent.to_mm().max(0.0)
+                    + laid.style.right_indent.to_mm().max(0.0)
+            }
+            Block::Image(image) => image.size.map(|(width, _)| width.to_mm()).unwrap_or(0.0),
+            _ => 0.0,
+        }
     }
 
     /// Lay out one row (possibly only part of it) and return the bottom occupied

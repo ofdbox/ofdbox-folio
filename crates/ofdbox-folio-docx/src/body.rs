@@ -850,6 +850,7 @@ impl<'a> Builder<'a> {
         table.alignment = resolved.alignment.unwrap_or(Align::Left);
         table.indent = resolved.indent.unwrap_or_default();
         table.width = resolved.width.unwrap_or(TableWidth::Auto);
+        table.autofit = resolved.autofit.unwrap_or(false);
         Ok(table)
     }
 
