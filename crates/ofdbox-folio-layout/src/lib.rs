@@ -299,6 +299,15 @@ fn uses_floating(document: &FlowDocument) -> bool {
         .any(|section| blocks_use_floating(&section.blocks))
 }
 
+/// Whether a row directly contains a floating block in one of its cells.
+fn row_has_floating(row: &Row) -> bool {
+    row.cells.iter().any(|cell| {
+        cell.blocks
+            .iter()
+            .any(|block| matches!(block, Block::Floating(_)))
+    })
+}
+
 /// Whether the document contains an automatic table of contents.
 fn uses_toc(document: &FlowDocument) -> bool {
     fn blocks_use_toc(blocks: &[Block]) -> bool {
@@ -518,6 +527,10 @@ struct Engine<'a> {
     frame_element_start: usize,
     /// Bottom of floating objects placed inside the current frame.
     frame_float_bottom: f64,
+    /// Whether the row-float split diagnostic was already recorded.
+    float_row_split_reported: bool,
+    /// Whether the nested-table split diagnostic was already recorded.
+    nested_table_split_reported: bool,
     /// Index of the first body element in `page.scene.children` (after the header).
     body_element_start: usize,
     headings: Vec<(u8, String, usize, f64)>,
@@ -582,6 +595,8 @@ impl<'a> Engine<'a> {
             frame_exclusions: Vec::new(),
             frame_element_start: 0,
             frame_float_bottom: 0.0,
+            float_row_split_reported: false,
+            nested_table_split_reported: false,
             body_element_start: 0,
             headings: Vec::new(),
             missing_chars: 0,
@@ -2037,6 +2052,8 @@ impl<'a> Engine<'a> {
             self.warn("table has no rows or columns; skipped");
             return;
         }
+        let nested = self.in_frame;
+        let pages_before = self.fixed.pages.len();
         let widths = self.table_widths(table);
         let header_rows = usize::try_from(table.header_rows)
             .unwrap_or(0)
@@ -2063,6 +2080,7 @@ impl<'a> Engine<'a> {
                 page_bottom,
                 resume.as_deref(),
                 false,
+                true,
             );
             let complete = fragment.continuation.iter().all(Option::is_none);
             if complete && fragment.bottom <= page_bottom + 1e-6 {
@@ -2078,8 +2096,16 @@ impl<'a> Engine<'a> {
                 self.restore(snapshot);
                 self.new_flow();
                 self.repeat_header_rows(table, &widths, header_rows, page_bottom);
-                let retry =
-                    self.layout_row(table, &widths, index, self.cursor, page_bottom, None, true);
+                let retry = self.layout_row(
+                    table,
+                    &widths,
+                    index,
+                    self.cursor,
+                    page_bottom,
+                    None,
+                    true,
+                    true,
+                );
                 if retry.bottom > page_bottom + 1e-6 {
                     self.diagnostic(
                         DiagnosticCode::Geometry,
@@ -2102,6 +2128,13 @@ impl<'a> Engine<'a> {
                 index += 1;
                 resume = None;
             } else {
+                if row_has_floating(&table.rows[index]) && !self.float_row_split_reported {
+                    self.diagnostic(
+                        DiagnosticCode::Geometry,
+                        "table row with floating objects spans pages; continuation is approximate",
+                    );
+                    self.float_row_split_reported = true;
+                }
                 self.diagnostic(
                     DiagnosticCode::Geometry,
                     "table row spans pages; continued by row",
@@ -2109,12 +2142,20 @@ impl<'a> Engine<'a> {
                 resume = Some(fragment.continuation);
             }
         }
+        if nested && self.fixed.pages.len() > pages_before && !self.nested_table_split_reported {
+            self.diagnostic(
+                DiagnosticCode::Geometry,
+                "nested table spans pages; continuation is approximate",
+            );
+            self.nested_table_split_reported = true;
+        }
     }
 
     /// Repeat the header rows when the table crosses a page.
     fn repeat_header_rows(&mut self, table: &Table, widths: &[f64], count: usize, limit: f64) {
         for header in 0..count {
-            let fragment = self.layout_row(table, widths, header, self.cursor, limit, None, true);
+            let fragment =
+                self.layout_row(table, widths, header, self.cursor, limit, None, true, false);
             self.cursor = fragment.bottom;
         }
     }
@@ -2175,6 +2216,7 @@ impl<'a> Engine<'a> {
         limit: f64,
         resume: Option<&[Option<CellContinuation>]>,
         force: bool,
+        allow_floating: bool,
     ) -> RowFragment {
         let row: &Row = &table.rows[index];
         let padding_top = table.cell_padding.top.to_mm().max(0.0);
@@ -2221,6 +2263,7 @@ impl<'a> Engine<'a> {
                 top + padding_top,
                 resume_at,
                 force,
+                allow_floating,
             );
             placed_any |= outcome.placed_any;
             max_bottom = max_bottom.max(outcome.bottom + padding_bottom);
@@ -2256,6 +2299,7 @@ impl<'a> Engine<'a> {
         top: f64,
         resume: Option<CellContinuation>,
         force: bool,
+        allow_floating: bool,
     ) -> CellOutcome {
         let saved_frame = self.frame;
         let saved_cursor = self.cursor;
@@ -2269,7 +2313,7 @@ impl<'a> Engine<'a> {
         self.frame_element_start = self.page.scene.children.len();
         self.frame_float_bottom = top;
 
-        if resume.is_none() {
+        if allow_floating && resume.is_none() {
             for block in &cell.blocks {
                 if let Block::Floating(floating) = block {
                     self.place_floating_in_frame(floating);

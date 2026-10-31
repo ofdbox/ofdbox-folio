@@ -179,6 +179,8 @@ An empty paragraph still occupies one line. When it has no runs, layout uses the
   when the body flow moves to the next column or page, so text on later pages does not wrap around an object from an earlier page.
 - Floating objects inside a table cell or header/footer are positioned relative to that frame, with frame-local square-wrap exclusion
   areas; cell paragraphs are re-broken line by line around them. An object overflowing its cell records a `DiagnosticCode::Geometry` warning.
+- Repeated header rows do not redraw floating objects contained in header cells. A table row containing floating objects that spans
+  pages, or a nested table that spans pages, records a `DiagnosticCode::Geometry` warning and continues approximately.
 
 ## 6. Style resolution
 

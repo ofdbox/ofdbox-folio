@@ -637,3 +637,94 @@ fn overlapping_floating_objects_record_a_diagnostic() {
         fixed.report.diagnostics
     );
 }
+
+#[test]
+fn repeated_table_header_does_not_duplicate_cell_floats() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    let mut image = image_block(&mut flow);
+    if let Block::Image(block) = &mut image {
+        block.size = Some((Twips::from_mm(10.0), Twips::from_mm(10.0)));
+    }
+    let mut floating = FloatingObject::new(Point::new(0.0, 0.0), image);
+    floating.width = Some(Twips::from_mm(10.0));
+    let mut table = ofdbox_folio_ir::Table::new(vec![ofdbox_folio_ir::Column {
+        width: ofdbox_folio_ir::ColumnWidth::Twips(Twips::from_mm(70.0)),
+    }]);
+    let mut rows = vec![ofdbox_folio_ir::Row::new(vec![ofdbox_folio_ir::Cell::new(
+        vec![
+            Block::Floating(Box::new(floating)),
+            Block::Paragraph(paragraph("Header")),
+        ],
+    )])];
+    for index in 0..80 {
+        rows.push(ofdbox_folio_ir::Row::new(vec![ofdbox_folio_ir::Cell::new(
+            vec![Block::Paragraph(paragraph(&format!(
+                "Body row {index} should fill enough pages to repeat the header."
+            )))],
+        )]));
+    }
+    table.rows = rows;
+    table.header_rows = 1;
+    flow.push(Block::Table(table));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    assert!(fixed.pages.len() >= 2, "the table should span pages");
+    let images: usize = fixed
+        .pages
+        .iter()
+        .map(|page| {
+            page.content
+                .root
+                .children
+                .iter()
+                .filter(|element| matches!(element, Element::Image(_)))
+                .count()
+        })
+        .sum();
+    assert_eq!(images, 1, "the repeated header must not redraw the float");
+}
+
+#[test]
+fn row_with_float_spanning_pages_records_a_diagnostic() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    for index in 0..20 {
+        flow.push(Block::Paragraph(paragraph(&format!(
+            "Filler paragraph {index} pushes the table down the page."
+        ))));
+    }
+    let mut image = image_block(&mut flow);
+    if let Block::Image(block) = &mut image {
+        block.size = Some((Twips::from_mm(20.0), Twips::from_mm(140.0)));
+    }
+    let mut floating = FloatingObject::new(Point::new(0.0, 0.0), image);
+    floating.width = Some(Twips::from_mm(20.0));
+    let mut table = ofdbox_folio_ir::Table::new(vec![ofdbox_folio_ir::Column {
+        width: ofdbox_folio_ir::ColumnWidth::Twips(Twips::from_mm(70.0)),
+    }]);
+    table.rows = vec![ofdbox_folio_ir::Row::new(vec![ofdbox_folio_ir::Cell::new(
+        vec![
+            Block::Floating(Box::new(floating)),
+            Block::Paragraph(paragraph(
+                &"Long cell text forces the row across pages. ".repeat(80),
+            )),
+        ],
+    )])];
+    flow.push(Block::Table(table));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    assert!(
+        fixed
+            .report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("floating objects spans pages")),
+        "expected a row-float split diagnostic, got {:?}",
+        fixed.report.diagnostics
+    );
+}
