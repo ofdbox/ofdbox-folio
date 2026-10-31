@@ -784,6 +784,19 @@ impl Row {
     }
 }
 
+/// Per-cell border overrides; `None` falls back to the table border.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CellBorders {
+    /// Top border.
+    pub top: Option<Border>,
+    /// Right border.
+    pub right: Option<Border>,
+    /// Bottom border.
+    pub bottom: Option<Border>,
+    /// Left border.
+    pub left: Option<Border>,
+}
+
 /// A table cell.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Cell {
@@ -795,6 +808,8 @@ pub struct Cell {
     pub v_merge: VMerge,
     /// Optional per-cell margins; `None` uses the table's cell padding.
     pub padding: Option<Margins>,
+    /// Per-cell border overrides.
+    pub borders: CellBorders,
 }
 
 impl Cell {
@@ -805,6 +820,7 @@ impl Cell {
             span: 1,
             v_merge: VMerge::None,
             padding: None,
+            borders: CellBorders::default(),
         }
     }
 

@@ -13,8 +13,8 @@ use std::io::{Cursor, Write};
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
-    Align, Block, Border, BorderStyle, Cell, ColumnWidth, Diagnostic, DiagnosticCode, Field,
-    FieldKind, FlowDocument, FontFamily, HeaderFooter, ImageFormat, Inline, LineSpacing,
+    Align, Block, Border, BorderStyle, Cell, CellBorders, ColumnWidth, Diagnostic, DiagnosticCode,
+    Field, FieldKind, FlowDocument, FontFamily, HeaderFooter, ImageFormat, Inline, LineSpacing,
     LinkTarget, Margins, Metadata, NoteKind, PageSetup, ParaStyle, Paragraph, PositionFrom, Report,
     Row, TabAlign, TabLeader, TableBorders, TextStyle, TocBlock, Twips, WrapMode,
 };
@@ -667,6 +667,9 @@ impl<'a> Writer<'a> {
         if let Some(padding) = cell.padding {
             out.push_str(&tc_margins_xml(&padding));
         }
+        if cell.borders != CellBorders::default() {
+            out.push_str(&cell_borders_xml(&cell.borders));
+        }
         out.push_str("</w:tcPr>");
         let mut content = String::new();
         self.blocks_xml(&cell.blocks, &mut content);
@@ -1275,6 +1278,39 @@ fn margins_xml(margins: &Margins) -> String {
         "<w:tblCellMar><w:top w:w=\"{}\" w:type=\"dxa\"/><w:left w:w=\"{}\" w:type=\"dxa\"/><w:bottom w:w=\"{}\" w:type=\"dxa\"/><w:right w:w=\"{}\" w:type=\"dxa\"/></w:tblCellMar>",
         margins.top.0, margins.left.0, margins.bottom.0, margins.right.0
     )
+}
+
+fn cell_borders_xml(borders: &CellBorders) -> String {
+    let mut inner = String::new();
+    let mut push = |name: &str, border: Option<Border>| {
+        let Some(border) = border else {
+            return;
+        };
+        if border.width.0 <= 0 {
+            inner.push_str(&format!("<w:{name} w:val=\"nil\"/>"));
+            return;
+        }
+        let value = match border.style {
+            BorderStyle::Dashed => "dashed",
+            BorderStyle::Dotted => "dotted",
+            BorderStyle::Double => "double",
+            _ => "single",
+        };
+        let size = (border.width.to_pt() * 8.0).round().max(1.0) as i64;
+        inner.push_str(&format!(
+            "<w:{name} w:val=\"{value}\" w:sz=\"{size}\" w:space=\"0\" w:color=\"{:02X}{:02X}{:02X}\"/>",
+            border.color.r, border.color.g, border.color.b
+        ));
+    };
+    push("top", borders.top);
+    push("left", borders.left);
+    push("bottom", borders.bottom);
+    push("right", borders.right);
+    if inner.is_empty() {
+        String::new()
+    } else {
+        format!("<w:tcBorders>{inner}</w:tcBorders>")
+    }
 }
 
 fn tc_margins_xml(margins: &Margins) -> String {

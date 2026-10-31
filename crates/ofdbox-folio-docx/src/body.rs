@@ -4,11 +4,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
-    Align, AnchorId, AssetId, Attachment, AttachmentId, AttachmentInfo, Block, Cell, Column,
-    ColumnWidth, Diagnostic, DiagnosticCode, Field, FieldKind, FloatingObject, FlowDocument,
-    HeaderFooter, ImageAsset, ImageBlock, Inline, InlineImage, Link, LinkTarget, Margins, Metadata,
-    Note, NoteKind, NoteRef, Paragraph, Point, Row, RowHeightRule, Section, Table, TextRun,
-    TextStyle, TocBlock, Twips, VMerge, WrapMode, detect_image_format, image_dimensions,
+    Align, AnchorId, AssetId, Attachment, AttachmentId, AttachmentInfo, Block, Border, BorderStyle,
+    Cell, CellBorders, Column, ColumnWidth, Diagnostic, DiagnosticCode, Field, FieldKind,
+    FloatingObject, FlowDocument, HeaderFooter, ImageAsset, ImageBlock, Inline, InlineImage, Link,
+    LinkTarget, Margins, Metadata, Note, NoteKind, NoteRef, Paragraph, Point, Rgba, Row,
+    RowHeightRule, Section, Table, TextRun, TextStyle, TocBlock, Twips, VMerge, WrapMode,
+    detect_image_format, image_dimensions,
 };
 
 use crate::DocxError;
@@ -883,15 +884,17 @@ impl<'a> Builder<'a> {
         let mut span = 1_u32;
         let mut v_merge = VMerge::None;
         let mut padding = None;
+        let mut borders = CellBorders::default();
         let mut blocks = Vec::new();
         loop {
             match reader.read_event().map_err(crate::xml::xml_error)? {
                 quick_xml::events::Event::Start(element) => match local_name(&element).as_str() {
                     "tcPr" => {
-                        let (cell_span, cell_merge, cell_padding) = parse_cell_props(reader)?;
-                        span = cell_span;
-                        v_merge = cell_merge;
-                        padding = cell_padding;
+                        let parsed = parse_cell_props(reader)?;
+                        span = parsed.span;
+                        v_merge = parsed.v_merge;
+                        padding = parsed.padding;
+                        borders = parsed.borders;
                     }
                     "p" => {
                         let (mut produced, _) = self.parse_paragraph(reader)?;
@@ -930,6 +933,7 @@ impl<'a> Builder<'a> {
         }
         let mut cell = Cell::new(blocks).with_span(span).with_v_merge(v_merge);
         cell.padding = padding;
+        cell.borders = borders;
         Ok(Some(cell))
     }
 
@@ -1363,31 +1367,36 @@ fn parse_row_props(reader: &mut XmlReader<'_>) -> Result<RowProps, DocxError> {
     Ok(props)
 }
 
-/// Cell properties (`w:tcPr`): returns `(column span, vMerge state, optional
-/// per-cell margins)`.
-fn parse_cell_props(
-    reader: &mut XmlReader<'_>,
-) -> Result<(u32, VMerge, Option<Margins>), DocxError> {
-    let mut span = 1;
-    let mut v_merge = VMerge::None;
-    let mut padding = None;
+struct CellProps {
+    span: u32,
+    v_merge: VMerge,
+    padding: Option<Margins>,
+    borders: CellBorders,
+}
+
+/// Cell properties (`w:tcPr`).
+fn parse_cell_props(reader: &mut XmlReader<'_>) -> Result<CellProps, DocxError> {
+    let mut props = CellProps {
+        span: 1,
+        v_merge: VMerge::None,
+        padding: None,
+        borders: CellBorders::default(),
+    };
     loop {
         match reader.read_event().map_err(crate::xml::xml_error)? {
-            quick_xml::events::Event::Start(element) => {
-                if local_name(&element).as_str() == "tcMar" {
-                    padding = Some(parse_cell_margins(reader, &element)?);
-                } else {
-                    skip_element(reader, &element)?;
-                }
-            }
+            quick_xml::events::Event::Start(element) => match local_name(&element).as_str() {
+                "tcMar" => props.padding = Some(parse_cell_margins(reader, &element)?),
+                "tcBorders" => props.borders = parse_cell_borders(reader)?,
+                _ => skip_element(reader, &element)?,
+            },
             quick_xml::events::Event::Empty(element) => match local_name(&element).as_str() {
                 "gridSpan" => {
                     if let Some(value) = attr_i32(&element, "val") {
-                        span = u32::try_from(value).unwrap_or(1).max(1);
+                        props.span = u32::try_from(value).unwrap_or(1).max(1);
                     }
                 }
                 "vMerge" => {
-                    v_merge = match attr(&element, "val").as_deref() {
+                    props.v_merge = match attr(&element, "val").as_deref() {
                         Some("restart") => VMerge::Restart,
                         _ => VMerge::Continue,
                     };
@@ -1399,7 +1408,59 @@ fn parse_cell_props(
             _ => {}
         }
     }
-    Ok((span, v_merge, padding))
+    Ok(props)
+}
+
+/// Parse `w:tcBorders`.
+fn parse_cell_borders(reader: &mut XmlReader<'_>) -> Result<CellBorders, DocxError> {
+    let mut borders = CellBorders::default();
+    loop {
+        match reader.read_event().map_err(crate::xml::xml_error)? {
+            quick_xml::events::Event::Start(element) => skip_element(reader, &element)?,
+            quick_xml::events::Event::Empty(element) => {
+                let Some(border) = cell_border(&element) else {
+                    continue;
+                };
+                match local_name(&element).as_str() {
+                    "top" => borders.top = Some(border),
+                    "bottom" => borders.bottom = Some(border),
+                    "left" | "start" => borders.left = Some(border),
+                    "right" | "end" => borders.right = Some(border),
+                    _ => {}
+                }
+            }
+            quick_xml::events::Event::End(_) => break,
+            quick_xml::events::Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(borders)
+}
+
+/// Parse one cell border; explicit `nil`/`none` becomes a zero-width border so it
+/// suppresses the table-level fallback.
+fn cell_border(element: &quick_xml::events::BytesStart<'_>) -> Option<Border> {
+    let style = attr(element, "val")?;
+    if matches!(style.as_str(), "none" | "nil") {
+        return Some(Border {
+            width: Twips::default(),
+            color: Rgba::BLACK,
+            style: BorderStyle::Solid,
+        });
+    }
+    let width = attr_f64(element, "sz")
+        .map(|eighths| Twips::from_pt(eighths / 8.0))
+        .unwrap_or_else(|| Twips::from_pt(0.5));
+    Some(Border {
+        width,
+        color: Rgba::BLACK,
+        style: match style.as_str() {
+            "dashed" | "dashSmallGap" | "dashDot" => BorderStyle::Dashed,
+            "dotted" => BorderStyle::Dotted,
+            "double" | "thickThinSmallGap" | "thinThickSmallGap" => BorderStyle::Double,
+            _ => BorderStyle::Solid,
+        },
+    })
 }
 
 /// Get a target part from the relationship table by type suffix.

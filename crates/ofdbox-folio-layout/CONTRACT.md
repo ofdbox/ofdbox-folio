@@ -116,8 +116,8 @@ An empty paragraph still occupies one line. When it has no runs, layout uses the
   and content-driven for `Auto`. A fixed row height only takes effect once the whole row has been laid out. When `Row::cant_split` is set,
   a row that does not fit moves to the next page as a whole; a row taller than the page overflows with a `DiagnosticCode::Geometry` warning.
 - Borders: each cell draws four sides. The outermost ring of the table uses `TableBorders::outer`, internal horizontal lines use
-  `horizontal`, and vertical lines use `vertical`; shared edges between adjacent cells are drawn again (same color and width, so
-  there is no visual difference).
+  `horizontal`, and vertical lines use `vertical`; `Cell::borders` overrides individual sides (a zero-width border suppresses the line).
+  Shared edges between adjacent cells are drawn again (same color and width, so there is no visual difference).
 - Cells may contain nested tables, recursively using the same sub-box logic.
 
 ### 5.2 Headers and footers
@@ -243,7 +243,7 @@ Font resources: the bytes of every font used are registered as a `FontAsset` in 
 | Paragraph / character styles, bold italic underline strikethrough, color, font size | Yes | `styles.xml` + `basedOn`, flattened into direct formatting on read |
 | Alignment, indentation, line spacing, space before/after | Yes | |
 | Sections (page size/margins/columns) | Yes | Columns are laid out (equal-width columns; fill the current column before switching) |
-| Tables (column widths, alignment/indent, cell padding, borders, header rows, merged cells, row height rules) | Yes | gridSpan/vMerge are read and written; tblJc/tblInd and tcMar are read/written; trHeight hRule and cantSplit are read/written; vertical merge height approximates from the starting row |
+| Tables (column widths, alignment/indent, cell padding, cell borders, header rows, merged cells, row height rules) | Yes | gridSpan/vMerge are read and written; tblJc/tblInd, tcMar and tcBorders are read/written; trHeight hRule and cantSplit are read/written; vertical merge height approximates from the starting row |
 | Images (inline/floating) | Yes | Floating images go into Block::Floating, supporting page/margin/column references and three wrap modes; masked images are baked into alpha when written |
 | Headers and footers, page-number fields | Yes | Go into HeaderFooterSet and are laid out (top-pinned/bottom-pinned, PAGE/NUMPAGES fields) |
 | Automatic table of contents (TOC field) | Yes | Content controls map to TocBlock, and page numbers are filled in from headings during layout |

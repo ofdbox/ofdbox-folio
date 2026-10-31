@@ -618,3 +618,34 @@ fn table_alignment_and_cell_padding_shift_content() {
     // Centered 50 mm table starts near 80 mm; 20 mm left cell padding pushes text to ~100 mm.
     assert!(*x > 90.0, "cell text x={x}");
 }
+
+#[test]
+fn cell_border_override_suppresses_table_border() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    let mut table = table(vec![Row::new(vec![cell("X")])], 0);
+    table.rows[0].cells[0].borders.bottom = Some(Border {
+        width: Twips::default(),
+        ..Border::default()
+    });
+    flow.push(Block::Table(table));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let horizontal = fixed.pages[0]
+        .content
+        .root
+        .children
+        .iter()
+        .filter_map(|element| match element {
+            Element::Path(path) if path.stroke.is_some() => path.path.bounds(),
+            _ => None,
+        })
+        .filter(|bounds| bounds.height < 0.01 && bounds.width > 1.0)
+        .count();
+    assert_eq!(
+        horizontal, 1,
+        "the zero-width cell bottom border should suppress the table bottom line"
+    );
+}

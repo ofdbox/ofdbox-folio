@@ -459,16 +459,20 @@ impl<'a> Engine<'a> {
             } else {
                 table.borders.vertical.or(table.borders.outer)
             };
-            if let Some(border) = horizontal {
+            if let Some(border) = cell.borders.top.or(horizontal) {
                 // The top of a vertically merged continuation cell is covered by
                 // the cell above, so no line is drawn there.
                 if cell.v_merge != ofdbox_folio_ir::VMerge::Continue {
                     self.line(Point::new(x, top), Point::new(x + width, top), border);
                 }
+            }
+            if let Some(border) = cell.borders.bottom.or(horizontal) {
                 self.line(Point::new(x, bottom), Point::new(x + width, bottom), border);
             }
-            if let Some(border) = vertical {
+            if let Some(border) = cell.borders.left.or(vertical) {
                 self.line(Point::new(x, top), Point::new(x, bottom), border);
+            }
+            if let Some(border) = cell.borders.right.or(vertical) {
                 self.line(
                     Point::new(x + width, top),
                     Point::new(x + width, bottom),

@@ -30,12 +30,12 @@ pub use fixed::{
     TextElement, ValidationError,
 };
 pub use flow::{
-    Align, Attachment, Block, Border, BorderStyle, Cell, Column, ColumnWidth, Field, FieldKind,
-    FloatingObject, FlowDocument, FontFamily, HeaderFooter, HeaderFooterSet, ImageBlock, Inline,
-    InlineImage, LineSpacing, Link, LinkTarget, Margins, NamedStyle, Note, NoteKind, NoteRef,
-    PageSetup, ParaStyle, Paragraph, PositionFrom, Row, RowHeightRule, Section, StyleSheet,
-    TabAlign, TabLeader, TabStop, Table, TableBorders, TextRun, TextStyle, TocBlock, TocStyle,
-    VMerge, WrapMode,
+    Align, Attachment, Block, Border, BorderStyle, Cell, CellBorders, Column, ColumnWidth, Field,
+    FieldKind, FloatingObject, FlowDocument, FontFamily, HeaderFooter, HeaderFooterSet, ImageBlock,
+    Inline, InlineImage, LineSpacing, Link, LinkTarget, Margins, NamedStyle, Note, NoteKind,
+    NoteRef, PageSetup, ParaStyle, Paragraph, PositionFrom, Row, RowHeightRule, Section,
+    StyleSheet, TabAlign, TabLeader, TabStop, Table, TableBorders, TextRun, TextStyle, TocBlock,
+    TocStyle, VMerge, WrapMode,
 };
 pub use font::{FontError, FontProvider, FontRequest, extract_truetype_face, subset_truetype};
 pub use geometry::{Matrix, Point, Rect, Rotation, Size};
