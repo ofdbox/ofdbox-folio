@@ -13,6 +13,7 @@ pub mod fixed;
 pub mod flow;
 pub mod font;
 pub mod geometry;
+pub mod merge;
 pub mod meta;
 pub mod paint;
 pub mod path;
@@ -39,6 +40,7 @@ pub use flow::{
 };
 pub use font::{FontError, FontProvider, FontRequest, extract_truetype_face, subset_truetype};
 pub use geometry::{Matrix, Point, Rect, Rotation, Size};
+pub use merge::MergeStats;
 pub use meta::{
     AttachmentInfo, DateTime, Diagnostic, DiagnosticCode, Location, Metadata, Report, Severity,
 };
