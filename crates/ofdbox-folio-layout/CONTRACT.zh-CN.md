@@ -147,6 +147,8 @@
   `DiagnosticCode::Geometry` 诊断。
 - 位置基准取 `position_from`：`Page` 相对页面原点、`Margin`/`Column` 相对版心（单栏时相同）、`Paragraph` 相对锚点段落左上角（其当前排版位置）。
 - `behind_text` 为 true 的浮动对象（`wp:anchor/@behindDoc="1"`）绘制在正文之下。
+- 文档含浮动对象时，版式先跑一遍探测、再跑一遍回放：探测记录每个对象的页号、位置和尺寸；回放在该页正文之前
+  预放这些对象，因此锚点之前的文字也会绕排。两遍结果不一致时继续迭代，最多 4 遍。
 - 宽度取 `FloatingObject::width`，缺省占满版心；内容按该宽度在有界框里排（不分页）。
 - 绕排：
   - `WrapMode::None`：直接覆盖，正文不变；

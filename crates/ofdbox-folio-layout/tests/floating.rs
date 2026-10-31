@@ -469,3 +469,73 @@ fn full_width_square_wrap_moves_paragraph_below() {
         first.bbox
     );
 }
+
+#[test]
+fn text_before_the_float_anchor_wraps_around_it() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    flow.push(Block::Paragraph(paragraph(
+        "This paragraph appears before the floating anchor and should still wrap \
+         around the image instead of being covered by it.",
+    )));
+    let mut image = image_block(&mut flow);
+    if let Block::Image(block) = &mut image {
+        block.size = Some((Twips::from_mm(30.0), Twips::from_mm(20.0)));
+    }
+    let mut floating = FloatingObject::new(Point::new(0.0, 0.0), image);
+    floating.width = Some(Twips::from_mm(30.0));
+    floating.wrap = WrapMode::Square;
+    flow.push(Block::Floating(Box::new(floating)));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let page = &fixed.pages[0];
+    let (image_x, _, image_w, _) = image_rect(page);
+    let first = page.text.lines.first().expect("body line");
+    assert!(
+        first.bbox.x >= image_x + image_w - 1.0,
+        "text before the anchor should wrap to the right of the image: line_x={} image_right={}",
+        first.bbox.x,
+        image_x + image_w
+    );
+}
+
+#[test]
+fn two_floating_objects_are_placed_once() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    for index in 0..2 {
+        let mut image = image_block(&mut flow);
+        if let Block::Image(block) = &mut image {
+            block.size = Some((Twips::from_mm(20.0), Twips::from_mm(20.0)));
+        }
+        let mut floating = FloatingObject::new(Point::new(index as f64 * 40.0, 0.0), image);
+        floating.width = Some(Twips::from_mm(20.0));
+        floating.wrap = WrapMode::Square;
+        flow.push(Block::Floating(Box::new(floating)));
+        flow.push(Block::Paragraph(paragraph(
+            "Text between the two floating objects should wrap around them.",
+        )));
+    }
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let images: usize = fixed
+        .pages
+        .iter()
+        .map(|page| {
+            page.content
+                .root
+                .children
+                .iter()
+                .filter(|element| matches!(element, Element::Image(_)))
+                .count()
+        })
+        .sum();
+    assert_eq!(
+        images, 2,
+        "each floating object should be drawn exactly once"
+    );
+}

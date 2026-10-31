@@ -56,6 +56,48 @@ struct FloatExclusion {
     right: f64,
 }
 
+/// Planned placement of one floating object, produced by a probe pass and
+/// consumed by the next pass.
+#[derive(Clone, Debug)]
+struct FloatPlan {
+    /// Index of the floating object in document traversal order.
+    index: usize,
+    /// Page the object is placed on (0-based).
+    page: usize,
+    /// Page coordinates and size in millimeters.
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    /// Wrapping mode.
+    wrap: ofdbox_folio_ir::WrapMode,
+    /// Whether the object is painted behind the body text.
+    behind_text: bool,
+    /// Object content, kept so the next pass can draw it without re-reading.
+    object: ofdbox_folio_ir::FloatingObject,
+}
+
+/// A floating object deferred to the next page during a probe pass.
+#[derive(Clone, Debug)]
+struct PendingFloat {
+    index: usize,
+    object: ofdbox_folio_ir::FloatingObject,
+}
+
+/// Geometry returned by placing a floating object.
+enum FloatPlacement {
+    Placed {
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    },
+    Deferred,
+}
+
+/// Heading outline entry: (level, title, page index, y).
+type HeadingEntry = (u8, String, usize, f64);
+
 /// A note waiting to be typeset.
 struct PendingNote {
     /// The reference itself.
@@ -153,19 +195,25 @@ pub fn layout_with(
     }
     let needs_toc = uses_toc(document);
     let needs_total = uses_total_pages(document);
-    if !needs_toc && !needs_total {
-        let (fixed, _) = Engine::new(document, options).run(fonts, None, None);
+    let needs_floats = uses_floating(document);
+    if !needs_toc && !needs_total && !needs_floats {
+        let (fixed, _, _) = Engine::new(document, options).run(fonts, None, None, None);
         return Ok(fixed);
     }
 
     // First pass: the TOC content is empty; this pass only provides heading
-    // page numbers and the total page count.
+    // page numbers, the total page count, and a plan for the floating objects.
     let mut total_pages = None;
     let mut toc_entries: Option<Vec<TocEntry>> = None;
+    let mut float_plan: Option<Vec<FloatPlan>> = None;
     let mut last = None;
     for _ in 0..4 {
-        let (fixed, headings) =
-            Engine::new(document, options.clone()).run(fonts, total_pages, toc_entries.clone());
+        let (fixed, headings, next_plan) = Engine::new(document, options.clone()).run(
+            fonts,
+            total_pages,
+            toc_entries.clone(),
+            float_plan.clone(),
+        );
         let next_entries: Option<Vec<TocEntry>> = needs_toc.then(|| {
             headings
                 .iter()
@@ -173,15 +221,55 @@ pub fn layout_with(
                 .collect()
         });
         let next_total = needs_total.then_some(fixed.pages.len());
-        let stable = next_entries == toc_entries && next_total == total_pages;
+        let floats_stable = !needs_floats
+            || float_plan
+                .as_ref()
+                .is_some_and(|previous| same_float_plan(previous, &next_plan));
+        let stable = next_entries == toc_entries && next_total == total_pages && floats_stable;
         total_pages = next_total;
         toc_entries = next_entries;
+        float_plan = Some(next_plan);
         last = Some(fixed);
         if stable {
             break;
         }
     }
     Ok(last.expect("laid out at least once"))
+}
+
+/// Whether two float plans describe the same placement (object content is
+/// ignored).
+fn same_float_plan(a: &[FloatPlan], b: &[FloatPlan]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(left, right)| {
+            left.index == right.index
+                && left.page == right.page
+                && (left.x - right.x).abs() < 0.01
+                && (left.y - right.y).abs() < 0.01
+                && (left.width - right.width).abs() < 0.01
+                && (left.height - right.height).abs() < 0.01
+                && left.wrap == right.wrap
+                && left.behind_text == right.behind_text
+        })
+}
+
+/// Whether the document contains block-level floating objects.
+fn uses_floating(document: &FlowDocument) -> bool {
+    fn blocks_use_floating(blocks: &[Block]) -> bool {
+        blocks.iter().any(|block| match block {
+            Block::Floating(_) => true,
+            Block::Table(table) => table.rows.iter().any(|row| {
+                row.cells
+                    .iter()
+                    .any(|cell| blocks_use_floating(&cell.blocks))
+            }),
+            _ => false,
+        })
+    }
+    document
+        .sections
+        .iter()
+        .any(|section| blocks_use_floating(&section.blocks))
 }
 
 /// Whether the document contains an automatic table of contents.
@@ -380,7 +468,19 @@ struct Engine<'a> {
     float_exclusions: Vec<FloatExclusion>,
     /// Floating objects that did not fit on their anchor page and wait for the
     /// next page.
-    pending_floats: Vec<ofdbox_folio_ir::FloatingObject>,
+    pending_floats: Vec<PendingFloat>,
+    /// Plans from the previous pass; `Some` means this is a replay pass.
+    float_plan_in: Option<Vec<FloatPlan>>,
+    /// Plans recorded during this pass.
+    float_plan_out: Vec<FloatPlan>,
+    /// Number of floating objects encountered so far in this pass.
+    float_seen: usize,
+    /// Geometry of the objects pre-placed on the current page, keyed by index.
+    applied_geometry: HashMap<usize, (usize, f64, f64, f64, f64)>,
+    /// Foreground floating elements waiting to be appended at page end.
+    front_elements: Vec<Element>,
+    /// Index of the first body element in `page.scene.children` (after the header).
+    body_element_start: usize,
     headings: Vec<(u8, String, usize, f64)>,
     /// Count of characters missing glyphs in their font, summarized into one
     /// diagnostic at the end.
@@ -432,6 +532,12 @@ impl<'a> Engine<'a> {
             endnotes: Vec::new(),
             float_exclusions: Vec::new(),
             pending_floats: Vec::new(),
+            float_plan_in: None,
+            float_plan_out: Vec::new(),
+            float_seen: 0,
+            applied_geometry: HashMap::new(),
+            front_elements: Vec::new(),
+            body_element_start: 0,
             headings: Vec::new(),
             missing_chars: 0,
         }
@@ -442,10 +548,12 @@ impl<'a> Engine<'a> {
         provider: &mut dyn FontProvider,
         total_pages: Option<usize>,
         toc_entries: Option<Vec<TocEntry>>,
-    ) -> (FixedDocument, Vec<(u8, String, usize, f64)>) {
+        float_plan: Option<Vec<FloatPlan>>,
+    ) -> (FixedDocument, Vec<HeadingEntry>, Vec<FloatPlan>) {
         self.prepare_fonts(provider);
         self.total_pages = total_pages;
         self.toc_entries = toc_entries;
+        self.float_plan_in = float_plan;
         for section in &self.document.sections {
             self.begin_section(&section.setup, &section.headers, &section.footers);
             self.place_blocks(&section.blocks);
@@ -455,6 +563,7 @@ impl<'a> Engine<'a> {
             }
             self.finish_page();
         }
+        self.flush_unapplied_float_plans();
         if self.fixed.pages.is_empty() {
             self.begin_section(
                 &self
@@ -483,7 +592,7 @@ impl<'a> Engine<'a> {
 
         self.fixed.outline = self.build_outline();
         self.fixed.engine.layout_version = LAYOUT_VERSION;
-        (self.fixed, self.headings)
+        (self.fixed, self.headings, self.float_plan_out)
     }
 
     // ---- Fonts ----
@@ -830,12 +939,20 @@ impl<'a> Engine<'a> {
         self.page_body = false;
         self.page_started = false;
         self.section_page += 1;
+        self.front_elements.clear();
+        self.body_element_start = 0;
     }
 
     /// End the current page; pages without body content are not emitted.
     fn finish_page(&mut self) {
         if !self.page_body {
             return;
+        }
+        if !self.front_elements.is_empty() {
+            self.page
+                .scene
+                .children
+                .extend(std::mem::take(&mut self.front_elements));
         }
         let footer_top = self.layout_footer();
         let body_bottom = self.page_height - self.margins.bottom;
@@ -989,7 +1106,9 @@ impl<'a> Engine<'a> {
         }
         self.page_started = true;
         self.layout_header();
+        self.body_element_start = self.page.scene.children.len();
         self.flush_pending_floats();
+        self.place_planned_floats();
     }
 
     /// Which header/footer set this page uses: different first page → default;
@@ -1076,18 +1195,75 @@ impl<'a> Engine<'a> {
 
     // ---- Floating objects ----
 
-    /// Lay out a floating object: position it absolutely in page coordinates,
-    /// then affect the body cursor according to its wrap mode.
+    /// Lay out a floating object.
     ///
-    /// It does not participate in the body flow and does not cause pagination;
-    /// the page it lands on is "the page containing the current cursor".
+    /// During the probe pass this places the object and records a plan; during a
+    /// replay pass the object has already been pre-placed at page start, so only
+    /// the plan is recorded again.
     fn place_floating(&mut self, floating: &ofdbox_folio_ir::FloatingObject) {
         if self.in_frame {
             self.warn("floating object nested in a table/header; treated as normal content");
             self.place_block(&floating.block);
             return;
         }
-        self.place_floating_impl(floating, true);
+        let index = self.float_seen;
+        self.float_seen += 1;
+
+        if self.float_plan_in.is_some() {
+            let planned = self
+                .float_plan_in
+                .as_ref()
+                .and_then(|plans| plans.iter().find(|plan| plan.index == index))
+                .cloned();
+            if let Some(plan) = planned {
+                let (page, x, y, width, height) = self
+                    .applied_geometry
+                    .get(&index)
+                    .copied()
+                    .unwrap_or((plan.page, plan.x, plan.y, plan.width, plan.height));
+                self.float_plan_out.push(FloatPlan {
+                    index,
+                    page,
+                    x,
+                    y,
+                    width,
+                    height,
+                    wrap: floating.wrap,
+                    behind_text: floating.behind_text,
+                    object: floating.clone(),
+                });
+                return;
+            }
+            // A replay pass found an object without a plan (should not happen
+            // normally); fall through and place it inline as a fallback.
+        }
+
+        match self.place_floating_impl(floating, true) {
+            FloatPlacement::Placed {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                self.float_plan_out.push(FloatPlan {
+                    index,
+                    page: self.fixed.pages.len(),
+                    x,
+                    y,
+                    width,
+                    height,
+                    wrap: floating.wrap,
+                    behind_text: floating.behind_text,
+                    object: floating.clone(),
+                });
+            }
+            FloatPlacement::Deferred => {
+                self.pending_floats.push(PendingFloat {
+                    index,
+                    object: floating.clone(),
+                });
+            }
+        }
     }
 
     /// Place a floating object, deferring it to the next page when it does not
@@ -1096,7 +1272,7 @@ impl<'a> Engine<'a> {
         &mut self,
         floating: &ofdbox_folio_ir::FloatingObject,
         allow_defer: bool,
-    ) {
+    ) -> FloatPlacement {
         let page = self.page_frame();
         let content_height = page.bottom - page.top;
         let snapshot = self.snapshot();
@@ -1149,8 +1325,7 @@ impl<'a> Engine<'a> {
             // Move the object to the next page instead of letting it overflow;
             // the next page places it at the top before its body content.
             self.restore(snapshot);
-            self.pending_floats.push(floating.clone());
-            return;
+            return FloatPlacement::Deferred;
         }
         if bottom > page.bottom + 1e-6 {
             self.diagnostic(
@@ -1161,10 +1336,11 @@ impl<'a> Engine<'a> {
 
         if floating.behind_text {
             // `behindDoc="1"`: paint the floating content behind the body text
-            // that was already placed on this page.
+            // but after the header.
             let children = &mut self.page.scene.children;
             let floating_elements: Vec<_> = children.drain(first_element..).collect();
-            children.splice(0..0, floating_elements);
+            let insert_at = self.body_element_start.min(children.len());
+            children.splice(insert_at..insert_at, floating_elements);
         }
 
         match floating.wrap {
@@ -1189,6 +1365,12 @@ impl<'a> Engine<'a> {
             }
             _ => {}
         }
+        FloatPlacement::Placed {
+            x,
+            y,
+            width,
+            height: bottom - y,
+        }
     }
 
     /// Place deferred floating objects at the top of a new page.
@@ -1197,9 +1379,140 @@ impl<'a> Engine<'a> {
             return;
         }
         let pending = std::mem::take(&mut self.pending_floats);
-        for floating in pending {
-            self.place_floating_impl(&floating, false);
+        let page = self.fixed.pages.len();
+        for PendingFloat { index, object } in pending {
+            if let FloatPlacement::Placed {
+                x,
+                y,
+                width,
+                height,
+            } = self.place_floating_impl(&object, false)
+            {
+                self.float_plan_out.push(FloatPlan {
+                    index,
+                    page,
+                    x,
+                    y,
+                    width,
+                    height,
+                    wrap: object.wrap,
+                    behind_text: object.behind_text,
+                    object,
+                });
+            }
         }
+    }
+
+    /// Pre-place the floating objects planned for the current page.
+    fn place_planned_floats(&mut self) {
+        let Some(plan_in) = self.float_plan_in.clone() else {
+            return;
+        };
+        let page_index = self.fixed.pages.len();
+        for plan in plan_in.iter().filter(|plan| plan.page == page_index) {
+            self.place_planned(plan);
+        }
+    }
+
+    /// Emit pages for planned floating objects whose target page was never
+    /// reached by the body flow (for example a deferred object at document end).
+    fn flush_unapplied_float_plans(&mut self) {
+        let Some(plan_in) = self.float_plan_in.clone() else {
+            return;
+        };
+        let mut plans: Vec<FloatPlan> = plan_in
+            .into_iter()
+            .filter(|plan| !self.applied_geometry.contains_key(&plan.index))
+            .collect();
+        plans.sort_by_key(|plan| plan.page);
+        let mut started = false;
+        for plan in plans {
+            if self.fixed.pages.len() > plan.page {
+                continue;
+            }
+            // The current page has already been finished; start a fresh page
+            // for this plan (it is the next page at document end).
+            self.start_page_after_finish();
+            self.start_page_body();
+            started = true;
+            if !self.applied_geometry.contains_key(&plan.index) {
+                self.place_planned(&plan);
+            }
+        }
+        if started {
+            self.finish_page();
+        }
+    }
+
+    /// Begin a new blank page after the current one has already been finished.
+    fn start_page_after_finish(&mut self) {
+        self.page = PageBuffer::new();
+        self.column_index = 0;
+        self.bottom_inset = 0.0;
+        self.float_exclusions.clear();
+        self.front_elements.clear();
+        self.body_element_start = 0;
+        self.frame = self.column_frame(0);
+        self.cursor = self.frame.top;
+        self.page_body = false;
+        self.page_started = false;
+        self.section_page += 1;
+    }
+
+    /// Draw one planned floating object and register its wrap area.
+    fn place_planned(&mut self, plan: &FloatPlan) {
+        let page = self.page_frame();
+        let width = plan.width.clamp(1.0, page.width);
+        let x = plan.x.clamp(0.0, page.left + page.width);
+        let y = plan.y.max(0.0);
+        let saved = (self.frame, self.cursor, self.in_frame);
+        self.in_frame = true;
+        self.frame = Frame {
+            left: x,
+            width,
+            top: y,
+            bottom: f64::MAX,
+        };
+        self.cursor = y;
+        let first_element = self.page.scene.children.len();
+        self.place_block(&plan.object.block);
+        let bottom = self.cursor;
+        self.frame = saved.0;
+        self.cursor = saved.1;
+        self.in_frame = saved.2;
+        let height = (bottom - y).max(plan.height);
+
+        // z-order: behind objects go before the body text, foreground objects
+        // are appended at the end of the page.
+        let elements: Vec<Element> = self.page.scene.children.drain(first_element..).collect();
+        if plan.behind_text {
+            let insert_at = self.body_element_start.min(self.page.scene.children.len());
+            self.page
+                .scene
+                .children
+                .splice(insert_at..insert_at, elements);
+        } else {
+            self.front_elements.extend(elements);
+        }
+
+        match plan.wrap {
+            ofdbox_folio_ir::WrapMode::TopBottom => {
+                if bottom > self.cursor {
+                    self.cursor = bottom;
+                }
+            }
+            ofdbox_folio_ir::WrapMode::Square => {
+                self.float_exclusions.push(FloatExclusion {
+                    top: y,
+                    bottom: y + height,
+                    left: x,
+                    right: x + width,
+                });
+            }
+            _ => {}
+        }
+        self.applied_geometry
+            .insert(plan.index, (self.fixed.pages.len(), x, y, width, height));
     }
 
     /// Floating areas the current paragraph must avoid (square wrapping).
