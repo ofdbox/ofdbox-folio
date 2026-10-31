@@ -742,6 +742,7 @@ impl<'a> Engine<'a> {
         self.in_frame = false;
         self.page_body = false;
         self.page_started = false;
+        self.float_exclusions.clear();
         self.frame = self.column_frame(0);
         self.cursor = self.frame.top;
     }
@@ -779,6 +780,8 @@ impl<'a> Engine<'a> {
             return false;
         }
         self.column_index += 1;
+        // Square-wrap exclusion areas belong to the current column container.
+        self.float_exclusions.clear();
         self.frame = self.column_frame(self.column_index);
         self.cursor = self.frame.top;
         true
@@ -811,6 +814,9 @@ impl<'a> Engine<'a> {
         self.page = PageBuffer::new();
         self.column_index = 0;
         self.bottom_inset = 0.0;
+        // Square-wrap exclusion areas belong to the page where the floating
+        // object was placed; they must not affect later pages.
+        self.float_exclusions.clear();
         self.frame = self.column_frame(0);
         self.cursor = self.frame.top;
         self.page_body = false;

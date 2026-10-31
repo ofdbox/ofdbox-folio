@@ -279,3 +279,37 @@ fn floating_object_in_table_cell_falls_back_to_inline() {
     );
     assert!(!fixed.pages.is_empty());
 }
+
+#[test]
+fn page_break_clears_square_wrap_exclusions() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    let mut image = image_block(&mut flow);
+    if let Block::Image(block) = &mut image {
+        block.size = Some((Twips::from_mm(25.0), Twips::from_mm(20.0)));
+    }
+    let mut floating = FloatingObject::new(Point::new(10.0, 0.0), image);
+    floating.width = Some(Twips::from_mm(25.0));
+    floating.wrap = WrapMode::Square;
+    flow.push(Block::Floating(Box::new(floating)));
+    flow.push(Block::PageBreak);
+    flow.push(Block::Paragraph(paragraph(
+        "A long paragraph on the next page should use the full text width instead of \
+         wrapping around a floating object from the previous page.",
+    )));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    assert!(fixed.pages.len() >= 2, "expected a second page");
+    let line = fixed.pages[1]
+        .text
+        .lines
+        .first()
+        .expect("line on the second page");
+    assert!(
+        line.bbox.width > 100.0,
+        "square-wrap exclusion leaked to the next page: line bbox {:?}",
+        line.bbox
+    );
+}

@@ -166,6 +166,8 @@ An empty paragraph still occupies one line. When it has no runs, layout uses the
   - `WrapMode::Square`: paragraphs that vertically overlap the object wrap **line by line**: each line is re-broken using the available width
     at that moment, lines falling inside the wrap band move to the other side of the object, and the full width is restored once past the object;
     when the object is in the right half of the page, the right margin is reduced;
+- Square-wrap exclusion areas are scoped to the page/column container where the floating object was placed; they are cleared
+  when the body flow moves to the next column or page, so text on later pages does not wrap around an object from an earlier page.
 - Floating objects embedded in a table cell or in a header/footer are treated as ordinary blocks and a diagnostic is recorded.
 
 ## 6. Style resolution
