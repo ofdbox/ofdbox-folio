@@ -16,7 +16,8 @@ use ofdbox_folio_ir::{
     Align, Block, Border, BorderStyle, Cell, CellBorders, ColumnWidth, Diagnostic, DiagnosticCode,
     Field, FieldKind, FlowDocument, FontFamily, HeaderFooter, ImageFormat, Inline, LineSpacing,
     LinkTarget, Margins, Metadata, NoteKind, PageSetup, ParaStyle, Paragraph, PositionFrom, Report,
-    Row, TabAlign, TabLeader, TableBorders, TextStyle, TocBlock, Twips, VerticalAlign, WrapMode,
+    Row, TabAlign, TabLeader, TableBorders, TableWidth, TextStyle, TocBlock, Twips, VerticalAlign,
+    WrapMode,
 };
 
 use crate::DocxError;
@@ -554,9 +555,17 @@ impl<'a> Writer<'a> {
     fn table_xml(&mut self, table: &ofdbox_folio_ir::Table, out: &mut String) {
         let widths = self.column_widths(table);
         let total: i64 = widths.iter().sum();
-        out.push_str(&format!(
-            "<w:tbl><w:tblPr><w:tblW w:type=\"dxa\" w:w=\"{total}\"/>"
-        ));
+        let width_xml = match table.width {
+            TableWidth::Percent(percent) => format!(
+                "<w:tblW w:type=\"pct\" w:w=\"{}\"/>",
+                (percent * 50.0).round() as i64
+            ),
+            TableWidth::Twips(width) => {
+                format!("<w:tblW w:type=\"dxa\" w:w=\"{}\"/>", width.0)
+            }
+            _ => format!("<w:tblW w:type=\"dxa\" w:w=\"{total}\"/>"),
+        };
+        out.push_str(&format!("<w:tbl><w:tblPr>{width_xml}"));
         out.push_str(&table_borders_xml(&table.borders));
         out.push_str(&margins_xml(&table.cell_padding));
         if table.alignment != Align::Left {

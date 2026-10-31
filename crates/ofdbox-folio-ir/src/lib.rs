@@ -34,8 +34,8 @@ pub use flow::{
     FieldKind, FloatingObject, FlowDocument, FontFamily, HeaderFooter, HeaderFooterSet, ImageBlock,
     Inline, InlineImage, LineSpacing, Link, LinkTarget, Margins, NamedStyle, Note, NoteKind,
     NoteRef, PageSetup, ParaStyle, Paragraph, PositionFrom, Row, RowHeightRule, Section,
-    StyleSheet, TabAlign, TabLeader, TabStop, Table, TableBorders, TextRun, TextStyle, TocBlock,
-    TocStyle, VMerge, VerticalAlign, WrapMode,
+    StyleSheet, TabAlign, TabLeader, TabStop, Table, TableBorders, TableWidth, TextRun, TextStyle,
+    TocBlock, TocStyle, VMerge, VerticalAlign, WrapMode,
 };
 pub use font::{FontError, FontProvider, FontRequest, extract_truetype_face, subset_truetype};
 pub use geometry::{Matrix, Point, Rect, Rotation, Size};

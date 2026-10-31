@@ -8,8 +8,8 @@ use ofdbox_folio_ir::{
     Cell, CellBorders, Column, ColumnWidth, Diagnostic, DiagnosticCode, Field, FieldKind,
     FloatingObject, FlowDocument, HeaderFooter, ImageAsset, ImageBlock, Inline, InlineImage, Link,
     LinkTarget, Margins, Metadata, Note, NoteKind, NoteRef, Paragraph, Point, Rgba, Row,
-    RowHeightRule, Section, Table, TextRun, TextStyle, TocBlock, Twips, VMerge, VerticalAlign,
-    WrapMode, detect_image_format, image_dimensions,
+    RowHeightRule, Section, Table, TableWidth, TextRun, TextStyle, TocBlock, Twips, VMerge,
+    VerticalAlign, WrapMode, detect_image_format, image_dimensions,
 };
 
 use crate::DocxError;
@@ -819,6 +819,7 @@ impl<'a> Builder<'a> {
         table.cell_padding = resolved.cell_margins.unwrap_or_default();
         table.alignment = resolved.alignment.unwrap_or(Align::Left);
         table.indent = resolved.indent.unwrap_or_default();
+        table.width = resolved.width.unwrap_or(TableWidth::Auto);
         Ok(table)
     }
 

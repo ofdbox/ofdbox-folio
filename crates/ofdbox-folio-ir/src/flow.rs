@@ -692,6 +692,19 @@ impl Default for TocStyle {
     }
 }
 
+/// Declared table width.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub enum TableWidth {
+    /// Width is determined by the columns (the default).
+    #[default]
+    Auto,
+    /// Fixed width.
+    Twips(Twips),
+    /// Percentage of the text block width (0–100).
+    Percent(f64),
+}
+
 /// A table.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Table {
@@ -709,6 +722,8 @@ pub struct Table {
     pub alignment: Align,
     /// Left indent from the text block edge (millimeters).
     pub indent: Twips,
+    /// Declared table width.
+    pub width: TableWidth,
 }
 
 impl Table {
@@ -722,6 +737,7 @@ impl Table {
             cell_padding: Margins::default(),
             alignment: Align::Left,
             indent: Twips::default(),
+            width: TableWidth::Auto,
         }
     }
 }

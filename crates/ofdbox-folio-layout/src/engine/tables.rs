@@ -26,9 +26,16 @@ impl<'a> Engine<'a> {
         }
         let nested = self.in_frame;
         let pages_before = self.fixed.pages.len();
-        let widths = self.table_widths(table);
-        let table_width: f64 = widths.iter().sum();
         let content_width = self.content_width();
+        let (target_width, scale_fixed) = match table.width {
+            ofdbox_folio_ir::TableWidth::Twips(width) => (width.to_mm().max(1.0), true),
+            ofdbox_folio_ir::TableWidth::Percent(percent) => {
+                (content_width * percent.clamp(0.0, 100.0) / 100.0, true)
+            }
+            _ => (content_width, false),
+        };
+        let widths = self.table_widths(table, target_width, scale_fixed);
+        let table_width: f64 = widths.iter().sum();
         let indent = table.indent.to_mm();
         let offset = match table.alignment {
             Align::Center => (content_width - table_width) / 2.0 + indent,
@@ -186,9 +193,14 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// Table column widths (millimeters).
-    pub(crate) fn table_widths(&self, table: &Table) -> Vec<f64> {
-        let total = self.content_width();
+    /// Table column widths (millimeters), scaled to `target_width`.
+    pub(crate) fn table_widths(
+        &self,
+        table: &Table,
+        target_width: f64,
+        scale_fixed: bool,
+    ) -> Vec<f64> {
+        let total = target_width.max(1.0);
         let mut widths = vec![0.0_f64; table.columns.len()];
         let mut fixed = 0.0;
         let mut weights = 0_u32;
@@ -215,7 +227,7 @@ impl<'a> Engine<'a> {
                     widths[index] = remaining * f64::from(weight) / f64::from(weights);
                 }
             }
-        } else if fixed > total && fixed > 0.0 {
+        } else if fixed > 0.0 && (scale_fixed || fixed > total) {
             let scale = total / fixed;
             for width in &mut widths {
                 *width *= scale;

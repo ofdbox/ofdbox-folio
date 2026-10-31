@@ -1,4 +1,4 @@
-﻿//! Additional A2 tests: tables, headers and footers.
+//! Additional A2 tests: tables, headers and footers.
 //!
 //! Like `layout.rs` these rely on the system's Arial for metrics and are skipped
 //! when the font is unavailable.
@@ -8,8 +8,8 @@ use std::sync::Arc;
 use ofdbox_folio_ir::{
     Align, Block, Border, Cell, Column, ColumnWidth, Element, Field, FieldKind, FlowDocument,
     FontError, FontProvider, FontRequest, HeaderFooter, Inline, LineSpacing, Margins, Metadata,
-    PageSetup, ParaStyle, Paragraph, Row, RowHeightRule, Table, TableBorders, TextRun, TextStyle,
-    Twips,
+    PageSetup, ParaStyle, Paragraph, Row, RowHeightRule, Table, TableBorders, TableWidth, TextRun,
+    TextStyle, Twips,
 };
 use ofdbox_folio_layout::{LayoutOptions, layout, layout_with};
 
@@ -679,5 +679,38 @@ fn cell_vertical_alignment_shifts_content() {
     assert!(
         y_b - y_a > 10.0,
         "center-aligned cell should be lower than the top-aligned one: A={y_a} B={y_b}"
+    );
+}
+
+#[test]
+fn percent_table_width_scales_columns() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    let mut table = table(vec![Row::new(vec![cell("X")])], 0);
+    table.columns = vec![Column {
+        width: ColumnWidth::Weight(1),
+    }];
+    table.width = TableWidth::Percent(50.0);
+    flow.push(Block::Table(table));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let max_width = fixed.pages[0]
+        .content
+        .root
+        .children
+        .iter()
+        .filter_map(|element| match element {
+            Element::Path(path) if path.stroke.is_some() => path.path.bounds(),
+            _ => None,
+        })
+        .filter(|bounds| bounds.height < 0.01)
+        .map(|bounds| bounds.width)
+        .fold(0.0_f64, f64::max);
+    // A4 with 1-inch margins: content width ~159.2mm, 50% ~79.6mm.
+    assert!(
+        (max_width - 79.6).abs() < 2.0,
+        "50% table width should be about 79.6mm, got {max_width}"
     );
 }

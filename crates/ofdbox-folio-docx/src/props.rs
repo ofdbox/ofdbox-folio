@@ -10,7 +10,7 @@
 
 use ofdbox_folio_ir::{
     Align, Border, BorderStyle, FontFamily, LineSpacing, Margins, PageSetup, ParaStyle, Rgba,
-    TabAlign, TabLeader, TabStop, TableBorders, TextStyle, Twips,
+    TabAlign, TabLeader, TabStop, TableBorders, TableWidth, TextStyle, Twips,
 };
 
 use crate::DocxError;
@@ -407,6 +407,8 @@ pub(crate) struct RawTableProps {
     pub alignment: Option<Align>,
     /// Left indent.
     pub indent: Option<Twips>,
+    /// Declared table width.
+    pub width: Option<TableWidth>,
 }
 
 impl RawTableProps {
@@ -432,6 +434,9 @@ impl RawTableProps {
         }
         if over.indent.is_some() {
             self.indent = over.indent;
+        }
+        if over.width.is_some() {
+            self.width = over.width;
         }
     }
 
@@ -639,6 +644,17 @@ pub(crate) fn parse_table_props(
                     && let Some(value) = attr_i32(&element, "w")
                 {
                     props.indent = Some(Twips::new(i64::from(value)));
+                }
+                if is_element(&element, "tblW") {
+                    props.width = attr(&element, "w").and_then(|value| {
+                        let width: f64 = value.parse().ok()?;
+                        match attr(&element, "type").as_deref() {
+                            Some("pct") => Some(TableWidth::Percent(width / 50.0)),
+                            Some("dxa") => Some(TableWidth::Twips(Twips::new(width as i64))),
+                            Some("auto") => Some(TableWidth::Auto),
+                            _ => Some(TableWidth::Twips(Twips::new(width as i64))),
+                        }
+                    });
                 }
             }
             quick_xml::events::Event::End(_) => break,
