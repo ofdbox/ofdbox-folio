@@ -17,7 +17,7 @@ use crate::DocxReadOptions;
 use crate::numbering::{Counters, Numbering};
 use crate::package::{Package, Relation};
 use crate::props::{
-    RawParaProps, RawRunProps, RawSectionProps, RawTableProps, parse_cell_margins,
+    RawParaProps, RawRunProps, RawSectionProps, RawTableProps, parse_cell_margins, parse_color,
     parse_para_props, parse_run_props, parse_section_props, parse_table_props,
 };
 use crate::styles::{Styles, heading_level_from_name, parse_theme};
@@ -887,6 +887,7 @@ impl<'a> Builder<'a> {
         let mut padding = None;
         let mut borders = CellBorders::default();
         let mut vertical_align = VerticalAlign::Top;
+        let mut shading = None;
         let mut blocks = Vec::new();
         loop {
             match reader.read_event().map_err(crate::xml::xml_error)? {
@@ -898,6 +899,7 @@ impl<'a> Builder<'a> {
                         padding = parsed.padding;
                         borders = parsed.borders;
                         vertical_align = parsed.vertical_align;
+                        shading = parsed.shading;
                     }
                     "p" => {
                         let (mut produced, _) = self.parse_paragraph(reader)?;
@@ -938,6 +940,7 @@ impl<'a> Builder<'a> {
         cell.padding = padding;
         cell.borders = borders;
         cell.vertical_align = vertical_align;
+        cell.shading = shading;
         Ok(Some(cell))
     }
 
@@ -1377,6 +1380,7 @@ struct CellProps {
     padding: Option<Margins>,
     borders: CellBorders,
     vertical_align: VerticalAlign,
+    shading: Option<Rgba>,
 }
 
 /// Cell properties (`w:tcPr`).
@@ -1387,6 +1391,7 @@ fn parse_cell_props(reader: &mut XmlReader<'_>) -> Result<CellProps, DocxError> 
         padding: None,
         borders: CellBorders::default(),
         vertical_align: VerticalAlign::Top,
+        shading: None,
     };
     loop {
         match reader.read_event().map_err(crate::xml::xml_error)? {
@@ -1413,6 +1418,9 @@ fn parse_cell_props(reader: &mut XmlReader<'_>) -> Result<CellProps, DocxError> 
                         Some("bottom") => VerticalAlign::Bottom,
                         _ => VerticalAlign::Top,
                     };
+                }
+                "shd" => {
+                    props.shading = attr(&element, "fill").as_deref().and_then(parse_color);
                 }
                 _ => {}
             },

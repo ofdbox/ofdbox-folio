@@ -841,6 +841,8 @@ pub struct Cell {
     pub borders: CellBorders,
     /// Vertical alignment of the cell content.
     pub vertical_align: VerticalAlign,
+    /// Optional cell background color.
+    pub shading: Option<Rgba>,
 }
 
 impl Cell {
@@ -853,6 +855,7 @@ impl Cell {
             padding: None,
             borders: CellBorders::default(),
             vertical_align: VerticalAlign::Top,
+            shading: None,
         }
     }
 

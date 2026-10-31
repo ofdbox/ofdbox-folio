@@ -8,8 +8,8 @@ use std::sync::Arc;
 use ofdbox_folio_ir::{
     Align, Block, Border, Cell, Column, ColumnWidth, Element, Field, FieldKind, FlowDocument,
     FontError, FontProvider, FontRequest, HeaderFooter, Inline, LineSpacing, Margins, Metadata,
-    PageSetup, ParaStyle, Paragraph, Row, RowHeightRule, Table, TableBorders, TableWidth, TextRun,
-    TextStyle, Twips,
+    PageSetup, Paint, ParaStyle, Paragraph, Rgba, Row, RowHeightRule, Table, TableBorders,
+    TableWidth, TextRun, TextStyle, Twips,
 };
 use ofdbox_folio_layout::{LayoutOptions, layout, layout_with};
 
@@ -713,4 +713,28 @@ fn percent_table_width_scales_columns() {
         (max_width - 79.6).abs() < 2.0,
         "50% table width should be about 79.6mm, got {max_width}"
     );
+}
+
+#[test]
+fn cell_shading_draws_a_filled_rectangle() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    let color = Rgba::from_rgb(220, 40, 40);
+    let mut table = table(vec![Row::new(vec![cell("X")])], 0);
+    table.rows[0].cells[0].shading = Some(color);
+    flow.push(Block::Table(table));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let shaded = fixed.pages[0]
+        .content
+        .root
+        .children
+        .iter()
+        .any(|element| match element {
+            Element::Path(path) => path.stroke.is_none() && path.fill == Some(Paint::Color(color)),
+            _ => false,
+        });
+    assert!(shaded, "expected a filled cell background rectangle");
 }

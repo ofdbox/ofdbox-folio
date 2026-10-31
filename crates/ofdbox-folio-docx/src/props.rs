@@ -876,7 +876,7 @@ pub(crate) fn parse_align(value: &str) -> Option<Align> {
 }
 
 /// Parse the hexadecimal value of `w:color`.
-fn parse_color(value: &str) -> Option<Rgba> {
+pub(crate) fn parse_color(value: &str) -> Option<Rgba> {
     let hex = value.trim().trim_start_matches('#');
     if hex.eq_ignore_ascii_case("auto") || hex.len() != 6 {
         return None;

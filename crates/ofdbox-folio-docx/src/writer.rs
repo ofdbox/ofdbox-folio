@@ -687,6 +687,12 @@ impl<'a> Writer<'a> {
             };
             out.push_str(&format!("<w:vAlign w:val=\"{value}\"/>"));
         }
+        if let Some(color) = cell.shading {
+            out.push_str(&format!(
+                "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"{:02X}{:02X}{:02X}\"/>",
+                color.r, color.g, color.b
+            ));
+        }
         out.push_str("</w:tcPr>");
         let mut content = String::new();
         self.blocks_xml(&cell.blocks, &mut content);

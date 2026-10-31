@@ -14,6 +14,9 @@ struct CellAlignMetrics {
     padding_top: f64,
     padding_bottom: f64,
     align: VerticalAlign,
+    left: f64,
+    width: f64,
+    shading: Option<Rgba>,
 }
 
 impl<'a> Engine<'a> {
@@ -318,6 +321,9 @@ impl<'a> Engine<'a> {
                 padding_top,
                 padding_bottom,
                 align: cell.vertical_align,
+                left: x,
+                width,
+                shading: cell.shading,
             });
             placed_any |= outcome.placed_any;
             max_bottom = max_bottom.max(outcome.bottom + padding_bottom);
@@ -342,7 +348,7 @@ impl<'a> Engine<'a> {
             };
         }
         if complete {
-            for metric in align_metrics {
+            for metric in &align_metrics {
                 let content = (metric.content_bottom - metric.content_top).max(0.0);
                 let available = (height - metric.padding_top - metric.padding_bottom).max(0.0);
                 let delta = match metric.align {
@@ -353,6 +359,20 @@ impl<'a> Engine<'a> {
                 if delta > 0.01 {
                     self.shift_region_y(&metric.scene, &metric.items, &metric.lines, delta);
                 }
+            }
+        }
+        // Cell backgrounds go behind the cell content; insert from the end so
+        // earlier scene indices remain valid.
+        for metric in align_metrics.iter().rev() {
+            if let Some(color) = metric.shading {
+                self.insert_cell_shading(
+                    metric.scene.start,
+                    metric.left,
+                    top,
+                    metric.width,
+                    height,
+                    color,
+                );
             }
         }
         if placed_any {
@@ -557,6 +577,33 @@ impl<'a> Engine<'a> {
             line.bbox.y += dy;
             line.baseline += dy;
         }
+    }
+
+    /// Insert a filled rectangle behind one cell's content.
+    pub(crate) fn insert_cell_shading(
+        &mut self,
+        scene_index: usize,
+        left: f64,
+        top: f64,
+        width: f64,
+        height: f64,
+        color: Rgba,
+    ) {
+        let mut path = Path::new();
+        path.move_to(Point::new(left, top));
+        path.line_to(Point::new(left + width, top));
+        path.line_to(Point::new(left + width, top + height));
+        path.line_to(Point::new(left, top + height));
+        path.close();
+        let element = Element::Path(PathElement {
+            path: Arc::new(path),
+            transform: Matrix::IDENTITY,
+            fill: Some(Paint::Color(color)),
+            stroke: None,
+            rule: FillRule::NonZero,
+        });
+        let index = scene_index.min(self.page.scene.children.len());
+        self.page.scene.children.insert(index, element);
     }
 
     /// Draw one table border line.
