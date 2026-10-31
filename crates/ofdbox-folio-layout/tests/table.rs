@@ -1,4 +1,4 @@
-//! Additional A2 tests: tables, headers and footers.
+﻿//! Additional A2 tests: tables, headers and footers.
 //!
 //! Like `layout.rs` these rely on the system's Arial for metrics and are skipped
 //! when the font is unavailable.
@@ -587,4 +587,34 @@ fn exact_row_height_is_respected() {
         y_b - y_a > 20.0,
         "the exact 30 mm row height should push row B down: y_a={y_a} y_b={y_b}"
     );
+}
+
+#[test]
+fn table_alignment_and_cell_padding_shift_content() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    let mut table = table(vec![Row::new(vec![cell("X")])], 0);
+    table.columns = vec![Column {
+        width: ColumnWidth::Twips(Twips::from_mm(50.0)),
+    }];
+    table.alignment = Align::Center;
+    table.cell_padding = Margins::uniform(Twips::from_mm(2.0));
+    table.rows[0].cells[0].padding = Some(Margins {
+        top: Twips::from_mm(1.0),
+        bottom: Twips::from_mm(1.0),
+        left: Twips::from_mm(20.0),
+        right: Twips::from_mm(2.0),
+    });
+    flow.push(Block::Table(table));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let lines = texts(&fixed.pages[0]);
+    let (_, x, _) = lines
+        .iter()
+        .find(|(text, _, _)| text.contains('X'))
+        .expect("cell text");
+    // Centered 50 mm table starts near 80 mm; 20 mm left cell padding pushes text to ~100 mm.
+    assert!(*x > 90.0, "cell text x={x}");
 }

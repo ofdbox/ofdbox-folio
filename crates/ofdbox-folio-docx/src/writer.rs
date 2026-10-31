@@ -559,6 +559,21 @@ impl<'a> Writer<'a> {
         ));
         out.push_str(&table_borders_xml(&table.borders));
         out.push_str(&margins_xml(&table.cell_padding));
+        if table.alignment != Align::Left {
+            let value = match table.alignment {
+                Align::Center => "center",
+                Align::Right => "right",
+                Align::Justify => "both",
+                _ => "left",
+            };
+            out.push_str(&format!("<w:tblJc w:val=\"{value}\"/>"));
+        }
+        if table.indent != Twips::default() {
+            out.push_str(&format!(
+                "<w:tblInd w:w=\"{}\" w:type=\"dxa\"/>",
+                table.indent.0
+            ));
+        }
         out.push_str("</w:tblPr><w:tblGrid>");
         for width in &widths {
             out.push_str(&format!("<w:gridCol w:w=\"{width}\"/>"));
@@ -648,6 +663,9 @@ impl<'a> Writer<'a> {
             ofdbox_folio_ir::VMerge::Restart => out.push_str("<w:vMerge w:val=\"restart\"/>"),
             ofdbox_folio_ir::VMerge::Continue => out.push_str("<w:vMerge/>"),
             _ => {}
+        }
+        if let Some(padding) = cell.padding {
+            out.push_str(&tc_margins_xml(&padding));
         }
         out.push_str("</w:tcPr>");
         let mut content = String::new();
@@ -1255,6 +1273,16 @@ fn margins_xml(margins: &Margins) -> String {
     }
     format!(
         "<w:tblCellMar><w:top w:w=\"{}\" w:type=\"dxa\"/><w:left w:w=\"{}\" w:type=\"dxa\"/><w:bottom w:w=\"{}\" w:type=\"dxa\"/><w:right w:w=\"{}\" w:type=\"dxa\"/></w:tblCellMar>",
+        margins.top.0, margins.left.0, margins.bottom.0, margins.right.0
+    )
+}
+
+fn tc_margins_xml(margins: &Margins) -> String {
+    if margins.top.0 == 0 && margins.right.0 == 0 && margins.bottom.0 == 0 && margins.left.0 == 0 {
+        return String::new();
+    }
+    format!(
+        "<w:tcMar><w:top w:w=\"{}\" w:type=\"dxa\"/><w:left w:w=\"{}\" w:type=\"dxa\"/><w:bottom w:w=\"{}\" w:type=\"dxa\"/><w:right w:w=\"{}\" w:type=\"dxa\"/></w:tcMar>",
         margins.top.0, margins.left.0, margins.bottom.0, margins.right.0
     )
 }

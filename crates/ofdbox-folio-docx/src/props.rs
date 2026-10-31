@@ -403,6 +403,10 @@ pub(crate) struct RawTableProps {
     pub vertical: Option<Border>,
     /// Cell margins.
     pub cell_margins: Option<Margins>,
+    /// Horizontal alignment.
+    pub alignment: Option<Align>,
+    /// Left indent.
+    pub indent: Option<Twips>,
 }
 
 impl RawTableProps {
@@ -422,6 +426,12 @@ impl RawTableProps {
         }
         if over.cell_margins.is_some() {
             self.cell_margins = over.cell_margins;
+        }
+        if over.alignment.is_some() {
+            self.alignment = over.alignment;
+        }
+        if over.indent.is_some() {
+            self.indent = over.indent;
         }
     }
 
@@ -622,6 +632,14 @@ pub(crate) fn parse_table_props(
                 if is_element(&element, "tblStyle") {
                     props.style_id = attr(&element, "val");
                 }
+                if is_element(&element, "tblJc") {
+                    props.alignment = attr(&element, "val").as_deref().and_then(parse_align);
+                }
+                if is_element(&element, "tblInd")
+                    && let Some(value) = attr_i32(&element, "w")
+                {
+                    props.indent = Some(Twips::new(i64::from(value)));
+                }
             }
             quick_xml::events::Event::End(_) => break,
             quick_xml::events::Event::Eof => {
@@ -798,7 +816,7 @@ fn parse_border(element: &quick_xml::events::BytesStart<'_>) -> Option<Border> {
     })
 }
 
-fn parse_cell_margins(
+pub(crate) fn parse_cell_margins(
     reader: &mut XmlReader<'_>,
     start: &quick_xml::events::BytesStart<'_>,
 ) -> Result<Margins, DocxError> {

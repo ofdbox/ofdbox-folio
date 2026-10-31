@@ -705,6 +705,10 @@ pub struct Table {
     pub borders: TableBorders,
     /// Cell padding.
     pub cell_padding: Margins,
+    /// Horizontal alignment within the text block.
+    pub alignment: Align,
+    /// Left indent from the text block edge (millimeters).
+    pub indent: Twips,
 }
 
 impl Table {
@@ -716,6 +720,8 @@ impl Table {
             header_rows: 0,
             borders: TableBorders::default(),
             cell_padding: Margins::default(),
+            alignment: Align::Left,
+            indent: Twips::default(),
         }
     }
 }
@@ -787,6 +793,8 @@ pub struct Cell {
     pub span: u32,
     /// Vertical merge state (`vMerge`).
     pub v_merge: VMerge,
+    /// Optional per-cell margins; `None` uses the table's cell padding.
+    pub padding: Option<Margins>,
 }
 
 impl Cell {
@@ -796,6 +804,7 @@ impl Cell {
             blocks,
             span: 1,
             v_merge: VMerge::None,
+            padding: None,
         }
     }
 

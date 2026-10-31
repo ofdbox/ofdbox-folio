@@ -6,9 +6,9 @@ use std::sync::Arc;
 use ofdbox_folio_ir::{
     Align, AnchorId, AssetId, Attachment, AttachmentId, AttachmentInfo, Block, Cell, Column,
     ColumnWidth, Diagnostic, DiagnosticCode, Field, FieldKind, FloatingObject, FlowDocument,
-    HeaderFooter, ImageAsset, ImageBlock, Inline, InlineImage, Link, LinkTarget, Metadata, Note,
-    NoteKind, NoteRef, Paragraph, Point, Row, RowHeightRule, Section, Table, TextRun, TextStyle,
-    TocBlock, Twips, VMerge, WrapMode, detect_image_format, image_dimensions,
+    HeaderFooter, ImageAsset, ImageBlock, Inline, InlineImage, Link, LinkTarget, Margins, Metadata,
+    Note, NoteKind, NoteRef, Paragraph, Point, Row, RowHeightRule, Section, Table, TextRun,
+    TextStyle, TocBlock, Twips, VMerge, WrapMode, detect_image_format, image_dimensions,
 };
 
 use crate::DocxError;
@@ -16,8 +16,8 @@ use crate::DocxReadOptions;
 use crate::numbering::{Counters, Numbering};
 use crate::package::{Package, Relation};
 use crate::props::{
-    RawParaProps, RawRunProps, RawSectionProps, RawTableProps, parse_para_props, parse_run_props,
-    parse_section_props, parse_table_props,
+    RawParaProps, RawRunProps, RawSectionProps, RawTableProps, parse_cell_margins,
+    parse_para_props, parse_run_props, parse_section_props, parse_table_props,
 };
 use crate::styles::{Styles, heading_level_from_name, parse_theme};
 use crate::xml::{
@@ -816,6 +816,8 @@ impl<'a> Builder<'a> {
         table.header_rows = header_rows;
         table.borders = resolved.borders();
         table.cell_padding = resolved.cell_margins.unwrap_or_default();
+        table.alignment = resolved.alignment.unwrap_or(Align::Left);
+        table.indent = resolved.indent.unwrap_or_default();
         Ok(table)
     }
 
@@ -880,14 +882,16 @@ impl<'a> Builder<'a> {
     fn parse_cell(&mut self, reader: &mut XmlReader<'_>) -> Result<Option<Cell>, DocxError> {
         let mut span = 1_u32;
         let mut v_merge = VMerge::None;
+        let mut padding = None;
         let mut blocks = Vec::new();
         loop {
             match reader.read_event().map_err(crate::xml::xml_error)? {
                 quick_xml::events::Event::Start(element) => match local_name(&element).as_str() {
                     "tcPr" => {
-                        let (cell_span, cell_merge) = parse_cell_props(reader)?;
+                        let (cell_span, cell_merge, cell_padding) = parse_cell_props(reader)?;
                         span = cell_span;
                         v_merge = cell_merge;
+                        padding = cell_padding;
                     }
                     "p" => {
                         let (mut produced, _) = self.parse_paragraph(reader)?;
@@ -924,9 +928,9 @@ impl<'a> Builder<'a> {
                     .with_v_merge(VMerge::Continue),
             ));
         }
-        Ok(Some(
-            Cell::new(blocks).with_span(span).with_v_merge(v_merge),
-        ))
+        let mut cell = Cell::new(blocks).with_span(span).with_v_merge(v_merge);
+        cell.padding = padding;
+        Ok(Some(cell))
     }
 
     // ---- Images and floating objects ----
@@ -1359,14 +1363,23 @@ fn parse_row_props(reader: &mut XmlReader<'_>) -> Result<RowProps, DocxError> {
     Ok(props)
 }
 
-/// Cell properties (`w:tcPr`): returns `(column span, whether this is a vertically
-/// merged continuation cell)`.
-fn parse_cell_props(reader: &mut XmlReader<'_>) -> Result<(u32, VMerge), DocxError> {
+/// Cell properties (`w:tcPr`): returns `(column span, vMerge state, optional
+/// per-cell margins)`.
+fn parse_cell_props(
+    reader: &mut XmlReader<'_>,
+) -> Result<(u32, VMerge, Option<Margins>), DocxError> {
     let mut span = 1;
     let mut v_merge = VMerge::None;
+    let mut padding = None;
     loop {
         match reader.read_event().map_err(crate::xml::xml_error)? {
-            quick_xml::events::Event::Start(element) => skip_element(reader, &element)?,
+            quick_xml::events::Event::Start(element) => {
+                if local_name(&element).as_str() == "tcMar" {
+                    padding = Some(parse_cell_margins(reader, &element)?);
+                } else {
+                    skip_element(reader, &element)?;
+                }
+            }
             quick_xml::events::Event::Empty(element) => match local_name(&element).as_str() {
                 "gridSpan" => {
                     if let Some(value) = attr_i32(&element, "val") {
@@ -1386,7 +1399,7 @@ fn parse_cell_props(reader: &mut XmlReader<'_>) -> Result<(u32, VMerge), DocxErr
             _ => {}
         }
     }
-    Ok((span, v_merge))
+    Ok((span, v_merge, padding))
 }
 
 /// Get a target part from the relationship table by type suffix.

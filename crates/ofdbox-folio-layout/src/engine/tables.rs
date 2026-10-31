@@ -13,6 +13,15 @@ impl<'a> Engine<'a> {
         let nested = self.in_frame;
         let pages_before = self.fixed.pages.len();
         let widths = self.table_widths(table);
+        let table_width: f64 = widths.iter().sum();
+        let content_width = self.content_width();
+        let indent = table.indent.to_mm();
+        let offset = match table.alignment {
+            Align::Center => (content_width - table_width) / 2.0 + indent,
+            Align::Right => content_width - table_width - indent,
+            _ => indent,
+        };
+        let table_left = self.frame.left + offset;
         let header_rows = usize::try_from(table.header_rows)
             .unwrap_or(0)
             .min(table.rows.len());
@@ -39,6 +48,7 @@ impl<'a> Engine<'a> {
                 resume.as_deref(),
                 false,
                 true,
+                table_left,
             );
             let complete = fragment.continuation.iter().all(Option::is_none);
             if complete && fragment.bottom <= page_bottom + 1e-6 {
@@ -52,7 +62,7 @@ impl<'a> Engine<'a> {
                 // The row must stay on one page: move it as a whole and retry.
                 self.restore(snapshot);
                 self.new_flow();
-                self.repeat_header_rows(table, &widths, header_rows, page_bottom);
+                self.repeat_header_rows(table, &widths, header_rows, page_bottom, table_left);
                 let retry = self.layout_row(
                     table,
                     &widths,
@@ -62,6 +72,7 @@ impl<'a> Engine<'a> {
                     None,
                     true,
                     true,
+                    table_left,
                 );
                 if retry.continuation.iter().any(Option::is_some) {
                     self.diagnostic(
@@ -79,7 +90,7 @@ impl<'a> Engine<'a> {
                 // page, repeat the header and try again.
                 self.restore(snapshot);
                 self.new_flow();
-                self.repeat_header_rows(table, &widths, header_rows, page_bottom);
+                self.repeat_header_rows(table, &widths, header_rows, page_bottom, table_left);
                 let retry = self.layout_row(
                     table,
                     &widths,
@@ -89,6 +100,7 @@ impl<'a> Engine<'a> {
                     None,
                     true,
                     true,
+                    table_left,
                 );
                 if retry.bottom > page_bottom + 1e-6 {
                     self.diagnostic(
@@ -105,7 +117,7 @@ impl<'a> Engine<'a> {
             // the rest on the next page.
             self.cursor = fragment.bottom;
             self.new_flow();
-            self.repeat_header_rows(table, &widths, header_rows, page_bottom);
+            self.repeat_header_rows(table, &widths, header_rows, page_bottom, table_left);
             if complete {
                 // Only padding / fixed row height overflows; the row itself is
                 // already complete.
@@ -142,10 +154,20 @@ impl<'a> Engine<'a> {
         widths: &[f64],
         count: usize,
         limit: f64,
+        table_left: f64,
     ) {
         for header in 0..count {
-            let fragment =
-                self.layout_row(table, widths, header, self.cursor, limit, None, true, false);
+            let fragment = self.layout_row(
+                table,
+                widths,
+                header,
+                self.cursor,
+                limit,
+                None,
+                true,
+                false,
+                table_left,
+            );
             self.cursor = fragment.bottom;
         }
     }
@@ -207,18 +229,15 @@ impl<'a> Engine<'a> {
         resume: Option<&[Option<CellContinuation>]>,
         force: bool,
         allow_floating: bool,
+        table_left: f64,
     ) -> RowFragment {
         let row: &Row = &table.rows[index];
-        let padding_top = table.cell_padding.top.to_mm().max(0.0);
-        let padding_bottom = table.cell_padding.bottom.to_mm().max(0.0);
-        let padding_left = table.cell_padding.left.to_mm().max(0.0);
-        let padding_right = table.cell_padding.right.to_mm().max(0.0);
         let saved_frame = self.frame;
         let saved_cursor = self.cursor;
         let saved_in_frame = self.in_frame;
         self.in_frame = true;
 
-        let mut x = saved_frame.left;
+        let mut x = table_left;
         let mut max_bottom = top;
         let mut placed_any = false;
         let mut continuation = vec![None; row.cells.len()];
@@ -232,6 +251,11 @@ impl<'a> Engine<'a> {
                 column += span;
                 continue;
             }
+            let padding = cell.padding.unwrap_or(table.cell_padding);
+            let padding_top = padding.top.to_mm().max(0.0);
+            let padding_bottom = padding.bottom.to_mm().max(0.0);
+            let padding_left = padding.left.to_mm().max(0.0);
+            let padding_right = padding.right.to_mm().max(0.0);
             let inner_left = x + padding_left;
             let inner_width = (width - padding_left - padding_right).max(1.0);
             let resume_at = resume.and_then(|items| items.get(cell_index).copied().flatten());
@@ -278,7 +302,7 @@ impl<'a> Engine<'a> {
             };
         }
         if placed_any {
-            self.draw_row_borders(table, widths, index, top, top + height);
+            self.draw_row_borders(table, widths, index, top, top + height, table_left);
         }
         RowFragment {
             bottom: top + height,
@@ -407,10 +431,11 @@ impl<'a> Engine<'a> {
         index: usize,
         top: f64,
         bottom: f64,
+        table_left: f64,
     ) {
         let rows = table.rows.len();
         let columns = widths.len();
-        let left = self.frame.left;
+        let left = table_left;
         let mut x = left;
         let mut column = 0_usize;
         for cell in &table.rows[index].cells {
