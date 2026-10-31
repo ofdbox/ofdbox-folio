@@ -165,7 +165,8 @@ An empty paragraph still occupies one line. When it has no runs, layout uses the
   position and size; the replay pre-places them before the page's body content, so text before the anchor also wraps around them.
   The passes repeat until the plan is stable (at most 4 passes). If the probe pass finds no deferred object and no object starting above the
   body cursor, its result is used directly without a replay pass. If the plan still does not stabilize after 4 passes, a
-  `DiagnosticCode::Geometry` warning is recorded.
+  `DiagnosticCode::Geometry` warning is recorded. If two floating objects overlap in the same page/column container, a
+  `DiagnosticCode::Geometry` warning is also recorded.
 - The width comes from `FloatingObject::width`, defaulting to the full text block; content is laid out within that width inside a bounded box (without pagination).
 - Wrapping:
   - `WrapMode::None`: overlay directly, body unchanged;

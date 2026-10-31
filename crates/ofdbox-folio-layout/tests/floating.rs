@@ -590,3 +590,32 @@ fn float_in_left_column_does_not_indent_right_column() {
         "the right column was indented by a float from the left column: {right_lines:?}"
     );
 }
+
+#[test]
+fn overlapping_floating_objects_record_a_diagnostic() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = FlowDocument::new(Metadata::default());
+    for (index, offset) in [(0, 0.0), (1, 10.0)] {
+        let mut image = image_block(&mut flow);
+        if let Block::Image(block) = &mut image {
+            block.size = Some((Twips::from_mm(30.0), Twips::from_mm(20.0)));
+        }
+        let mut floating = FloatingObject::new(Point::new(offset, offset), image);
+        floating.width = Some(Twips::from_mm(30.0));
+        assert!(index == 0 || offset > 0.0);
+        flow.push(Block::Floating(Box::new(floating)));
+    }
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    assert!(
+        fixed
+            .report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("overlap")),
+        "expected an overlap diagnostic, got {:?}",
+        fixed.report.diagnostics
+    );
+}

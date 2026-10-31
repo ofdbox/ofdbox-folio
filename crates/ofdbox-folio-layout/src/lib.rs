@@ -508,6 +508,10 @@ struct Engine<'a> {
     applied_geometry: HashMap<usize, (usize, f64, f64, f64, f64)>,
     /// Foreground floating elements waiting to be appended at page end.
     front_elements: Vec<Element>,
+    /// Rectangles of floating objects already placed on this page/column.
+    placed_float_rects: Vec<(f64, f64, f64, f64)>,
+    /// Whether an overlap diagnostic was already recorded for this container.
+    float_overlap_reported: bool,
     /// Index of the first body element in `page.scene.children` (after the header).
     body_element_start: usize,
     headings: Vec<(u8, String, usize, f64)>,
@@ -567,6 +571,8 @@ impl<'a> Engine<'a> {
             float_replay_needed: false,
             applied_geometry: HashMap::new(),
             front_elements: Vec::new(),
+            placed_float_rects: Vec::new(),
+            float_overlap_reported: false,
             body_element_start: 0,
             headings: Vec::new(),
             missing_chars: 0,
@@ -897,6 +903,8 @@ impl<'a> Engine<'a> {
         self.page_body = false;
         self.page_started = false;
         self.float_exclusions.clear();
+        self.placed_float_rects.clear();
+        self.float_overlap_reported = false;
         self.frame = self.column_frame(0);
         self.cursor = self.frame.top;
     }
@@ -936,6 +944,8 @@ impl<'a> Engine<'a> {
         self.column_index += 1;
         // Square-wrap exclusion areas belong to the current column container.
         self.float_exclusions.clear();
+        self.placed_float_rects.clear();
+        self.float_overlap_reported = false;
         self.frame = self.column_frame(self.column_index);
         self.cursor = self.frame.top;
         true
@@ -971,6 +981,8 @@ impl<'a> Engine<'a> {
         // Square-wrap exclusion areas belong to the page where the floating
         // object was placed; they must not affect later pages.
         self.float_exclusions.clear();
+        self.placed_float_rects.clear();
+        self.float_overlap_reported = false;
         self.frame = self.column_frame(0);
         self.cursor = self.frame.top;
         self.page_body = false;
@@ -1409,6 +1421,7 @@ impl<'a> Engine<'a> {
             }
             _ => {}
         }
+        self.note_float_rect(x, y, width, bottom - y);
         FloatPlacement::Placed {
             x,
             y,
@@ -1494,6 +1507,8 @@ impl<'a> Engine<'a> {
         self.column_index = 0;
         self.bottom_inset = 0.0;
         self.float_exclusions.clear();
+        self.placed_float_rects.clear();
+        self.float_overlap_reported = false;
         self.front_elements.clear();
         self.body_element_start = 0;
         self.frame = self.column_frame(0);
@@ -1557,6 +1572,29 @@ impl<'a> Engine<'a> {
         }
         self.applied_geometry
             .insert(plan.index, (self.fixed.pages.len(), x, y, width, height));
+        self.note_float_rect(x, y, width, height);
+    }
+
+    /// Record a placed floating rectangle and warn once when two objects
+    /// overlap in the same page/column container.
+    fn note_float_rect(&mut self, x: f64, y: f64, width: f64, height: f64) {
+        let overlaps = self
+            .placed_float_rects
+            .iter()
+            .any(|(other_x, other_y, w, h)| {
+                x < other_x + w - 1e-6
+                    && *other_x < x + width - 1e-6
+                    && y < other_y + h - 1e-6
+                    && *other_y < y + height - 1e-6
+            });
+        if overlaps && !self.float_overlap_reported {
+            self.diagnostic(
+                DiagnosticCode::Geometry,
+                "floating objects overlap on the same page/column",
+            );
+            self.float_overlap_reported = true;
+        }
+        self.placed_float_rects.push((x, y, width, height));
     }
 
     /// Floating areas the current paragraph must avoid (square wrapping).
