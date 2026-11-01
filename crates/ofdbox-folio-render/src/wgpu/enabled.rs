@@ -830,26 +830,30 @@ impl WgpuBackend {
         {
             let _pass = encoder.begin_render_pass(&clear_descriptor);
         }
-        let layer_texture = self
-            .context
-            .device
-            .create_texture(&wgpu_lib::TextureDescriptor {
-                label: Some("ofdbox-path-layer"),
-                size: wgpu_lib::Extent3d {
-                    width: target.width,
-                    height: target.height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu_lib::TextureDimension::D2,
-                format: wgpu_lib::TextureFormat::Rgba8Unorm,
-                usage: wgpu_lib::TextureUsages::STORAGE_BINDING
-                    | wgpu_lib::TextureUsages::TEXTURE_BINDING
-                    | wgpu_lib::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            });
-        let layer_view = layer_texture.create_view(&wgpu_lib::TextureViewDescriptor::default());
+        let has_paths = runs.iter().any(|run| matches!(run, DrawRun::Paths(_)));
+        let layer = has_paths.then(|| {
+            let texture = self
+                .context
+                .device
+                .create_texture(&wgpu_lib::TextureDescriptor {
+                    label: Some("ofdbox-path-layer"),
+                    size: wgpu_lib::Extent3d {
+                        width: target.width,
+                        height: target.height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu_lib::TextureDimension::D2,
+                    format: wgpu_lib::TextureFormat::Rgba8Unorm,
+                    usage: wgpu_lib::TextureUsages::STORAGE_BINDING
+                        | wgpu_lib::TextureUsages::TEXTURE_BINDING
+                        | wgpu_lib::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                });
+            let view = texture.create_view(&wgpu_lib::TextureViewDescriptor::default());
+            (texture, view)
+        });
         let edge_buffer = (!edges.is_empty()).then(|| {
             let mut edge_data = Vec::with_capacity(edges.len() * 16);
             for edge in edges {
@@ -868,6 +872,9 @@ impl WgpuBackend {
         for run in &runs {
             match run {
                 DrawRun::Paths(indices) => {
+                    let Some((_layer_texture, layer_view)) = &layer else {
+                        continue;
+                    };
                     let mut path_data = Vec::with_capacity(indices.len() * 96);
                     for index in indices {
                         let path = &paths[*index];
@@ -941,7 +948,7 @@ impl WgpuBackend {
                                     wgpu_lib::BindGroupEntry {
                                         binding: 3,
                                         resource: wgpu_lib::BindingResource::TextureView(
-                                            &layer_view,
+                                            layer_view,
                                         ),
                                     },
                                 ],
@@ -995,7 +1002,7 @@ impl WgpuBackend {
                                     wgpu_lib::BindGroupEntry {
                                         binding: 1,
                                         resource: wgpu_lib::BindingResource::TextureView(
-                                            &layer_view,
+                                            layer_view,
                                         ),
                                     },
                                     wgpu_lib::BindGroupEntry {
