@@ -9,6 +9,11 @@ use std::collections::HashMap;
 
 use ofdbox_folio_ir::{Matrix, Path};
 
+#[cfg(feature = "wgpu30")]
+use wgpu as wgpu_lib;
+#[cfg(feature = "wgpu27")]
+use wgpu27 as wgpu_lib;
+
 use super::enabled::flatten_path;
 
 /// One rasterized glyph.
@@ -213,6 +218,106 @@ fn inside_edges(edges: &[[f32; 4]], x: f64, y: f64) -> bool {
         }
     }
     winding != 0
+}
+
+/// GPU-side R8 glyph atlas.
+pub(crate) struct GpuAtlas {
+    texture: wgpu_lib::Texture,
+    view: wgpu_lib::TextureView,
+    sampler: wgpu_lib::Sampler,
+    packer: GlyphPacker,
+}
+
+impl GpuAtlas {
+    /// Create an atlas texture and sampler.
+    pub(crate) fn new(device: &wgpu_lib::Device, size: u32) -> Self {
+        let texture = device.create_texture(&wgpu_lib::TextureDescriptor {
+            label: Some("ofdbox-glyph-atlas"),
+            size: wgpu_lib::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu_lib::TextureDimension::D2,
+            format: wgpu_lib::TextureFormat::R8Unorm,
+            usage: wgpu_lib::TextureUsages::TEXTURE_BINDING | wgpu_lib::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu_lib::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu_lib::SamplerDescriptor {
+            label: Some("ofdbox-glyph-sampler"),
+            mag_filter: wgpu_lib::FilterMode::Linear,
+            min_filter: wgpu_lib::FilterMode::Linear,
+            ..Default::default()
+        });
+        Self {
+            texture,
+            view,
+            sampler,
+            packer: GlyphPacker::new(size),
+        }
+    }
+
+    /// The atlas texture view.
+    pub(crate) fn view(&self) -> &wgpu_lib::TextureView {
+        &self.view
+    }
+
+    /// The atlas sampler.
+    pub(crate) fn sampler(&self) -> &wgpu_lib::Sampler {
+        &self.sampler
+    }
+
+    /// Rasterize, pack and upload a glyph if it is not already cached.
+    pub(crate) fn glyph(
+        &mut self,
+        queue: &wgpu_lib::Queue,
+        font: usize,
+        glyph: u16,
+        pixel_size: u32,
+        path: &Path,
+        units_per_em: u16,
+    ) -> Option<AtlasGlyph> {
+        if let Some(packed) = self.packer.get(font, glyph, pixel_size) {
+            return Some(packed);
+        }
+        let bitmap = rasterize_glyph(path, units_per_em, f64::from(pixel_size))?;
+        let packed = self.packer.insert(font, glyph, pixel_size, &bitmap)?;
+        let width = bitmap.width.max(1);
+        let height = bitmap.height.max(1);
+        let padded = wgpu_lib::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
+        let mut data = vec![0_u8; padded * height as usize];
+        for row in 0..height as usize {
+            let source = &bitmap.coverage[row * width as usize..(row + 1) * width as usize];
+            data[row * padded..row * padded + width as usize].copy_from_slice(source);
+        }
+        queue.write_texture(
+            wgpu_lib::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu_lib::Origin3d {
+                    x: (packed.u0 * self.packer.size as f32).round() as u32,
+                    y: (packed.v0 * self.packer.size as f32).round() as u32,
+                    z: 0,
+                },
+                aspect: wgpu_lib::TextureAspect::All,
+            },
+            &data,
+            wgpu_lib::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded as u32),
+                rows_per_image: Some(height),
+            },
+            wgpu_lib::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        Some(packed)
+    }
 }
 
 #[cfg(test)]
