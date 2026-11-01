@@ -1,0 +1,19 @@
+[package]
+name = "ofdbox-folio-markdown"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+description = "Markdown to Flow IR adapter for OFDBox Folio."
+keywords = ["markdown", "document", "layout", "ofd"]
+categories = ["text-processing"]
+
+[dependencies]
+ofdbox-folio-ir.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

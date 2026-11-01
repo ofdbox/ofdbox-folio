@@ -199,6 +199,18 @@ impl Document {
         )
     }
 
+    /// Lays out Markdown and wraps the result in a reader.
+    #[cfg(all(feature = "markdown", feature = "layout"))]
+    pub fn from_markdown(
+        bytes: &[u8],
+        fonts: &mut dyn FontProvider,
+        markdown: &ofdbox_folio_markdown::MarkdownOptions,
+        options: ReaderOptions,
+    ) -> Result<Self, Error> {
+        let flow = ofdbox_folio_markdown::read_markdown_bytes(bytes, markdown)?;
+        Self::from_flow(&flow, fonts, SourceFormat::Markdown, options)
+    }
+
     /// Lays out Flow IR and wraps the result in a reader.
     #[cfg(feature = "layout")]
     pub fn from_flow(

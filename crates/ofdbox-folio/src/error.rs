@@ -24,6 +24,10 @@ pub enum Error {
     #[cfg(feature = "docx")]
     #[error(transparent)]
     Docx(#[from] ofdbox_folio_docx::DocxError),
+    /// Markdown adapter error.
+    #[cfg(feature = "markdown")]
+    #[error(transparent)]
+    Markdown(#[from] ofdbox_folio_markdown::MarkdownError),
     /// Flow → Fixed layout error.
     #[cfg(feature = "layout")]
     #[error(transparent)]

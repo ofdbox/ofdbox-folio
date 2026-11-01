@@ -7,6 +7,7 @@ OFDBox Folio is a page-centric multi-format document engine: it reads OFD, PDF a
 ## Features
 
 - Open OFD, PDF and DOCX through one reader: OFD/PDF load pages on demand, DOCX is read into Flow IR and laid out eagerly.
+- Import Markdown into Flow IR (headings, emphasis, links, lists, code blocks, tables and images) and export it through the same layout and OFD/PDF writers.
 - Build Flow IR with one creation API: write DOCX directly, or write OFD/PDF/bitmaps after layout.
 - Fixed IR as the unified read model: lazy pages, text selection/search, page cache, incremental rendering.
 - Wrap any laid-out `FixedDocument` back into the reader (`FixedDocumentSource`) to reuse caching, selection and search.
@@ -37,6 +38,7 @@ ofdbox-folio                façade: format probing, Reader, creation API, conve
 ├─ ofdbox-folio-ofd        OFD read/write        → ofdbox-core
 ├─ ofdbox-folio-pdf        PDF read/write        → lopdf
 ├─ ofdbox-folio-docx       DOCX read/write       → zip + quick-xml
+├─ ofdbox-folio-markdown   Markdown → Flow IR
 ├─ ofdbox-folio-layout     Flow → Fixed, one-way layout
 ├─ ofdbox-folio-render     Fixed → bitmap, CPU/GPU rendering and caching
 └─ ofdbox-folio-ir         Flow IR, Fixed IR, geometry, resources, text layer, Reader contracts
