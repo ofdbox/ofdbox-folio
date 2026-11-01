@@ -1892,7 +1892,13 @@ fn collect_code_runs(object: &TextObject) -> Vec<CodeRun> {
 /// - `Some(glyphs)`: one or more glyphs, with the whole cluster anchored at this code position.
 fn glyph_slots(object: &TextObject, count: usize) -> Vec<Option<Vec<u32>>> {
     let mut slots = vec![None; count];
-    for transform in &object.content.cg_transforms {
+    // Most producers emit one CGTransform immediately before each TextCode and
+    // reuse CodePosition=0 for every pair. In that layout CodePosition is
+    // relative to the following TextCode, not to the whole object.
+    let paired = !object.content.cg_transforms.is_empty()
+        && object.content.cg_transforms.len() == object.content.text_codes.len();
+    let mut paired_start = 0usize;
+    for (index, transform) in object.content.cg_transforms.iter().enumerate() {
         let glyphs = transform
             .glyphs
             .as_deref()
@@ -1901,7 +1907,18 @@ fn glyph_slots(object: &TextObject, count: usize) -> Vec<Option<Vec<u32>>> {
         if glyphs.is_empty() {
             continue;
         }
-        let position = transform.code_position.max(0) as usize;
+        let position = if paired {
+            let position = paired_start + transform.code_position.max(0) as usize;
+            paired_start += object
+                .content
+                .text_codes
+                .get(index)
+                .map(|code| decode_text(&code.text).len())
+                .unwrap_or(0);
+            position
+        } else {
+            transform.code_position.max(0) as usize
+        };
         if position >= count {
             continue;
         }
@@ -2809,14 +2826,46 @@ fn image_format_from_path(path: &str) -> ImageFormat {
 
 #[cfg(test)]
 mod tests {
+    use super::glyph_slots;
     use super::{
         components_to_rgba, distribute_stops, gradient_axis, gradient_extend, matrix_from_array,
         parse_color_components, parse_path_data,
     };
     use ofdbox_core::model::definition::{DeltaArray, StArray};
-    use ofdbox_core::model::page::MapType;
+    use ofdbox_core::model::page::{CgTransform, MapType, TextCode, TextObject};
     use ofdbox_folio_ir::{GradientExtend, GradientStop, Matrix, PathSegment, Point, Rgba};
     use std::str::FromStr;
+
+    #[test]
+    fn pairs_each_cg_transform_with_its_text_code() {
+        let mut object = TextObject::default();
+        object.content.cg_transforms = vec![
+            CgTransform {
+                code_position: 0,
+                code_count: 1,
+                glyph_count: 1,
+                glyphs: Some("857".to_owned()),
+            },
+            CgTransform {
+                code_position: 0,
+                code_count: 1,
+                glyph_count: 1,
+                glyphs: Some("3113".to_owned()),
+            },
+        ];
+        object.content.text_codes = vec![
+            TextCode {
+                text: "中".to_owned(),
+                ..TextCode::default()
+            },
+            TextCode {
+                text: "国".to_owned(),
+                ..TextCode::default()
+            },
+        ];
+        let slots = glyph_slots(&object, 2);
+        assert_eq!(slots, vec![Some(vec![857]), Some(vec![3113])]);
+    }
 
     #[test]
     fn parses_spaced_path() {
