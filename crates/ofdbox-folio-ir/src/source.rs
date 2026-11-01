@@ -21,6 +21,8 @@ pub enum SourceFormat {
     Pdf,
     /// DOCX.
     Docx,
+    /// Markdown.
+    Markdown,
 }
 
 /// Document-level information that can be obtained without loading page content.

@@ -1477,6 +1477,7 @@ dependencies = [
  "ofdbox-folio-docx",
  "ofdbox-folio-ir",
  "ofdbox-folio-layout",
+ "ofdbox-folio-markdown",
  "ofdbox-folio-ofd",
  "ofdbox-folio-pdf",
  "ofdbox-folio-render",
@@ -1510,6 +1511,14 @@ dependencies = [
  "ofdbox-folio-ir",
  "thiserror 2.0.21",
  "ttf-parser",
+]
+
+[[package]]
+name = "ofdbox-folio-markdown"
+version = "0.0.1"
+dependencies = [
+ "ofdbox-folio-ir",
+ "thiserror",
 ]
 
 [[package]]

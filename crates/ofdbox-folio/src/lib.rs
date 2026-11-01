@@ -45,3 +45,7 @@ pub use ofdbox_folio_pdf as pdf;
 /// Read/write adapter between DOCX and Flow IR.
 #[cfg(feature = "docx")]
 pub use ofdbox_folio_docx as docx;
+
+/// Markdown to Flow IR adapter.
+#[cfg(feature = "markdown")]
+pub use ofdbox_folio_markdown as markdown;

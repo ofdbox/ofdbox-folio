@@ -18,14 +18,16 @@ ofdbox-folio-render = { workspace = true, optional = true }
 ofdbox-folio-ofd = { workspace = true, optional = true }
 ofdbox-folio-pdf = { workspace = true, optional = true }
 ofdbox-folio-docx = { workspace = true, optional = true }
+ofdbox-folio-markdown = { workspace = true, optional = true }
 thiserror.workspace = true
 zip.workspace = true
 
 [features]
-default = ["ofd", "pdf", "docx", "layout", "cpu"]
+default = ["ofd", "pdf", "docx", "markdown", "layout", "cpu"]
 ofd = ["dep:ofdbox-folio-ofd"]
 pdf = ["dep:ofdbox-folio-pdf"]
 docx = ["dep:ofdbox-folio-docx"]
+markdown = ["dep:ofdbox-folio-markdown"]
 layout = ["dep:ofdbox-folio-layout"]
 cpu = ["dep:ofdbox-folio-render"]
 gpu = ["gpu30"]

@@ -7,6 +7,7 @@ OFDBox Folio 是以“页”为中心的多格式文档引擎：读取 OFD、PDF
 ## 特性
 
 - 用同一个 Reader 打开 OFD/PDF/DOCX：OFD/PDF 按需加载页面，DOCX 读入 Flow IR 后立即排版。
+- 将 Markdown 导入 Flow IR（标题、强调、链接、列表、代码块、表格与图片），并走同一套排版与 OFD/PDF 写出。
 - 用一套创建 API 构建 Flow IR：可直接写 DOCX，也可排版后写 OFD/PDF/位图。
 - 以 Fixed IR 作为统一读取模型：按需加载、文本选择/搜索、页面缓存、增量渲染。
 - 排版产出的 `FixedDocument` 可以包回 Reader（`FixedDocumentSource`），复用缓存、选择与搜索。
@@ -38,6 +39,7 @@ ofdbox-folio                门面：格式探测、Reader、创建 API、便捷
 ├─ ofdbox-folio-ofd        OFD 读写              → ofdbox-core
 ├─ ofdbox-folio-pdf        PDF 读写              → lopdf
 ├─ ofdbox-folio-docx       DOCX 读写             → zip + quick-xml
+├─ ofdbox-folio-markdown   Markdown → Flow IR
 ├─ ofdbox-folio-layout     Flow → Fixed，单向排版
 ├─ ofdbox-folio-render     Fixed → 位图，CPU/GPU 渲染与缓存
 └─ ofdbox-folio-ir         Flow IR、Fixed IR、几何、资源、文本层、Reader 契约

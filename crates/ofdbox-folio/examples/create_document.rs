@@ -1,12 +1,14 @@
-//! Complete example that builds a Flow IR from scratch and writes out both DOCX and OFD.
+//! Complete example that builds a Flow IR from scratch and writes it as DOCX,
+//! Markdown and OFD.
 //!
 //! ```text
 //! cargo run -p ofdbox-folio --example create_document
 //! cargo run -p ofdbox-folio --example create_document -- /tmp/out.docx
 //! ```
 //!
-//! By default the files are written to `target/create_document.docx` and
-//! `target/create_document.ofd` so a checkout is not polluted.
+//! By default the files are written to `target/create_document.docx`,
+//! `target/create_document.md` and `target/create_document.ofd` so a checkout is
+//! not polluted.
 //!
 //! Covers: heading and body formatting, tab stops with dot leaders, tables, images,
 //! footnotes, TOC fields, headers/footers with page-number fields, and floating images.
@@ -269,6 +271,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     write_flow_path(&flow, &path, &DocxWriteOptions::default())?;
     let size = std::fs::metadata(&path)?.len();
     println!("Wrote DOCX: {} ({size} bytes)", path.display());
+
+    // ---- Write the same Flow IR as Markdown ----
+    let markdown_path = path.with_extension("md");
+    let markdown = ofdbox_folio::markdown::write_markdown(&flow);
+    std::fs::write(&markdown_path, &markdown)?;
+    println!(
+        "Wrote Markdown: {} ({} bytes)",
+        markdown_path.display(),
+        markdown.len()
+    );
 
     // ---- Lay out the same Flow IR into Fixed IR, then write OFD ----
     let mut fonts = SystemFonts::new();
