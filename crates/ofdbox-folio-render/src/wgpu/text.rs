@@ -126,6 +126,10 @@ struct Instance {
     color: vec4f,
     gradient: vec4f,
     end_color: vec4f,
+    mode: f32,
+    _pad_a: f32,
+    _pad_b: f32,
+    _pad_c: f32,
 };
 struct Params { size: vec2f, _pad: vec2f };
 struct VOut {
@@ -135,6 +139,7 @@ struct VOut {
     @location(2) page: vec2f,
     @location(3) end_color: vec4f,
     @location(4) gradient: vec4f,
+    @location(5) mode: f32,
 };
 
 @group(0) @binding(0) var<storage, read> instances: array<Instance>;
@@ -159,13 +164,19 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
     out.page = page;
     out.end_color = instance.end_color;
     out.gradient = instance.gradient;
+    out.mode = instance.mode;
     return out;
 }
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4f {
-    let axis = in.gradient.zw - in.gradient.xy;
-    let t = clamp(dot(in.page - in.gradient.xy, axis) / max(dot(axis, axis), 0.0001), 0.0, 1.0);
+    var t = 0.0;
+    if (in.mode > 1.5) {
+        t = clamp(length(in.page - in.gradient.xy) / max(in.gradient.z, 0.0001), 0.0, 1.0);
+    } else if (in.mode > 0.5) {
+        let axis = in.gradient.zw - in.gradient.xy;
+        t = clamp(dot(in.page - in.gradient.xy, axis) / max(dot(axis, axis), 0.0001), 0.0, 1.0);
+    }
     let color = mix(in.color, in.end_color, t);
     let alpha = textureSample(atlas, atlas_sampler, in.uv).r * color.a;
     return vec4f(color.rgb, alpha);

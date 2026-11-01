@@ -661,7 +661,7 @@ impl WgpuBackend {
                 }
             }
             if !instances.is_empty() {
-                let mut instance_data = Vec::with_capacity(instances.len() * 96);
+                let mut instance_data = Vec::with_capacity(instances.len() * 112);
                 for instance in &instances {
                     instance.write_bytes(&mut instance_data);
                 }
@@ -1387,8 +1387,8 @@ fn emit_text_instances(
     queue: &wgpu_lib::Queue,
     instances: &mut Vec<GlyphInstance>,
 ) {
-    let (fill_color, end_fill_color, gradient) = match text.fill.as_ref() {
-        Some(Paint::Color(color)) => (*color, *color, [0.0; 4]),
+    let (fill_color, end_fill_color, gradient, gradient_mode) = match text.fill.as_ref() {
+        Some(Paint::Color(color)) => (*color, *color, [0.0; 4], 0.0),
         Some(Paint::LinearGradient(gradient)) => {
             let start = gradient
                 .stops
@@ -1406,14 +1406,27 @@ fn emit_text_instances(
                     (b.x * scale - origin_px.0) as f32,
                     (b.y * scale - origin_px.1) as f32,
                 ],
+                1.0,
             )
         }
         Some(Paint::RadialGradient(gradient)) => {
-            let color = gradient
+            let start = gradient
                 .stops
                 .first()
                 .map_or(Rgba::BLACK, |stop| stop.color);
-            (color, color, [0.0; 4])
+            let end = gradient.stops.last().map_or(start, |stop| stop.color);
+            let center = world.apply(gradient.start_center);
+            (
+                start,
+                end,
+                [
+                    (center.x * scale - origin_px.0) as f32,
+                    (center.y * scale - origin_px.1) as f32,
+                    (gradient.start_radius * scale) as f32,
+                    0.0,
+                ],
+                2.0,
+            )
         }
         Some(_) | None => return,
     };
@@ -1532,6 +1545,10 @@ fn emit_text_instances(
             color,
             gradient,
             end_color,
+            mode: gradient_mode,
+            _pad_a: 0.0,
+            _pad_b: 0.0,
+            _pad_c: 0.0,
         };
         instances.push(instance);
         // Layout synthesizes bold text with a thin same-color stroke. Stamp the
