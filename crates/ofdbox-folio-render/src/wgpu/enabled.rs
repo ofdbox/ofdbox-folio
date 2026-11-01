@@ -2118,6 +2118,35 @@ mod tests {
     }
 
     #[test]
+    fn renders_text_in_region_at_offset() {
+        let Ok(font_data) = std::fs::read("C:/Windows/Fonts/arial.ttf") else {
+            return;
+        };
+        let Ok(context) = WgpuContext::new_blocking() else {
+            return;
+        };
+        let font = std::sync::Arc::new(ofdbox_folio_ir::FontAsset::new(
+            std::sync::Arc::from(font_data.into_boxed_slice()),
+            0,
+        ));
+        let mut root = Group::default();
+        root.children.push(text_element(&font, 'A', 5.0, 20.0));
+        let scene = Scene {
+            size: Size::new(30.0, 30.0),
+            root,
+            diagnostics: Vec::new(),
+        };
+        let backend = WgpuBackend::new(context).expect("backend");
+        let target = WgpuTarget::from_pixels(backend.context(), 64, 64, 96.0).expect("target");
+        backend
+            .render_region(&scene, &target, (10.0, 30.0))
+            .expect("render");
+        let pixels = target.read_rgba(backend.context()).expect("read");
+        let dark = pixels.chunks(4).filter(|pixel| pixel[0] < 128).count();
+        assert!(dark > 5, "expected glyph pixels in the tile, got {dark}");
+    }
+
+    #[test]
     fn renders_solid_rectangle() {
         let Ok(context) = WgpuContext::new_blocking() else {
             return;
