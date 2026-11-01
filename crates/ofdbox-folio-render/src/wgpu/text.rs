@@ -145,6 +145,7 @@ struct Instance {
     clip_rule: u32,
     _clip_pad: u32,
     ellipse: vec4f,
+    radial_end: vec4f,
 };
 struct Params { size: vec2f, _pad: vec2f };
 struct VOut {
@@ -159,6 +160,7 @@ struct VOut {
     @location(7) @interpolate(flat) clip_count: u32,
     @location(8) @interpolate(flat) clip_rule: u32,
     @location(9) ellipse: vec4f,
+    @location(10) radial_end: vec4f,
 };
 
 @group(0) @binding(0) var<storage, read> instances: array<Instance>;
@@ -207,6 +209,7 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
     out.clip_count = instance.clip_count;
     out.clip_rule = instance.clip_rule;
     out.ellipse = instance.ellipse;
+    out.radial_end = instance.radial_end;
     return out;
 }
 
@@ -214,12 +217,34 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
 fn fs(in: VOut) -> @location(0) vec4f {
     var t = 0.0;
     if (in.mode > 1.5) {
-        let d = in.page - in.gradient.xy;
+        let c0 = in.gradient.xy;
+        let r0 = max(in.gradient.z, 0.0001);
+        let c1 = in.radial_end.xy;
+        let r1 = max(in.radial_end.z, 0.0001);
+        let d = in.page - c0;
         let local = vec2f(
             in.ellipse.x * d.x + in.ellipse.z * d.y,
             in.ellipse.y * d.x + in.ellipse.w * d.y,
         );
-        t = clamp(length(local) / max(in.gradient.z, 0.0001), 0.0, 1.0);
+        let cd = c1 - c0;
+        let dr = r1 - r0;
+        let a = dot(cd, cd) - dr * dr;
+        let b = 2.0 * (dot(d, cd) - r0 * dr);
+        let c = dot(d, d) - r0 * r0;
+        if (abs(a) < 0.00001) {
+            if (abs(b) < 0.00001) {
+                t = length(local) / r0;
+            } else {
+                t = -c / b;
+            }
+        } else {
+            let disc = max(b * b - 4.0 * a * c, 0.0);
+            let root = sqrt(disc);
+            let t1 = (-b - root) / (2.0 * a);
+            let t2 = (-b + root) / (2.0 * a);
+            t = select(t2, t1, t1 >= 0.0);
+        }
+        t = clamp(t, 0.0, 1.0);
     } else if (in.mode > 0.5) {
         if (in.clip_count > 0u && !inside_range(in.page, in.clip_start, in.clip_count, in.clip_rule)) {
         discard;

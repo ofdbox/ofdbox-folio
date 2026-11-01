@@ -722,7 +722,7 @@ impl WgpuBackend {
                         usage: wgpu_lib::BufferUsages::STORAGE,
                     });
             if !instances.is_empty() {
-                let mut instance_data = Vec::with_capacity(instances.len() * 144);
+                let mut instance_data = Vec::with_capacity(instances.len() * 160);
                 for instance in &instances {
                     instance.write_bytes(&mut instance_data);
                 }
@@ -1572,6 +1572,17 @@ fn emit_text_instances(
     } else {
         [1.0, 0.0, 0.0, 1.0]
     };
+    let gradient_radial_end = if let Some(Paint::RadialGradient(gradient)) = text.fill.as_ref() {
+        let end = world.apply(gradient.end_center);
+        [
+            (end.x * scale - origin_px.0) as f32,
+            (end.y * scale - origin_px.1) as f32,
+            (gradient.end_radius * scale) as f32,
+            0.0,
+        ]
+    } else {
+        [0.0; 4]
+    };
     let font_key = Arc::as_ptr(&text.font) as usize;
     for glyph in &text.run.glyphs {
         let Ok(glyph_id) = u16::try_from(glyph.id) else {
@@ -1687,6 +1698,7 @@ fn emit_text_instances(
             clip_rule: 0,
             _clip_pad: 0,
             ellipse: gradient_ellipse,
+            radial_end: gradient_radial_end,
         };
         instances.push(instance);
     }
@@ -2668,8 +2680,8 @@ mod tests {
             text.fill = Some(Paint::RadialGradient(ofdbox_folio_ir::RadialGradient {
                 start_center: Point::new(8.5, 16.0),
                 start_radius: 2.5,
-                end_center: Point::new(8.5, 16.0),
-                end_radius: 2.5,
+                end_center: Point::new(9.5, 17.0),
+                end_radius: 3.5,
                 stops: vec![
                     ofdbox_folio_ir::GradientStop {
                         offset: 0.0,

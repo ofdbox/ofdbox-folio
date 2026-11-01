@@ -461,10 +461,12 @@ pub(crate) struct GlyphInstance {
     pub _clip_pad: u32,
     /// 2x2 gradient-space transform for elliptical radial gradients.
     pub ellipse: [f32; 4],
+    /// End center/radius for two-point radial gradients.
+    pub radial_end: [f32; 4],
 }
 
 impl GlyphInstance {
-    /// Serialize for the GPU instance buffer (144 bytes).
+    /// Serialize for the GPU instance buffer (160 bytes).
     pub(crate) fn write_bytes(self, out: &mut Vec<u8>) {
         for value in self
             .origin
@@ -490,6 +492,9 @@ impl GlyphInstance {
             out.extend_from_slice(&value.to_ne_bytes());
         }
         for value in self.ellipse {
+            out.extend_from_slice(&value.to_ne_bytes());
+        }
+        for value in self.radial_end {
             out.extend_from_slice(&value.to_ne_bytes());
         }
     }
