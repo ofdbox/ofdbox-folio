@@ -39,6 +39,10 @@ tiny-skia = ["dep:ofdbox-folio-render", "ofdbox-folio-render/tiny-skia"]
 png.workspace = true
 
 [[example]]
+name = "render_bench"
+required-features = ["tiny-skia"]
+
+[[example]]
 name = "tiny_skia_compare"
 required-features = ["tiny-skia"]
 
