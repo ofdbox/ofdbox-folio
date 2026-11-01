@@ -124,12 +124,17 @@ struct Instance {
     uv0: vec2f,
     uv1: vec2f,
     color: vec4f,
+    gradient: vec4f,
+    end_color: vec4f,
 };
 struct Params { size: vec2f, _pad: vec2f };
 struct VOut {
     @builtin(position) position: vec4f,
     @location(0) uv: vec2f,
     @location(1) color: vec4f,
+    @location(2) page: vec2f,
+    @location(3) end_color: vec4f,
+    @location(4) gradient: vec4f,
 };
 
 @group(0) @binding(0) var<storage, read> instances: array<Instance>;
@@ -151,12 +156,18 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
     out.position = vec4f(ndc, 0.0, 1.0);
     out.uv = mix(instance.uv0, instance.uv1, corner);
     out.color = instance.color;
+    out.page = page;
+    out.end_color = instance.end_color;
+    out.gradient = instance.gradient;
     return out;
 }
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4f {
-    let alpha = textureSample(atlas, atlas_sampler, in.uv).r * in.color.a;
-    return vec4f(in.color.rgb, alpha);
+    let axis = in.gradient.zw - in.gradient.xy;
+    let t = clamp(dot(in.page - in.gradient.xy, axis) / max(dot(axis, axis), 0.0001), 0.0, 1.0);
+    let color = mix(in.color, in.end_color, t);
+    let alpha = textureSample(atlas, atlas_sampler, in.uv).r * color.a;
+    return vec4f(color.rgb, alpha);
 }
 "#;

@@ -661,7 +661,7 @@ impl WgpuBackend {
                 }
             }
             if !instances.is_empty() {
-                let mut instance_data = Vec::with_capacity(instances.len() * 64);
+                let mut instance_data = Vec::with_capacity(instances.len() * 96);
                 for instance in &instances {
                     instance.write_bytes(&mut instance_data);
                 }
@@ -1387,16 +1387,34 @@ fn emit_text_instances(
     queue: &wgpu_lib::Queue,
     instances: &mut Vec<GlyphInstance>,
 ) {
-    let fill_color = match text.fill.as_ref() {
-        Some(Paint::Color(color)) => *color,
-        Some(Paint::LinearGradient(gradient)) => gradient
-            .stops
-            .first()
-            .map_or(Rgba::BLACK, |stop| stop.color),
-        Some(Paint::RadialGradient(gradient)) => gradient
-            .stops
-            .first()
-            .map_or(Rgba::BLACK, |stop| stop.color),
+    let (fill_color, end_fill_color, gradient) = match text.fill.as_ref() {
+        Some(Paint::Color(color)) => (*color, *color, [0.0; 4]),
+        Some(Paint::LinearGradient(gradient)) => {
+            let start = gradient
+                .stops
+                .first()
+                .map_or(Rgba::BLACK, |stop| stop.color);
+            let end = gradient.stops.last().map_or(start, |stop| stop.color);
+            let a = world.apply(gradient.start);
+            let b = world.apply(gradient.end);
+            (
+                start,
+                end,
+                [
+                    (a.x * scale - origin_px.0) as f32,
+                    (a.y * scale - origin_px.1) as f32,
+                    (b.x * scale - origin_px.0) as f32,
+                    (b.y * scale - origin_px.1) as f32,
+                ],
+            )
+        }
+        Some(Paint::RadialGradient(gradient)) => {
+            let color = gradient
+                .stops
+                .first()
+                .map_or(Rgba::BLACK, |stop| stop.color);
+            (color, color, [0.0; 4])
+        }
         Some(_) | None => return,
     };
     let Ok(face) = ttf_parser::Face::parse(text.font.data(), text.font.face_index()) else {
@@ -1421,6 +1439,7 @@ fn emit_text_instances(
     let x_axis = (world.a * factor, world.b * factor);
     let y_axis = (world.c * factor, world.d * factor);
     let color = scaled_color(fill_color, opacity);
+    let end_color = scaled_color(end_fill_color, opacity);
     let font_key = Arc::as_ptr(&text.font) as usize;
     for glyph in &text.run.glyphs {
         let Ok(glyph_id) = u16::try_from(glyph.id) else {
@@ -1511,6 +1530,8 @@ fn emit_text_instances(
             uv1: [packed.u1, packed.v1],
             _pad: [0.0; 2],
             color,
+            gradient,
+            end_color,
         };
         instances.push(instance);
         // Layout synthesizes bold text with a thin same-color stroke. Stamp the
@@ -2446,6 +2467,61 @@ mod tests {
         let pixels = target.read_rgba(backend.context()).expect("read");
         let dark = pixels.chunks(4).filter(|pixel| pixel[0] < 64).count();
         assert!(dark > 5, "the later text must be visible over the path");
+    }
+
+    #[test]
+    fn renders_gradient_text() {
+        let Ok(font_data) = std::fs::read("C:/Windows/Fonts/arial.ttf") else {
+            return;
+        };
+        let Ok(context) = WgpuContext::new_blocking() else {
+            return;
+        };
+        let font = std::sync::Arc::new(ofdbox_folio_ir::FontAsset::new(
+            std::sync::Arc::from(font_data.into_boxed_slice()),
+            0,
+        ));
+        let mut element = text_element(&font, 'A', 5.0, 20.0);
+        if let Element::Text(text) = &mut element {
+            text.fill = Some(Paint::LinearGradient(ofdbox_folio_ir::LinearGradient {
+                start: Point::new(5.0, 20.0),
+                end: Point::new(12.0, 20.0),
+                stops: vec![
+                    ofdbox_folio_ir::GradientStop {
+                        offset: 0.0,
+                        color: Rgba::from_rgb(255, 0, 0),
+                    },
+                    ofdbox_folio_ir::GradientStop {
+                        offset: 1.0,
+                        color: Rgba::from_rgb(0, 0, 255),
+                    },
+                ],
+                extend: Default::default(),
+            }));
+        }
+        let mut root = Group::default();
+        root.children.push(element);
+        let scene = Scene {
+            size: Size::new(30.0, 30.0),
+            root,
+            diagnostics: Vec::new(),
+        };
+        let backend = WgpuBackend::new(context).expect("backend");
+        let target = WgpuTarget::new(backend.context(), scene.size, 96.0).expect("target");
+        backend.render_to_target(&scene, &target).expect("render");
+        let pixels = target.read_rgba(backend.context()).expect("read");
+        let mut red = 0;
+        let mut blue = 0;
+        for pixel in pixels.chunks(4) {
+            if pixel[0] > 160 && pixel[2] < 100 {
+                red += 1;
+            }
+            if pixel[2] > 160 && pixel[0] < 100 {
+                blue += 1;
+            }
+        }
+        assert!(red > 5, "expected red gradient pixels, got {red}");
+        assert!(blue > 5, "expected blue gradient pixels, got {blue}");
     }
 
     #[test]

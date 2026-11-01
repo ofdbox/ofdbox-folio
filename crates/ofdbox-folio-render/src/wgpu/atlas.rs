@@ -346,10 +346,14 @@ pub(crate) struct GlyphInstance {
     pub _pad: [f32; 2],
     /// Straight-alpha text color.
     pub color: [f32; 4],
+    /// Gradient start/end in page pixels.
+    pub gradient: [f32; 4],
+    /// Gradient end color.
+    pub end_color: [f32; 4],
 }
 
 impl GlyphInstance {
-    /// Serialize for the GPU instance buffer (64 bytes).
+    /// Serialize for the GPU instance buffer (96 bytes).
     pub(crate) fn write_bytes(self, out: &mut Vec<u8>) {
         for value in self
             .origin
@@ -360,6 +364,8 @@ impl GlyphInstance {
             .chain(self.uv1)
             .chain(self._pad)
             .chain(self.color)
+            .chain(self.gradient)
+            .chain(self.end_color)
         {
             out.extend_from_slice(&value.to_ne_bytes());
         }

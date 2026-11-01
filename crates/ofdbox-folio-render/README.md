@@ -46,9 +46,9 @@ reports the pixel difference.
 ## Known Limitations
 
 - Radial gradients and blend modes are not yet implemented in the GPU backend.
-- GPU text uses solid-color atlas glyphs; synthetic bold is approximated by
-  stamping offset glyphs, and gradient text fills fall back to the first color
-  stop.
+- GPU text supports solid and linear-gradient fills; synthetic bold is
+  approximated by stamping offset glyphs. Radial gradients fall back to their
+  first stop.
 - Clip paths clip text and image quads to the clip bounding box with a scissor
   rect; non-rectangular clip paths are therefore approximate for glyphs/images.
 - Use the CPU renderer when you need the full feature set.
