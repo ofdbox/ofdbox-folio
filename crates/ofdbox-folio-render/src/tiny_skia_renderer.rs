@@ -290,6 +290,13 @@ impl TinySkiaRenderer {
         }
         let glyph_scale = element.font_size / units;
         let text_transform = element.transform.then(parent);
+        #[cfg(debug_assertions)]
+        if element.run.text == "F" {
+            eprintln!(
+                "BODY F size={} transform={:?} glyphs={:?}",
+                element.font_size, text_transform, element.run.glyphs
+            );
+        }
         let mut draws = Vec::new();
         for glyph in &element.run.glyphs {
             let Ok(glyph_id) = u16::try_from(glyph.id) else {
@@ -830,5 +837,51 @@ mod tests {
             target.data()[blue_index + 2] > 180,
             "blue gradient side missing"
         );
+    }
+    #[test]
+    fn renders_scaled_down_text() {
+        let Ok(font_data) = std::fs::read("C:/Windows/Fonts/arial.ttf") else {
+            return;
+        };
+        let font = Arc::new(FontAsset::new(Arc::from(font_data.into_boxed_slice()), 0));
+        let face = ttf_parser::Face::parse(font.data(), 0).expect("face");
+        let glyph_id = face.glyph_index('A').expect("glyph").0;
+        let run = Arc::new(ofdbox_folio_ir::GlyphRun::new(
+            "A",
+            vec![ofdbox_folio_ir::Glyph {
+                id: u32::from(glyph_id),
+                x: 0.0,
+                y: 0.0,
+                advance: 1500.0,
+            }],
+            Vec::new(),
+        ));
+        let element = Element::Text(TextElement {
+            font,
+            font_size: 200.0,
+            transform: Matrix::scale(0.06, 0.06).then(Matrix::translate(300.0, 150.0)),
+            run,
+            fill: Some(Paint::Color(Rgba::from_rgb(0, 0, 0))),
+            stroke: None,
+        });
+        let scene = Scene {
+            size: Size::new(358.0, 507.0),
+            root: Group {
+                children: vec![element],
+                ..Group::default()
+            },
+            diagnostics: Vec::new(),
+        };
+        let mut target = RasterTarget::from_size(scene.size, 72.0).expect("target");
+        let mut renderer = TinySkiaRenderer::with_defaults();
+        renderer.render_scene(&scene, &mut target).expect("render");
+        let dark = target
+            .data()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|pixel| pixel[0] < 128)
+            .count();
+        assert!(dark > 5, "expected scaled glyph pixels, got {dark}");
     }
 }
