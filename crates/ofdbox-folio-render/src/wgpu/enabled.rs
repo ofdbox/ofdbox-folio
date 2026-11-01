@@ -17,6 +17,9 @@ use ofdbox_folio_ir::{
 
 use crate::RenderError;
 
+use super::atlas::GpuAtlas;
+use super::text::TextPipeline;
+
 #[derive(Clone, Copy)]
 struct DrawPath {
     start: u32,
@@ -285,6 +288,10 @@ pub struct WgpuBackend {
     glyph_cache: Mutex<HashMap<(usize, u16), Arc<Path>>>,
     /// Already-flattened scene geometry per scene / dpi / region.
     path_cache: Mutex<HashMap<TileCacheKey, CachedGeometry>>,
+    #[allow(dead_code)]
+    atlas: Mutex<GpuAtlas>,
+    #[allow(dead_code)]
+    text_pipeline: TextPipeline,
 }
 
 impl WgpuBackend {
@@ -351,12 +358,16 @@ impl WgpuBackend {
                     compilation_options: Default::default(),
                     cache: None,
                 });
+        let atlas = Mutex::new(GpuAtlas::new(&context.device, 2048));
+        let text_pipeline = TextPipeline::new(&context.device);
         Ok(Self {
             context,
             pipeline,
             layout,
             glyph_cache: Mutex::new(HashMap::new()),
             path_cache: Mutex::new(HashMap::new()),
+            atlas,
+            text_pipeline,
         })
     }
 
