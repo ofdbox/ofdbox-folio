@@ -2608,6 +2608,71 @@ mod tests {
     }
 
     #[test]
+    fn clips_image_to_group_bounds() {
+        let Ok(context) = WgpuContext::new_blocking() else {
+            return;
+        };
+        let mut encoded = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut encoded, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("png header");
+            writer
+                .write_image_data(&[255, 0, 0, 255])
+                .expect("png data");
+        }
+        let image = std::sync::Arc::new(ofdbox_folio_ir::ImageAsset::new(
+            ofdbox_folio_ir::ImageFormat::Png,
+            std::sync::Arc::from(encoded.into_boxed_slice()),
+            1,
+            1,
+        ));
+        let mut clip_path = Path::new();
+        clip_path.move_to(Point::new(0.0, 0.0));
+        clip_path.line_to(Point::new(7.0, 0.0));
+        clip_path.line_to(Point::new(7.0, 30.0));
+        clip_path.line_to(Point::new(0.0, 30.0));
+        clip_path.close();
+        let mut group = Group {
+            clip: Some(std::sync::Arc::new(ofdbox_folio_ir::Clip {
+                path: std::sync::Arc::new(clip_path),
+                rule: FillRule::NonZero,
+            })),
+            ..Group::default()
+        };
+        group
+            .children
+            .push(Element::Image(ofdbox_folio_ir::ImageElement {
+                image,
+                rect: ofdbox_folio_ir::Rect::new(0.0, 0.0, 30.0, 30.0),
+                transform: Matrix::IDENTITY,
+                alpha: 1.0,
+            }));
+        let mut root = Group::default();
+        root.children.push(Element::Group(group));
+        let scene = Scene {
+            size: Size::new(30.0, 30.0),
+            root,
+            diagnostics: Vec::new(),
+        };
+        let backend = WgpuBackend::new(context).expect("backend");
+        let target = WgpuTarget::new(backend.context(), scene.size, 96.0).expect("target");
+        backend.render_to_target(&scene, &target).expect("render");
+        let pixels = target.read_rgba(backend.context()).expect("read");
+        let clip_x = (7.0_f64 / 25.4 * 96.0).ceil() as u32 + 1;
+        for y in 0..target.height() {
+            for x in clip_x..target.width() {
+                let index = ((y * target.width() + x) * 4) as usize;
+                assert!(
+                    pixels[index] > 200,
+                    "pixel at ({x}, {y}) escaped the image clip"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn renders_solid_rectangle() {
         let Ok(context) = WgpuContext::new_blocking() else {
             return;
