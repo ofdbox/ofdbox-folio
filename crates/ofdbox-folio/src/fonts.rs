@@ -195,10 +195,13 @@ pub fn font_candidates(family: &str, bold: bool, italic: bool) -> Vec<String> {
     }
 
     // Generic fallback: even when the family name is completely unknown, prefer fonts that
-    // carry CJK glyphs so Chinese text does not turn into whole blocks of tofu.
+    // carry CJK glyphs so Chinese text does not turn into whole blocks of tofu. A regular
+    // face comes first: resolving an unstyled run (for example the default TOC title) to a
+    // heavy face such as SimHei makes ordinary text look accidentally bold.
     push(&[
-        "simhei.ttf",
         "simsun.ttc",
+        "simsun.ttf",
+        "simhei.ttf",
         "msyh.ttc",
         "HarmonyOS_Sans_SC_Regular.ttf",
         "NotoSansCJK-Regular.ttc",
@@ -299,11 +302,11 @@ mod tests {
     #[test]
     fn unknown_family_falls_back_to_cjk_capable_fonts() {
         let candidates = font_candidates("", false, false);
-        assert_eq!(candidates[0], "simhei.ttf");
+        assert_eq!(candidates[0], "simsun.ttc");
         assert!(candidates.contains(&"arial.ttf".to_owned()));
         // Unknown Latin family names also rank after the CJK fallback.
         let candidates = font_candidates("SomeUnknownFace", false, false);
-        assert_eq!(candidates[0], "simhei.ttf");
+        assert_eq!(candidates[0], "simsun.ttc");
     }
 
     #[test]
