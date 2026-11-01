@@ -270,6 +270,12 @@ impl WgpuTarget {
     }
 }
 
+/// Key for the flattened-geometry cache.
+type TileCacheKey = (usize, u64, i32, i32, u32, u32);
+
+/// Flattened edges plus draw paths for one tile.
+type CachedGeometry = Arc<(Vec<[f32; 4]>, Vec<DrawPath>)>;
+
 /// The wgpu compute backend.
 pub struct WgpuBackend {
     context: Arc<WgpuContext>,
@@ -277,6 +283,8 @@ pub struct WgpuBackend {
     layout: wgpu_lib::BindGroupLayout,
     /// Font outlines keyed by `(font asset pointer, glyph id)`.
     glyph_cache: Mutex<HashMap<(usize, u16), Arc<Path>>>,
+    /// Already-flattened scene geometry per scene / dpi / region.
+    path_cache: Mutex<HashMap<TileCacheKey, CachedGeometry>>,
 }
 
 impl WgpuBackend {
@@ -348,6 +356,7 @@ impl WgpuBackend {
             pipeline,
             layout,
             glyph_cache: Mutex::new(HashMap::new()),
+            path_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -378,25 +387,50 @@ impl WgpuBackend {
         target: &WgpuTarget,
         origin_px: (f64, f64),
     ) -> Result<(), RenderError> {
-        let (edges, paths) = collect_paths(
-            scene,
-            target.dpi,
-            origin_px,
+        let key = (
+            scene as *const Scene as usize,
+            target.dpi.to_bits(),
+            origin_px.0.round() as i32,
+            origin_px.1.round() as i32,
             target.width,
             target.height,
-            &self.glyph_cache,
         );
+        let cached = {
+            let mut cache = self
+                .path_cache
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(cached) = cache.get(&key) {
+                Arc::clone(cached)
+            } else {
+                let collected = collect_paths(
+                    scene,
+                    target.dpi,
+                    origin_px,
+                    target.width,
+                    target.height,
+                    &self.glyph_cache,
+                );
+                let cached = Arc::new(collected);
+                if cache.len() > 64 {
+                    cache.clear();
+                }
+                cache.insert(key, Arc::clone(&cached));
+                cached
+            }
+        };
+        let (edges, paths) = cached.as_ref();
         if paths.is_empty() {
             return Ok(());
         }
         let mut edge_data = Vec::with_capacity(edges.len() * 16);
-        for edge in &edges {
+        for edge in edges {
             for value in edge {
                 edge_data.extend_from_slice(&value.to_ne_bytes());
             }
         }
         let mut path_data = Vec::with_capacity(paths.len() * 96);
-        for path in &paths {
+        for path in paths {
             for value in [path.start, path.count, path.rule, path.kind] {
                 path_data.extend_from_slice(&value.to_ne_bytes());
             }
