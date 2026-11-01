@@ -270,6 +270,14 @@ impl GpuAtlas {
         &self.sampler
     }
 
+    /// Drop packed glyphs so the atlas can be reused after a scene change.
+    ///
+    /// The texture is not zeroed: old texels are simply no longer referenced and
+    /// are overwritten as new glyphs are packed.
+    pub(crate) fn clear(&mut self) {
+        self.packer = GlyphPacker::new(self.packer.size);
+    }
+
     /// Rasterize, pack and upload a glyph if it is not already cached.
     pub(crate) fn glyph(
         &mut self,

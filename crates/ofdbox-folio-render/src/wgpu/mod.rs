@@ -1,8 +1,8 @@
 //! wgpu compute backend.
 //!
-//! W0 covers solid-color fill paths, stroking, linear gradients, clipping and
-//! text outlines; images, radial gradients and blend modes are not implemented
-//! yet.
+//! Paths and strokes are rasterized by a compute pass; text glyphs and images are
+//! drawn by small render pipelines on top. Radial gradients and blend modes are
+//! not implemented yet.
 
 #[cfg(any(feature = "wgpu27", feature = "wgpu30"))]
 mod atlas;
@@ -10,6 +10,8 @@ mod atlas;
 mod disabled;
 #[cfg(any(feature = "wgpu27", feature = "wgpu30"))]
 mod enabled;
+#[cfg(any(feature = "wgpu27", feature = "wgpu30"))]
+mod image;
 #[cfg(any(feature = "wgpu27", feature = "wgpu30"))]
 mod text;
 

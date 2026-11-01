@@ -32,11 +32,17 @@ CPU 渲染器基于 `vello_cpu`，只消费 Fixed IR，不感知源文档格式�
 
 `ofdbox-folio-render` 的 `wgpu` feature（门面 `gpu`）提供 compute 后端，`gpu` 默认关闭。
 
-实色填充、描边、线性渐变、裁剪与文字轮廓。
+实色填充、描边、线性渐变、裁剪、atlas 文字与 RGBA 图片。
+
+后端把场景内所有填充/描边路径合批为一次 compute dispatch，所有字形合批为一次
+instanced text draw，所有图片四边形合批到同一个 render pass。字形栅格化到 R8
+atlas；图片只解码一次并缓存为 GPU 纹理。
 
 ## Known Limitations
 
-- GPU 后端尚未实现图片、径向渐变与混合模式。
+- GPU 后端尚未实现径向渐变与混合模式。
+- 路径先于图片和文字绘制，暂不严格保留不同元素类型之间的源绘制顺序；裁剪路径
+  只按包围盒剔除整个字形/图片四边形，尚未逐片元裁剪。
 - 需要完整特性时使用 CPU 渲染器。
 - GPU 后端仅在启用 `wgpu` feature 时存在；默认构建暴露占位 `WgpuBackend`，其调用返回 `Unsupported`。
 

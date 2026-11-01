@@ -12,12 +12,15 @@ use wgpu27 as wgpu_lib;
 use wgpu_lib::util::DeviceExt;
 
 use ofdbox_folio_ir::{
-    Element, FillRule, Group, Matrix, Paint, Path, PathSegment, Point, Rgba, Scene, Size,
+    Element, FillRule, Group, ImageAsset, ImageElement, Matrix, Paint, Path, PathSegment, Point,
+    Rgba, Scene, Size,
 };
 
 use crate::RenderError;
+use crate::image::decode_image;
 
-use super::atlas::GpuAtlas;
+use super::atlas::{GlyphInstance, GpuAtlas};
+use super::image::ImagePipeline;
 use super::text::TextPipeline;
 
 #[derive(Clone, Copy)]
@@ -105,7 +108,7 @@ pub struct WgpuCapabilities {
     pub linear_gradients: bool,
     /// Clip paths.
     pub clips: bool,
-    /// Text outlines.
+    /// Text glyphs drawn from a glyph atlas.
     pub text_outlines: bool,
     /// Images.
     pub images: bool,
@@ -148,6 +151,7 @@ impl WgpuTarget {
             dimension: wgpu_lib::TextureDimension::D2,
             format: wgpu_lib::TextureFormat::Rgba8Unorm,
             usage: wgpu_lib::TextureUsages::STORAGE_BINDING
+                | wgpu_lib::TextureUsages::RENDER_ATTACHMENT
                 | wgpu_lib::TextureUsages::COPY_SRC
                 | wgpu_lib::TextureUsages::COPY_DST
                 | wgpu_lib::TextureUsages::TEXTURE_BINDING,
@@ -179,6 +183,7 @@ impl WgpuTarget {
             dimension: wgpu_lib::TextureDimension::D2,
             format: wgpu_lib::TextureFormat::Rgba8Unorm,
             usage: wgpu_lib::TextureUsages::STORAGE_BINDING
+                | wgpu_lib::TextureUsages::RENDER_ATTACHMENT
                 | wgpu_lib::TextureUsages::COPY_SRC
                 | wgpu_lib::TextureUsages::COPY_DST,
             view_formats: &[],
@@ -279,6 +284,21 @@ type TileCacheKey = (usize, u64, i32, i32, u32, u32);
 /// Flattened edges plus draw paths for one tile.
 type CachedGeometry = Arc<(Vec<[f32; 4]>, Vec<DrawPath>)>;
 
+/// A decoded image uploaded to a GPU texture.
+struct CachedImage {
+    _texture: wgpu_lib::Texture,
+    view: wgpu_lib::TextureView,
+}
+
+/// One image quad in page-pixel space.
+struct ImageDraw {
+    origin: [f32; 2],
+    x_axis: [f32; 2],
+    y_axis: [f32; 2],
+    alpha: f32,
+    image: Arc<ImageAsset>,
+}
+
 /// The wgpu compute backend.
 pub struct WgpuBackend {
     context: Arc<WgpuContext>,
@@ -288,10 +308,12 @@ pub struct WgpuBackend {
     glyph_cache: Mutex<HashMap<(usize, u16), Arc<Path>>>,
     /// Already-flattened scene geometry per scene / dpi / region.
     path_cache: Mutex<HashMap<TileCacheKey, CachedGeometry>>,
-    #[allow(dead_code)]
     atlas: Mutex<GpuAtlas>,
-    #[allow(dead_code)]
     text_pipeline: TextPipeline,
+    image_pipeline: ImagePipeline,
+    /// Decoded image textures keyed by `ImageAsset` pointer.
+    image_cache: Mutex<HashMap<usize, Arc<CachedImage>>>,
+    image_sampler: wgpu_lib::Sampler,
 }
 
 impl WgpuBackend {
@@ -360,6 +382,15 @@ impl WgpuBackend {
                 });
         let atlas = Mutex::new(GpuAtlas::new(&context.device, 2048));
         let text_pipeline = TextPipeline::new(&context.device);
+        let image_pipeline = ImagePipeline::new(&context.device);
+        let image_sampler = context.device.create_sampler(&wgpu_lib::SamplerDescriptor {
+            label: Some("ofdbox-image-sampler"),
+            address_mode_u: wgpu_lib::AddressMode::ClampToEdge,
+            address_mode_v: wgpu_lib::AddressMode::ClampToEdge,
+            mag_filter: wgpu_lib::FilterMode::Linear,
+            min_filter: wgpu_lib::FilterMode::Linear,
+            ..Default::default()
+        });
         Ok(Self {
             context,
             pipeline,
@@ -368,6 +399,9 @@ impl WgpuBackend {
             path_cache: Mutex::new(HashMap::new()),
             atlas,
             text_pipeline,
+            image_pipeline,
+            image_cache: Mutex::new(HashMap::new()),
+            image_sampler,
         })
     }
 
@@ -382,6 +416,14 @@ impl WgpuBackend {
             .unwrap_or_else(|error| error.into_inner())
             .clear();
         self.path_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        self.atlas
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        self.image_cache
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clear();
@@ -445,14 +487,8 @@ impl WgpuBackend {
             if let Some(cached) = cache.get(&key) {
                 Arc::clone(cached)
             } else {
-                let collected = collect_paths(
-                    scene,
-                    target.dpi,
-                    origin_px,
-                    target.width,
-                    target.height,
-                    &self.glyph_cache,
-                );
+                let collected =
+                    collect_paths(scene, target.dpi, origin_px, target.width, target.height);
                 let cached = Arc::new(collected);
                 if cache.len() > 64 {
                     cache.clear();
@@ -462,106 +498,263 @@ impl WgpuBackend {
             }
         };
         let (edges, paths) = cached.as_ref();
-        if paths.is_empty() {
-            return Ok(());
-        }
-        let mut edge_data = Vec::with_capacity(edges.len() * 16);
-        for edge in edges {
-            for value in edge {
-                edge_data.extend_from_slice(&value.to_ne_bytes());
+        let mut text_draw = None;
+        {
+            let mut atlas = self.atlas.lock().unwrap_or_else(|error| error.into_inner());
+            let instances = collect_text_instances(
+                scene,
+                target.dpi,
+                origin_px,
+                target.width,
+                target.height,
+                &self.glyph_cache,
+                &mut atlas,
+                &self.context.queue,
+            );
+            if !instances.is_empty() {
+                let mut instance_data = Vec::with_capacity(instances.len() * 64);
+                for instance in &instances {
+                    instance.write_bytes(&mut instance_data);
+                }
+                let instance_buffer =
+                    self.context
+                        .device
+                        .create_buffer_init(&wgpu_lib::util::BufferInitDescriptor {
+                            label: Some("ofdbox-text-instances"),
+                            contents: &instance_data,
+                            usage: wgpu_lib::BufferUsages::STORAGE,
+                        });
+                let mut params = Vec::with_capacity(16);
+                for value in [target.width as f32, target.height as f32, 0.0, 0.0] {
+                    params.extend_from_slice(&value.to_ne_bytes());
+                }
+                let params_buffer =
+                    self.context
+                        .device
+                        .create_buffer_init(&wgpu_lib::util::BufferInitDescriptor {
+                            label: Some("ofdbox-text-params"),
+                            contents: &params,
+                            usage: wgpu_lib::BufferUsages::UNIFORM,
+                        });
+                let bind_group =
+                    self.context
+                        .device
+                        .create_bind_group(&wgpu_lib::BindGroupDescriptor {
+                            label: Some("ofdbox-text-bind-group"),
+                            layout: self.text_pipeline.layout(),
+                            entries: &[
+                                wgpu_lib::BindGroupEntry {
+                                    binding: 0,
+                                    resource: instance_buffer.as_entire_binding(),
+                                },
+                                wgpu_lib::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu_lib::BindingResource::TextureView(atlas.view()),
+                                },
+                                wgpu_lib::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu_lib::BindingResource::Sampler(atlas.sampler()),
+                                },
+                                wgpu_lib::BindGroupEntry {
+                                    binding: 3,
+                                    resource: params_buffer.as_entire_binding(),
+                                },
+                            ],
+                        });
+                let count = u32::try_from(instances.len())
+                    .map_err(|_| RenderError::Backend("too many text glyphs".into()))?;
+                text_draw = Some((bind_group, count));
             }
         }
-        let mut path_data = Vec::with_capacity(paths.len() * 96);
-        for path in paths {
-            for value in [path.start, path.count, path.rule, path.kind] {
-                path_data.extend_from_slice(&value.to_ne_bytes());
+        let mut image_batches = Vec::new();
+        for draw in collect_image_draws(scene, target.dpi, origin_px, target.width, target.height) {
+            let Some(cached) = self.cached_image(&draw.image) else {
+                continue;
+            };
+            let mut params = Vec::with_capacity(48);
+            for value in [
+                target.width as f32,
+                target.height as f32,
+                draw.origin[0],
+                draw.origin[1],
+                draw.x_axis[0],
+                draw.x_axis[1],
+                draw.y_axis[0],
+                draw.y_axis[1],
+                draw.alpha,
+                0.0,
+                0.0,
+                0.0,
+            ] {
+                params.extend_from_slice(&value.to_ne_bytes());
             }
-            for value in path.color {
-                path_data.extend_from_slice(&value.to_ne_bytes());
-            }
-            path_data.extend_from_slice(&path.width.to_ne_bytes());
-            for value in [path.clip_start, path.clip_count, path.clip_rule] {
-                path_data.extend_from_slice(&value.to_ne_bytes());
-            }
-            for value in path.end_color {
-                path_data.extend_from_slice(&value.to_ne_bytes());
-            }
-            for value in path.gradient {
-                path_data.extend_from_slice(&value.to_ne_bytes());
-            }
-            for value in path.bbox {
-                path_data.extend_from_slice(&value.to_ne_bytes());
-            }
+            let params_buffer =
+                self.context
+                    .device
+                    .create_buffer_init(&wgpu_lib::util::BufferInitDescriptor {
+                        label: Some("ofdbox-image-params"),
+                        contents: &params,
+                        usage: wgpu_lib::BufferUsages::UNIFORM,
+                    });
+            let bind_group =
+                self.context
+                    .device
+                    .create_bind_group(&wgpu_lib::BindGroupDescriptor {
+                        label: Some("ofdbox-image-bind-group"),
+                        layout: self.image_pipeline.layout(),
+                        entries: &[
+                            wgpu_lib::BindGroupEntry {
+                                binding: 0,
+                                resource: params_buffer.as_entire_binding(),
+                            },
+                            wgpu_lib::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu_lib::BindingResource::TextureView(&cached.view),
+                            },
+                            wgpu_lib::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu_lib::BindingResource::Sampler(&self.image_sampler),
+                            },
+                        ],
+                    });
+            image_batches.push(bind_group);
         }
-        let edge_buffer =
-            self.context
-                .device
-                .create_buffer_init(&wgpu_lib::util::BufferInitDescriptor {
-                    label: Some("ofdbox-edge-buffer"),
-                    contents: &edge_data,
-                    usage: wgpu_lib::BufferUsages::STORAGE,
-                });
-        let path_buffer =
-            self.context
-                .device
-                .create_buffer_init(&wgpu_lib::util::BufferInitDescriptor {
-                    label: Some("ofdbox-path-buffer"),
-                    contents: &path_data,
-                    usage: wgpu_lib::BufferUsages::STORAGE,
-                });
-        let params = [
-            target.width,
-            target.height,
-            u32::try_from(paths.len())
-                .map_err(|_| RenderError::Backend("too many paths".into()))?,
-            ((target.dpi / 25.4) as f32).to_bits(),
-        ];
-        let mut params_bytes = Vec::with_capacity(16);
-        for value in params {
-            params_bytes.extend_from_slice(&value.to_ne_bytes());
-        }
-        let params_buffer =
-            self.context
-                .device
-                .create_buffer_init(&wgpu_lib::util::BufferInitDescriptor {
-                    label: Some("ofdbox-params"),
-                    contents: &params_bytes,
-                    usage: wgpu_lib::BufferUsages::STORAGE,
-                });
-        let bind_group = self
-            .context
-            .device
-            .create_bind_group(&wgpu_lib::BindGroupDescriptor {
-                label: Some("ofdbox-wgpu-bind-group"),
-                layout: &self.layout,
-                entries: &[
-                    wgpu_lib::BindGroupEntry {
-                        binding: 0,
-                        resource: edge_buffer.as_entire_binding(),
-                    },
-                    wgpu_lib::BindGroupEntry {
-                        binding: 1,
-                        resource: path_buffer.as_entire_binding(),
-                    },
-                    wgpu_lib::BindGroupEntry {
-                        binding: 2,
-                        resource: params_buffer.as_entire_binding(),
-                    },
-                    wgpu_lib::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu_lib::BindingResource::TextureView(&target.view),
-                    },
-                ],
-            });
         let mut encoder = self
             .context
             .device
             .create_command_encoder(&Default::default());
-        {
+        if !paths.is_empty() {
+            let mut edge_data = Vec::with_capacity(edges.len() * 16);
+            for edge in edges {
+                for value in edge {
+                    edge_data.extend_from_slice(&value.to_ne_bytes());
+                }
+            }
+            let mut path_data = Vec::with_capacity(paths.len() * 96);
+            for path in paths {
+                for value in [path.start, path.count, path.rule, path.kind] {
+                    path_data.extend_from_slice(&value.to_ne_bytes());
+                }
+                for value in path.color {
+                    path_data.extend_from_slice(&value.to_ne_bytes());
+                }
+                path_data.extend_from_slice(&path.width.to_ne_bytes());
+                for value in [path.clip_start, path.clip_count, path.clip_rule] {
+                    path_data.extend_from_slice(&value.to_ne_bytes());
+                }
+                for value in path.end_color {
+                    path_data.extend_from_slice(&value.to_ne_bytes());
+                }
+                for value in path.gradient {
+                    path_data.extend_from_slice(&value.to_ne_bytes());
+                }
+                for value in path.bbox {
+                    path_data.extend_from_slice(&value.to_ne_bytes());
+                }
+            }
+            let edge_buffer =
+                self.context
+                    .device
+                    .create_buffer_init(&wgpu_lib::util::BufferInitDescriptor {
+                        label: Some("ofdbox-edge-buffer"),
+                        contents: &edge_data,
+                        usage: wgpu_lib::BufferUsages::STORAGE,
+                    });
+            let path_buffer =
+                self.context
+                    .device
+                    .create_buffer_init(&wgpu_lib::util::BufferInitDescriptor {
+                        label: Some("ofdbox-path-buffer"),
+                        contents: &path_data,
+                        usage: wgpu_lib::BufferUsages::STORAGE,
+                    });
+            let params = [
+                target.width,
+                target.height,
+                u32::try_from(paths.len())
+                    .map_err(|_| RenderError::Backend("too many paths".into()))?,
+                ((target.dpi / 25.4) as f32).to_bits(),
+            ];
+            let mut params_bytes = Vec::with_capacity(16);
+            for value in params {
+                params_bytes.extend_from_slice(&value.to_ne_bytes());
+            }
+            let params_buffer =
+                self.context
+                    .device
+                    .create_buffer_init(&wgpu_lib::util::BufferInitDescriptor {
+                        label: Some("ofdbox-params"),
+                        contents: &params_bytes,
+                        usage: wgpu_lib::BufferUsages::STORAGE,
+                    });
+            let bind_group =
+                self.context
+                    .device
+                    .create_bind_group(&wgpu_lib::BindGroupDescriptor {
+                        label: Some("ofdbox-wgpu-bind-group"),
+                        layout: &self.layout,
+                        entries: &[
+                            wgpu_lib::BindGroupEntry {
+                                binding: 0,
+                                resource: edge_buffer.as_entire_binding(),
+                            },
+                            wgpu_lib::BindGroupEntry {
+                                binding: 1,
+                                resource: path_buffer.as_entire_binding(),
+                            },
+                            wgpu_lib::BindGroupEntry {
+                                binding: 2,
+                                resource: params_buffer.as_entire_binding(),
+                            },
+                            wgpu_lib::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu_lib::BindingResource::TextureView(&target.view),
+                            },
+                        ],
+                    });
             let mut pass = encoder.begin_compute_pass(&wgpu_lib::ComputePassDescriptor::default());
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(target.width.div_ceil(8), target.height.div_ceil(8), 1);
+        }
+        if paths.is_empty() || text_draw.is_some() || !image_batches.is_empty() {
+            let load = if paths.is_empty() {
+                wgpu_lib::LoadOp::Clear(wgpu_lib::Color {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                })
+            } else {
+                wgpu_lib::LoadOp::Load
+            };
+            let attachment = Some(wgpu_lib::RenderPassColorAttachment {
+                view: &target.view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu_lib::Operations {
+                    load,
+                    store: wgpu_lib::StoreOp::Store,
+                },
+            });
+            let descriptor = wgpu_lib::RenderPassDescriptor {
+                label: Some("ofdbox-text-pass"),
+                color_attachments: &[attachment],
+                ..Default::default()
+            };
+            let mut pass = encoder.begin_render_pass(&descriptor);
+            if !image_batches.is_empty() {
+                pass.set_pipeline(self.image_pipeline.pipeline());
+                for bind_group in &image_batches {
+                    pass.set_bind_group(0, bind_group, &[]);
+                    pass.draw(0..6, 0..1);
+                }
+            }
+            if let Some((bind_group, count)) = &text_draw {
+                pass.set_pipeline(self.text_pipeline.pipeline());
+                pass.set_bind_group(0, bind_group, &[]);
+                pass.draw(0..6, 0..*count);
+            }
         }
         self.context.queue.submit([encoder.finish()]);
         self.context
@@ -573,6 +766,84 @@ impl WgpuBackend {
 }
 
 impl WgpuBackend {
+    /// Decodes and uploads an image once, then reuses the GPU texture.
+    fn cached_image(&self, image: &ImageAsset) -> Option<Arc<CachedImage>> {
+        let key = image as *const ImageAsset as usize;
+        if let Some(cached) = self
+            .image_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&key)
+        {
+            return Some(Arc::clone(cached));
+        }
+        let mut decoded = decode_image(image.format, &image.encoded, 64_000_000).ok()?;
+        if let Some(mask) = &image.mask
+            && let Ok(mask) = decode_image(mask.format, &mask.encoded, 64_000_000)
+        {
+            let _ = decoded.apply_mask(&mask);
+        }
+        if decoded.width == 0 || decoded.height == 0 {
+            return None;
+        }
+        let width = decoded.width;
+        let height = decoded.height;
+        let texture = self
+            .context
+            .device
+            .create_texture(&wgpu_lib::TextureDescriptor {
+                label: Some("ofdbox-image-texture"),
+                size: wgpu_lib::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu_lib::TextureDimension::D2,
+                format: wgpu_lib::TextureFormat::Rgba8Unorm,
+                usage: wgpu_lib::TextureUsages::TEXTURE_BINDING | wgpu_lib::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+        let padded = (width * 4).div_ceil(wgpu_lib::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu_lib::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let mut data = vec![0_u8; (padded * height) as usize];
+        for row in 0..height as usize {
+            let source = &decoded.rgba[row * width as usize * 4..(row + 1) * width as usize * 4];
+            let start = row * padded as usize;
+            data[start..start + source.len()].copy_from_slice(source);
+        }
+        self.context.queue.write_texture(
+            wgpu_lib::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu_lib::Origin3d::ZERO,
+                aspect: wgpu_lib::TextureAspect::All,
+            },
+            &data,
+            wgpu_lib::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(height),
+            },
+            wgpu_lib::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let view = texture.create_view(&wgpu_lib::TextureViewDescriptor::default());
+        let cached = Arc::new(CachedImage {
+            _texture: texture,
+            view,
+        });
+        self.image_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(key, Arc::clone(&cached));
+        Some(cached)
+    }
+
     /// Returns the supported capabilities.
     pub fn capabilities(&self) -> WgpuCapabilities {
         WgpuCapabilities {
@@ -581,7 +852,7 @@ impl WgpuBackend {
             linear_gradients: true,
             clips: true,
             text_outlines: true,
-            images: false,
+            images: true,
             blend_modes: false,
         }
     }
@@ -617,7 +888,6 @@ fn collect_paths(
     origin_px: (f64, f64),
     width: u32,
     height: u32,
-    glyph_cache: &Mutex<HashMap<(usize, u16), Arc<Path>>>,
 ) -> (Vec<[f32; 4]>, Vec<DrawPath>) {
     let scale = dpi / 25.4;
     let mut edges = Vec::new();
@@ -638,11 +908,409 @@ fn collect_paths(
         scale,
         origin_px,
         viewport,
-        glyph_cache,
         &mut edges,
         &mut paths,
     );
     (edges, paths)
+}
+
+/// Collect atlas-backed glyph quads for a tile.
+///
+/// Text no longer goes through the path pass: every glyph is rasterized once per
+/// `(font, glyph, pixel size)` into the atlas, then drawn as a texture-mapped quad.
+/// Clip paths only cull whole quads by their bounding box; exact per-fragment
+/// clipping is not applied yet.
+#[allow(clippy::too_many_arguments)]
+fn collect_text_instances(
+    scene: &Scene,
+    dpi: f64,
+    origin_px: (f64, f64),
+    width: u32,
+    height: u32,
+    glyph_cache: &Mutex<HashMap<(usize, u16), Arc<Path>>>,
+    atlas: &mut GpuAtlas,
+    queue: &wgpu_lib::Queue,
+) -> Vec<GlyphInstance> {
+    let viewport = Viewport {
+        min_x: -1.0,
+        min_y: -1.0,
+        max_x: width as f32 + 1.0,
+        max_y: height as f32 + 1.0,
+    };
+    let mut instances = Vec::new();
+    collect_text_group(
+        &scene.root,
+        Matrix::IDENTITY,
+        1.0,
+        None,
+        dpi / 25.4,
+        origin_px,
+        viewport,
+        glyph_cache,
+        atlas,
+        queue,
+        &mut instances,
+    );
+    instances
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_text_group(
+    group: &Group,
+    parent: Matrix,
+    parent_opacity: f32,
+    parent_clip: Option<[f32; 4]>,
+    scale: f64,
+    origin_px: (f64, f64),
+    viewport: Viewport,
+    glyph_cache: &Mutex<HashMap<(usize, u16), Arc<Path>>>,
+    atlas: &mut GpuAtlas,
+    queue: &wgpu_lib::Queue,
+    instances: &mut Vec<GlyphInstance>,
+) {
+    let opacity = parent_opacity * group.opacity.clamp(0.0, 1.0);
+    if opacity <= 0.0 {
+        return;
+    }
+    let transform = group.transform.then(parent);
+    let mut clip = parent_clip;
+    if let Some(group_clip) = &group.clip {
+        let mut clip_edges = Vec::new();
+        flatten_path(
+            &group_clip.path,
+            transform,
+            scale,
+            origin_px,
+            &mut clip_edges,
+        );
+        let Some(bounds) = edge_bounds(&clip_edges) else {
+            return;
+        };
+        let Some(intersected) = intersect_bounds(clip.unwrap_or(bounds), bounds) else {
+            return;
+        };
+        if !viewport.intersects(intersected) {
+            return;
+        }
+        clip = Some(intersected);
+    }
+    for element in &group.children {
+        match element {
+            Element::Group(child) => collect_text_group(
+                child,
+                transform,
+                opacity,
+                clip,
+                scale,
+                origin_px,
+                viewport,
+                glyph_cache,
+                atlas,
+                queue,
+                instances,
+            ),
+            Element::Text(text) => collect_text_element(
+                text,
+                transform,
+                opacity,
+                clip,
+                scale,
+                origin_px,
+                viewport,
+                glyph_cache,
+                atlas,
+                queue,
+                instances,
+            ),
+            _ => {}
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_text_element(
+    text: &ofdbox_folio_ir::TextElement,
+    parent: Matrix,
+    opacity: f32,
+    clip: Option<[f32; 4]>,
+    scale: f64,
+    origin_px: (f64, f64),
+    viewport: Viewport,
+    glyph_cache: &Mutex<HashMap<(usize, u16), Arc<Path>>>,
+    atlas: &mut GpuAtlas,
+    queue: &wgpu_lib::Queue,
+    instances: &mut Vec<GlyphInstance>,
+) {
+    let Some(Paint::Color(color)) = text.fill.as_ref() else {
+        return;
+    };
+    let Ok(face) = ttf_parser::Face::parse(text.font.data(), text.font.face_index()) else {
+        return;
+    };
+    let units = face.units_per_em();
+    if units == 0 {
+        return;
+    }
+    let world = text.transform.then(parent);
+    let determinant = (world.a * world.d - world.b * world.c).abs();
+    if !(determinant.is_finite() && determinant > 1.0e-12) {
+        return;
+    }
+    // Rasterize at the size the glyph occupies on the page, including any scale
+    // in the text transform. Rotations/shears are applied by the quad axes below.
+    let em_px = text.font_size * scale * determinant.sqrt();
+    if !(em_px.is_finite() && em_px > 0.5) {
+        return;
+    }
+    let pixel_size = em_px.round().clamp(1.0, 512.0) as u32;
+    let factor = scale * text.font_size / f64::from(pixel_size);
+    let x_axis = (world.a * factor, world.b * factor);
+    let y_axis = (world.c * factor, world.d * factor);
+    let color = scaled_color(*color, opacity);
+    let font_key = Arc::as_ptr(&text.font) as usize;
+    for glyph in &text.run.glyphs {
+        let Ok(glyph_id) = u16::try_from(glyph.id) else {
+            continue;
+        };
+        let key = (font_key, glyph_id);
+        let glyph_path = {
+            let mut cache = glyph_cache
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(path) = cache.get(&key) {
+                Arc::clone(path)
+            } else {
+                let mut builder = GlyphPathBuilder::default();
+                if face
+                    .outline_glyph(ttf_parser::GlyphId(glyph_id), &mut builder)
+                    .is_none()
+                    || builder.path.is_empty()
+                {
+                    continue;
+                }
+                let path = Arc::new(builder.path);
+                cache.insert(key, Arc::clone(&path));
+                path
+            }
+        };
+        let Some(packed) = atlas.glyph(queue, font_key, glyph_id, pixel_size, &glyph_path, units)
+        else {
+            continue;
+        };
+        if packed.width <= 0.0 || packed.height <= 0.0 {
+            continue;
+        }
+        let baseline = world.apply(Point::new(glyph.x, glyph.y));
+        let origin_x = baseline.x * scale - origin_px.0
+            + x_axis.0 * f64::from(packed.left)
+            + y_axis.0 * f64::from(packed.top);
+        let origin_y = baseline.y * scale - origin_px.1
+            + x_axis.1 * f64::from(packed.left)
+            + y_axis.1 * f64::from(packed.top);
+        let x_advance = (
+            x_axis.0 * f64::from(packed.width),
+            x_axis.1 * f64::from(packed.width),
+        );
+        let y_advance = (
+            y_axis.0 * f64::from(packed.height),
+            y_axis.1 * f64::from(packed.height),
+        );
+        let corners = [
+            (origin_x, origin_y),
+            (origin_x + x_advance.0, origin_y + x_advance.1),
+            (
+                origin_x + x_advance.0 + y_advance.0,
+                origin_y + x_advance.1 + y_advance.1,
+            ),
+            (origin_x + y_advance.0, origin_y + y_advance.1),
+        ];
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for (x, y) in corners {
+            min_x = min_x.min(x as f32);
+            min_y = min_y.min(y as f32);
+            max_x = max_x.max(x as f32);
+            max_y = max_y.max(y as f32);
+        }
+        let bounds = [min_x, min_y, max_x, max_y];
+        if !bounds.iter().all(|value| value.is_finite()) || !viewport.intersects(bounds) {
+            continue;
+        }
+        if let Some(clip) = clip
+            && intersect_bounds(bounds, clip).is_none()
+        {
+            continue;
+        }
+        instances.push(GlyphInstance {
+            origin: [origin_x as f32, origin_y as f32],
+            x_axis: [x_advance.0 as f32, x_advance.1 as f32],
+            y_axis: [y_advance.0 as f32, y_advance.1 as f32],
+            uv0: [packed.u0, packed.v0],
+            uv1: [packed.u1, packed.v1],
+            _pad: [0.0; 2],
+            color,
+        });
+    }
+}
+
+/// Collect image quads in page-pixel space.
+#[allow(clippy::too_many_arguments)]
+fn collect_image_draws(
+    scene: &Scene,
+    dpi: f64,
+    origin_px: (f64, f64),
+    width: u32,
+    height: u32,
+) -> Vec<ImageDraw> {
+    let viewport = Viewport {
+        min_x: -1.0,
+        min_y: -1.0,
+        max_x: width as f32 + 1.0,
+        max_y: height as f32 + 1.0,
+    };
+    let mut draws = Vec::new();
+    collect_image_group(
+        &scene.root,
+        Matrix::IDENTITY,
+        1.0,
+        None,
+        dpi / 25.4,
+        origin_px,
+        viewport,
+        &mut draws,
+    );
+    draws
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_image_group(
+    group: &Group,
+    parent: Matrix,
+    parent_opacity: f32,
+    parent_clip: Option<[f32; 4]>,
+    scale: f64,
+    origin_px: (f64, f64),
+    viewport: Viewport,
+    draws: &mut Vec<ImageDraw>,
+) {
+    let opacity = parent_opacity * group.opacity.clamp(0.0, 1.0);
+    if opacity <= 0.0 {
+        return;
+    }
+    let transform = group.transform.then(parent);
+    let mut clip = parent_clip;
+    if let Some(group_clip) = &group.clip {
+        let mut clip_edges = Vec::new();
+        flatten_path(
+            &group_clip.path,
+            transform,
+            scale,
+            origin_px,
+            &mut clip_edges,
+        );
+        let Some(bounds) = edge_bounds(&clip_edges) else {
+            return;
+        };
+        let Some(intersected) = intersect_bounds(clip.unwrap_or(bounds), bounds) else {
+            return;
+        };
+        if !viewport.intersects(intersected) {
+            return;
+        }
+        clip = Some(intersected);
+    }
+    for element in &group.children {
+        match element {
+            Element::Group(child) => collect_image_group(
+                child, transform, opacity, clip, scale, origin_px, viewport, draws,
+            ),
+            Element::Image(image) => collect_image_element(
+                image, transform, opacity, clip, scale, origin_px, viewport, draws,
+            ),
+            _ => {}
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_image_element(
+    element: &ImageElement,
+    parent: Matrix,
+    opacity: f32,
+    clip: Option<[f32; 4]>,
+    scale: f64,
+    origin_px: (f64, f64),
+    viewport: Viewport,
+    draws: &mut Vec<ImageDraw>,
+) {
+    let width = element
+        .rect
+        .width
+        .is_finite()
+        .then_some(element.rect.width)
+        .filter(|width| *width > 0.0)
+        .unwrap_or(f64::from(element.image.pixel_width));
+    let height = element
+        .rect
+        .height
+        .is_finite()
+        .then_some(element.rect.height)
+        .filter(|height| *height > 0.0)
+        .unwrap_or(f64::from(element.image.pixel_height));
+    if width <= 0.0 || height <= 0.0 {
+        return;
+    }
+    let world = element.transform.then(parent);
+    let x_axis = (world.a * width * scale, world.b * width * scale);
+    let y_axis = (world.c * height * scale, world.d * height * scale);
+    let origin = (world.e * scale - origin_px.0, world.f * scale - origin_px.1);
+    let corners = [
+        (origin.0, origin.1),
+        (origin.0 + x_axis.0, origin.1 + x_axis.1),
+        (
+            origin.0 + x_axis.0 + y_axis.0,
+            origin.1 + x_axis.1 + y_axis.1,
+        ),
+        (origin.0 + y_axis.0, origin.1 + y_axis.1),
+    ];
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for (x, y) in corners {
+        min_x = min_x.min(x as f32);
+        min_y = min_y.min(y as f32);
+        max_x = max_x.max(x as f32);
+        max_y = max_y.max(y as f32);
+    }
+    let bounds = [min_x, min_y, max_x, max_y];
+    if !bounds.iter().all(|value| value.is_finite()) || !viewport.intersects(bounds) {
+        return;
+    }
+    if let Some(clip) = clip
+        && intersect_bounds(bounds, clip).is_none()
+    {
+        return;
+    }
+    draws.push(ImageDraw {
+        origin: [origin.0 as f32, origin.1 as f32],
+        x_axis: [x_axis.0 as f32, x_axis.1 as f32],
+        y_axis: [y_axis.0 as f32, y_axis.1 as f32],
+        alpha: element.alpha.clamp(0.0, 1.0) * opacity,
+        image: Arc::clone(&element.image),
+    });
+}
+
+fn intersect_bounds(a: [f32; 4], b: [f32; 4]) -> Option<[f32; 4]> {
+    let bounds = [
+        a[0].max(b[0]),
+        a[1].max(b[1]),
+        a[2].min(b[2]),
+        a[3].min(b[3]),
+    ];
+    (bounds[0] < bounds[2] && bounds[1] < bounds[3]).then_some(bounds)
 }
 
 /// Visible pixel rectangle with a one-pixel bleed for antialiasing.
@@ -675,7 +1343,6 @@ fn collect_group(
     scale: f64,
     origin_px: (f64, f64),
     viewport: Viewport,
-    glyph_cache: &Mutex<HashMap<(usize, u16), Arc<Path>>>,
     edges: &mut Vec<[f32; 4]>,
     paths: &mut Vec<DrawPath>,
 ) {
@@ -712,7 +1379,6 @@ fn collect_group(
                 scale,
                 origin_px,
                 viewport,
-                glyph_cache,
                 edges,
                 paths,
             ),
@@ -805,76 +1471,7 @@ fn collect_group(
                     });
                 }
             }
-            Element::Text(text) => {
-                let Some(Paint::Color(color)) = text.fill.as_ref() else {
-                    continue;
-                };
-                let Ok(face) = ttf_parser::Face::parse(text.font.data(), text.font.face_index())
-                else {
-                    continue;
-                };
-                let units = f64::from(face.units_per_em());
-                if units == 0.0 {
-                    continue;
-                }
-                let glyph_scale = text.font_size / units;
-                for glyph in &text.run.glyphs {
-                    let Ok(glyph_id) = u16::try_from(glyph.id) else {
-                        continue;
-                    };
-                    let key = (Arc::as_ptr(&text.font) as usize, glyph_id);
-                    let glyph_path = {
-                        let mut cache = glyph_cache
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner());
-                        if let Some(path) = cache.get(&key) {
-                            Arc::clone(path)
-                        } else {
-                            let mut builder = GlyphPathBuilder::default();
-                            if face
-                                .outline_glyph(ttf_parser::GlyphId(glyph_id), &mut builder)
-                                .is_none()
-                                || builder.path.is_empty()
-                            {
-                                continue;
-                            }
-                            let path = Arc::new(builder.path);
-                            cache.insert(key, Arc::clone(&path));
-                            path
-                        }
-                    };
-                    let glyph_transform = Matrix::scale(glyph_scale, -glyph_scale)
-                        .then(Matrix::translate(glyph.x, glyph.y))
-                        .then(text.transform)
-                        .then(transform);
-                    let start = u32::try_from(edges.len()).unwrap_or(u32::MAX);
-                    flatten_path(&glyph_path, glyph_transform, scale, origin_px, edges);
-                    let count = u32::try_from(edges.len()).unwrap_or(u32::MAX) - start;
-                    if count == 0 {
-                        continue;
-                    }
-                    let Some(bounds) = edge_bounds(&edges[start as usize..]) else {
-                        continue;
-                    };
-                    if !viewport.intersects(bounds) {
-                        continue;
-                    }
-                    paths.push(DrawPath {
-                        start,
-                        count,
-                        rule: 0,
-                        kind: 0,
-                        color: scaled_color(*color, opacity),
-                        width: 0.0,
-                        clip_start: clip.map_or(0, |value| value.0),
-                        clip_count: clip.map_or(0, |value| value.1),
-                        clip_rule: clip.map_or(0, |value| value.2),
-                        end_color: scaled_color(*color, opacity),
-                        gradient: [0.0; 4],
-                        bbox: bounds,
-                    });
-                }
-            }
+            Element::Text(_) => {}
             Element::Image(_) => {}
             _ => {}
         }
@@ -1167,9 +1764,130 @@ mod tests {
             },
             diagnostics: Vec::new(),
         };
-        let cache = std::sync::Mutex::new(std::collections::HashMap::new());
-        let (_, paths) = collect_paths(&scene, 96.0, (0.0, 0.0), 100, 100, &cache);
+        let (_, paths) = collect_paths(&scene, 96.0, (0.0, 0.0), 100, 100);
         assert_eq!(paths.len(), 1, "the right-hand path is outside the tile");
+    }
+
+    #[test]
+    fn renders_text_from_atlas() {
+        let Ok(font_data) = std::fs::read("C:/Windows/Fonts/arial.ttf") else {
+            return;
+        };
+        let Ok(context) = WgpuContext::new_blocking() else {
+            return;
+        };
+        let font = std::sync::Arc::new(ofdbox_folio_ir::FontAsset::new(
+            std::sync::Arc::from(font_data.into_boxed_slice()),
+            0,
+        ));
+        let Ok(face) = ttf_parser::Face::parse(font.data(), 0) else {
+            return;
+        };
+        let Some(glyph_id) = face.glyph_index('A').map(|glyph| glyph.0) else {
+            return;
+        };
+        let run = std::sync::Arc::new(ofdbox_folio_ir::GlyphRun::new(
+            "A",
+            vec![ofdbox_folio_ir::Glyph {
+                id: u32::from(glyph_id),
+                x: 5.0,
+                y: 20.0,
+                advance: 7.0,
+            }],
+            Vec::new(),
+        ));
+        let mut root = Group::default();
+        root.children.push(Element::Path(rectangle(0.0, 0.0)));
+        root.children
+            .push(Element::Text(ofdbox_folio_ir::TextElement {
+                font,
+                font_size: 10.0,
+                transform: Matrix::IDENTITY,
+                run,
+                fill: Some(Paint::Color(Rgba::from_rgb(0, 0, 0))),
+                stroke: None,
+            }));
+        let scene = Scene {
+            size: Size::new(30.0, 30.0),
+            root,
+            diagnostics: Vec::new(),
+        };
+        let backend = WgpuBackend::new(context).expect("backend");
+        let target = WgpuTarget::new(backend.context(), scene.size, 96.0).expect("target");
+        backend.render_to_target(&scene, &target).expect("render");
+        let pixels = target.read_rgba(backend.context()).expect("read");
+        let mut dark = 0_u32;
+        let mut min_x = u32::MAX;
+        let mut min_y = u32::MAX;
+        let mut max_y = 0_u32;
+        for y in 0..target.height() {
+            for x in 0..target.width() {
+                let index = ((y * target.width() + x) * 4) as usize;
+                if pixels[index] < 128 {
+                    dark += 1;
+                    min_x = min_x.min(x);
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+        assert!(dark > 5, "expected atlas glyph pixels, got {dark}");
+        // A 10 mm 'A' with its baseline at y = 20 mm occupies roughly
+        // x = 5..12 mm and y = 12..20 mm at 96 dpi.
+        let px_per_mm = 96.0 / 25.4;
+        let x_min = (5.0 * px_per_mm) as u32;
+        let y_min = (12.0 * px_per_mm) as u32;
+        let y_max = (20.5 * px_per_mm) as u32;
+        assert!(min_x >= x_min, "glyph starts too far left: {min_x}");
+        assert!(min_y >= y_min, "glyph starts too high: {min_y}");
+        assert!(max_y <= y_max, "glyph baseline too low: {max_y}");
+    }
+
+    #[test]
+    fn renders_image_quad() {
+        let Ok(context) = WgpuContext::new_blocking() else {
+            return;
+        };
+        let mut encoded = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut encoded, 2, 2);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("png header");
+            writer
+                .write_image_data(&[
+                    255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+                ])
+                .expect("png data");
+        }
+        let image = std::sync::Arc::new(ofdbox_folio_ir::ImageAsset::new(
+            ofdbox_folio_ir::ImageFormat::Png,
+            std::sync::Arc::from(encoded.into_boxed_slice()),
+            2,
+            2,
+        ));
+        let mut root = Group::default();
+        root.children
+            .push(Element::Image(ofdbox_folio_ir::ImageElement {
+                image,
+                rect: ofdbox_folio_ir::Rect::new(0.0, 0.0, 10.0, 10.0),
+                transform: Matrix::translate(5.0, 5.0),
+                alpha: 1.0,
+            }));
+        let scene = Scene {
+            size: Size::new(20.0, 20.0),
+            root,
+            diagnostics: Vec::new(),
+        };
+        let backend = WgpuBackend::new(context).expect("backend");
+        let target = WgpuTarget::new(backend.context(), scene.size, 96.0).expect("target");
+        backend.render_to_target(&scene, &target).expect("render");
+        let pixels = target.read_rgba(backend.context()).expect("read");
+        let x = (10.0_f64 / 25.4 * 96.0) as u32;
+        let y = (10.0_f64 / 25.4 * 96.0) as u32;
+        let index = ((y * target.width() + x) * 4) as usize;
+        assert!(pixels[index] > 200, "red channel: {}", pixels[index]);
+        assert!(pixels[index + 1] < 40);
     }
 
     #[test]

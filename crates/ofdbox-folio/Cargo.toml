@@ -35,5 +35,9 @@ gpu27 = ["dep:ofdbox-folio-render", "ofdbox-folio-render/wgpu27"]
 [dev-dependencies]
 png.workspace = true
 
+[[example]]
+name = "wgpu_compare"
+required-features = ["gpu30"]
+
 [lints]
 workspace = true

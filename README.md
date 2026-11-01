@@ -108,7 +108,7 @@ Known limits:
 - OFD without embedded fonts needs a caller-provided `FontProvider`; otherwise text is kept in the text layer but not drawn.
 - OFD template pages are flattened into page content.
 - The page cache accounts for page structure only; fonts and images are shared document resources.
-- The GPU backend covers solid fills, strokes, linear gradients, clipping and text outlines; images, radial gradients and blend modes are CPU-only.
+- The GPU backend covers solid fills, strokes, linear gradients, clipping, atlas-backed text and RGBA images; radial gradients and blend modes are CPU-only.
 - OFD pattern/mesh fills are not written yet; PDF tiling patterns and JPEG2000 are not read yet.
 - DOCX is laid out eagerly when opened, so its page count and layout cost are paid up front; the page cache then caches laid-out pages instead of deferring parsing.
 - DOCX layout approximates Word (no line-by-line fidelity); table and header/footer fidelity is still being hardened.
