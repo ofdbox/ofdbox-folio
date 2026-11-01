@@ -674,7 +674,10 @@ impl Builder<'_> {
                         if !content.content.abbreviated_data.is_empty()
                             && let Some(path) = parse_path_data(&content.content.abbreviated_data)
                         {
-                            append_transformed_path(&mut union, &path, ctm);
+                            // The abbreviated path is relative to the Clip Path Boundary.
+                            let boundary = content.content.graphic.boundary;
+                            let offset = Matrix::translate(boundary.x, boundary.y).then(ctm);
+                            append_transformed_path(&mut union, &path, offset);
                             has_area = true;
                         }
                     }
