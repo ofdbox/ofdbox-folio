@@ -71,7 +71,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "page {page_index}: {width}x{height}, differing pixels: {differing} ({:.3}%), max delta: {max_delta}",
         differing as f64 / (width * height) as f64 * 100.0
     );
+    let (paths, text, images) = count_elements(&page.content.root);
+    println!("scene elements: {paths} paths, {text} text, {images} images");
     Ok(())
+}
+
+fn count_elements(group: &ofdbox_folio::ir::Group) -> (usize, usize, usize) {
+    let mut paths = 0;
+    let mut text = 0;
+    let mut images = 0;
+    for element in &group.children {
+        match element {
+            ofdbox_folio::ir::Element::Group(child) => {
+                let (child_paths, child_text, child_images) = count_elements(child);
+                paths += child_paths;
+                text += child_text;
+                images += child_images;
+            }
+            ofdbox_folio::ir::Element::Path(_) => paths += 1,
+            ofdbox_folio::ir::Element::Text(_) => text += 1,
+            ofdbox_folio::ir::Element::Image(_) => images += 1,
+            _ => {}
+        }
+    }
+    (paths, text, images)
 }
 
 fn write_png(
