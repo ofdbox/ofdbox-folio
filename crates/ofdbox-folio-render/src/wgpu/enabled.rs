@@ -38,6 +38,8 @@ struct DrawPath {
     gradient: [f32; 4],
     /// Pixel-space bounds `(min_x, min_y, max_x, max_y)`.
     bbox: [f32; 4],
+    /// Source element order within the scene.
+    order: u32,
 }
 
 /// A wgpu device context.
@@ -591,6 +593,7 @@ impl WgpuBackend {
                         world,
                         opacity,
                         clip,
+                        _order: _,
                     } => {
                         let scissor = clip
                             .map_or(Scissor::full(target.width, target.height), |clip| {
@@ -628,7 +631,11 @@ impl WgpuBackend {
                             });
                         }
                     }
-                    Decoration::Image { draw, clip } => {
+                    Decoration::Image {
+                        draw,
+                        clip,
+                        _order: _,
+                    } => {
                         let scissor = clip
                             .map_or(Scissor::full(target.width, target.height), |clip| {
                                 Scissor::from_clip(clip, target.width, target.height)
@@ -1035,6 +1042,7 @@ fn collect_paths(
     let scale = dpi / 25.4;
     let mut edges = Vec::new();
     let mut paths = Vec::new();
+    let mut order = 0_u32;
     let viewport = Viewport {
         min_x: -1.0,
         min_y: -1.0,
@@ -1051,9 +1059,11 @@ fn collect_paths(
         scale,
         origin_px,
         viewport,
+        &mut order,
         &mut edges,
         &mut paths,
     );
+    debug_assert!(paths.windows(2).all(|pair| pair[0].order <= pair[1].order));
     (edges, paths)
 }
 
@@ -1064,10 +1074,12 @@ enum Decoration<'a> {
         world: Matrix,
         opacity: f32,
         clip: Option<[f32; 4]>,
+        _order: u32,
     },
     Image {
         draw: ImageDraw,
         clip: Option<[f32; 4]>,
+        _order: u32,
     },
 }
 
@@ -1090,6 +1102,7 @@ fn collect_decorations(
         max_y: height as f32 + 1.0,
     };
     let mut decorations = Vec::new();
+    let mut order = 0_u32;
     collect_decoration_group(
         &scene.root,
         Matrix::IDENTITY,
@@ -1098,6 +1111,7 @@ fn collect_decorations(
         dpi / 25.4,
         origin_px,
         viewport,
+        &mut order,
         &mut decorations,
     );
     decorations
@@ -1112,6 +1126,7 @@ fn collect_decoration_group<'a>(
     scale: f64,
     origin_px: (f64, f64),
     viewport: Viewport,
+    order: &mut u32,
     decorations: &mut Vec<Decoration<'a>>,
 ) {
     let opacity = parent_opacity * group.opacity.clamp(0.0, 1.0);
@@ -1150,22 +1165,34 @@ fn collect_decoration_group<'a>(
                 scale,
                 origin_px,
                 viewport,
+                order,
                 decorations,
             ),
-            Element::Text(text) => decorations.push(Decoration::Text {
-                text,
-                world: text.transform.then(transform),
-                opacity,
-                clip,
-            }),
+            Element::Text(text) => {
+                let element_order = *order;
+                *order += 1;
+                decorations.push(Decoration::Text {
+                    text,
+                    world: text.transform.then(transform),
+                    opacity,
+                    clip,
+                    _order: element_order,
+                });
+            }
             Element::Image(image) => {
+                let element_order = *order;
+                *order += 1;
                 if let Some(draw) =
                     image_draw(image, transform, opacity, clip, scale, origin_px, viewport)
                 {
-                    decorations.push(Decoration::Image { draw, clip });
+                    decorations.push(Decoration::Image {
+                        draw,
+                        clip,
+                        _order: element_order,
+                    });
                 }
             }
-            _ => {}
+            _ => *order += 1,
         }
     }
 }
@@ -1452,6 +1479,7 @@ fn collect_group(
     scale: f64,
     origin_px: (f64, f64),
     viewport: Viewport,
+    order: &mut u32,
     edges: &mut Vec<[f32; 4]>,
     paths: &mut Vec<DrawPath>,
 ) {
@@ -1488,10 +1516,13 @@ fn collect_group(
                 scale,
                 origin_px,
                 viewport,
+                order,
                 edges,
                 paths,
             ),
             Element::Path(path) => {
+                let element_order = *order;
+                *order += 1;
                 let start = u32::try_from(edges.len()).unwrap_or(u32::MAX);
                 flatten_path(&path.path, transform, scale, origin_px, edges);
                 let count = u32::try_from(edges.len()).unwrap_or(u32::MAX) - start;
@@ -1554,6 +1585,7 @@ fn collect_group(
                         end_color,
                         gradient,
                         bbox: bounds,
+                        order: element_order,
                     });
                 }
                 if let Some(stroke) = &path.stroke
@@ -1577,11 +1609,12 @@ fn collect_group(
                         end_color: scaled_color(*color, opacity),
                         gradient: [0.0; 4],
                         bbox: stroke_bounds,
+                        order: element_order,
                     });
                 }
             }
-            Element::Text(_) => {}
-            Element::Image(_) => {}
+            Element::Text(_) => *order += 1,
+            Element::Image(_) => *order += 1,
             _ => {}
         }
     }
