@@ -360,6 +360,37 @@ impl WgpuBackend {
         })
     }
 
+    /// Drops cached glyph outlines and flattened tile geometry.
+    ///
+    /// Call this after mutating a scene that was previously rendered: the tile
+    /// cache is keyed by the scene allocation address, so reusing it for different
+    /// content requires an explicit invalidation.
+    pub fn clear_caches(&self) {
+        self.glyph_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        self.path_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+    }
+
+    /// Number of cached glyph outlines and flattened tile geometries.
+    pub fn cache_stats(&self) -> (usize, usize) {
+        let glyphs = self
+            .glyph_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len();
+        let tiles = self
+            .path_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len();
+        (glyphs, tiles)
+    }
+
     /// Renders into an offscreen texture.
     pub fn render_to_target(&self, scene: &Scene, target: &WgpuTarget) -> Result<(), RenderError> {
         self.render_to_target_with_offset(scene, target, (0.0, 0.0))
