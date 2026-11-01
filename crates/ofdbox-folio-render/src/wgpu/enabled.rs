@@ -517,6 +517,16 @@ impl WgpuBackend {
         self.render_to_target(&page.content, target)
     }
 
+    /// Renders one region of a Fixed IR page into an offscreen tile.
+    pub fn render_page_region(
+        &self,
+        page: &ofdbox_folio_ir::Page,
+        target: &WgpuTarget,
+        origin_px: (f64, f64),
+    ) -> Result<(), RenderError> {
+        self.render_region(&page.content, target, origin_px)
+    }
+
     /// Renders the given region of a scene into an offscreen texture.
     ///
     /// `origin_px` is the position of the region's top-left corner in whole-page
