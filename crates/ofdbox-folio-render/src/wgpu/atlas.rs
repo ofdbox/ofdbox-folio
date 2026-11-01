@@ -320,6 +320,44 @@ impl GpuAtlas {
     }
 }
 
+/// One instanced text quad.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct GlyphInstance {
+    /// Page-pixel position of the quad's top-left corner.
+    pub origin: [f32; 2],
+    /// Page-pixel x axis per atlas texel.
+    pub x_axis: [f32; 2],
+    /// Page-pixel y axis per atlas texel.
+    pub y_axis: [f32; 2],
+    /// Atlas UV of the top-left corner.
+    pub uv0: [f32; 2],
+    /// Atlas UV of the bottom-right corner.
+    pub uv1: [f32; 2],
+    /// Padding to the vec4-aligned color.
+    pub _pad: [f32; 2],
+    /// Straight-alpha text color.
+    pub color: [f32; 4],
+}
+
+impl GlyphInstance {
+    /// Serialize for the GPU instance buffer (64 bytes).
+    pub(crate) fn write_bytes(self, out: &mut Vec<u8>) {
+        for value in self
+            .origin
+            .into_iter()
+            .chain(self.x_axis)
+            .chain(self.y_axis)
+            .chain(self.uv0)
+            .chain(self.uv1)
+            .chain(self._pad)
+            .chain(self.color)
+        {
+            out.extend_from_slice(&value.to_ne_bytes());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
