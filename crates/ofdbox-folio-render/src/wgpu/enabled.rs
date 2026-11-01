@@ -2542,6 +2542,65 @@ mod tests {
     }
 
     #[test]
+    fn renders_radial_gradient_text() {
+        let Ok(font_data) = std::fs::read("C:/Windows/Fonts/arial.ttf") else {
+            return;
+        };
+        let Ok(context) = WgpuContext::new_blocking() else {
+            return;
+        };
+        let font = std::sync::Arc::new(ofdbox_folio_ir::FontAsset::new(
+            std::sync::Arc::from(font_data.into_boxed_slice()),
+            0,
+        ));
+        let mut element = text_element(&font, 'A', 5.0, 20.0);
+        if let Element::Text(text) = &mut element {
+            text.fill = Some(Paint::RadialGradient(ofdbox_folio_ir::RadialGradient {
+                start_center: Point::new(8.5, 16.0),
+                start_radius: 6.0,
+                end_center: Point::new(8.5, 16.0),
+                end_radius: 6.0,
+                stops: vec![
+                    ofdbox_folio_ir::GradientStop {
+                        offset: 0.0,
+                        color: Rgba::from_rgb(255, 0, 0),
+                    },
+                    ofdbox_folio_ir::GradientStop {
+                        offset: 1.0,
+                        color: Rgba::from_rgb(0, 0, 255),
+                    },
+                ],
+                extend: Default::default(),
+                eccentricity: 0.0,
+                angle: 0.0,
+            }));
+        }
+        let mut root = Group::default();
+        root.children.push(element);
+        let scene = Scene {
+            size: Size::new(30.0, 30.0),
+            root,
+            diagnostics: Vec::new(),
+        };
+        let backend = WgpuBackend::new(context).expect("backend");
+        let target = WgpuTarget::new(backend.context(), scene.size, 96.0).expect("target");
+        backend.render_to_target(&scene, &target).expect("render");
+        let pixels = target.read_rgba(backend.context()).expect("read");
+        let mut red = 0;
+        let mut blue = 0;
+        for pixel in pixels.chunks(4) {
+            if pixel[0] > 160 && pixel[2] < 100 {
+                red += 1;
+            }
+            if pixel[2] > 160 && pixel[0] < 100 {
+                blue += 1;
+            }
+        }
+        assert!(red > 5, "expected radial center pixels, got {red}");
+        assert!(blue > 5, "expected radial edge pixels, got {blue}");
+    }
+
+    #[test]
     fn renders_solid_rectangle() {
         let Ok(context) = WgpuContext::new_blocking() else {
             return;
