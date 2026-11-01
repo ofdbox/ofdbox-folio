@@ -11,6 +11,8 @@ use wgpu27 as wgpu_lib;
 
 use wgpu_lib::util::DeviceExt;
 
+use owned_ttf_parser::{AsFaceRef, OwnedFace};
+
 use ofdbox_folio_ir::{
     Element, FillRule, Group, ImageAsset, ImageElement, Matrix, Paint, Path, PathSegment, Point,
     Rgba, Scene, Size,
@@ -291,6 +293,12 @@ type TileCacheKey = (usize, u64, i32, i32, u32, u32);
 /// Flattened edges plus draw paths for one tile.
 type CachedGeometry = Arc<(Vec<[f32; 4]>, Vec<DrawPath>)>;
 
+/// A parsed font face, keeping its font alive while the pointer key is used.
+struct CachedFace {
+    _font: Arc<ofdbox_folio_ir::FontAsset>,
+    face: OwnedFace,
+}
+
 /// A cached glyph outline, keeping its font alive while the pointer key is used.
 struct CachedGlyph {
     _font: Arc<ofdbox_folio_ir::FontAsset>,
@@ -376,6 +384,8 @@ pub struct WgpuBackend {
     layout: wgpu_lib::BindGroupLayout,
     /// Font outlines keyed by `(font asset pointer, glyph id)`.
     glyph_cache: Mutex<HashMap<(usize, u16), CachedGlyph>>,
+    /// Parsed font faces keyed by `(font asset pointer, face index)`.
+    font_faces: Mutex<HashMap<(usize, u32), Arc<CachedFace>>>,
     /// Already-flattened scene geometry per scene / dpi / region.
     path_cache: Mutex<HashMap<TileCacheKey, CachedGeometry>>,
     atlas: Mutex<GpuAtlas>,
@@ -466,6 +476,7 @@ impl WgpuBackend {
             pipeline,
             layout,
             glyph_cache: Mutex::new(HashMap::new()),
+            font_faces: Mutex::new(HashMap::new()),
             path_cache: Mutex::new(HashMap::new()),
             atlas,
             text_pipeline,
@@ -482,6 +493,10 @@ impl WgpuBackend {
     /// content requires an explicit invalidation.
     pub fn clear_caches(&self) {
         self.glyph_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        self.font_faces
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clear();
@@ -636,6 +651,7 @@ impl WgpuBackend {
                                 max_y: target.height as f32 + 1.0,
                             },
                             &self.glyph_cache,
+                            &self.font_faces,
                             &mut atlas,
                             &self.context.queue,
                             &mut instances,
@@ -1487,6 +1503,7 @@ fn emit_text_instances(
     origin_px: (f64, f64),
     viewport: Viewport,
     glyph_cache: &Mutex<HashMap<(usize, u16), CachedGlyph>>,
+    font_faces: &Mutex<HashMap<(usize, u32), Arc<CachedFace>>>,
     atlas: &mut GpuAtlas,
     queue: &wgpu_lib::Queue,
     instances: &mut Vec<GlyphInstance>,
@@ -1534,9 +1551,31 @@ fn emit_text_instances(
         }
         Some(_) | None => return,
     };
-    let Ok(face) = ttf_parser::Face::parse(text.font.data(), text.font.face_index()) else {
-        return;
+    let face_key = (Arc::as_ptr(&text.font) as usize, text.font.face_index());
+    let face = {
+        let faces = font_faces.lock().unwrap_or_else(|error| error.into_inner());
+        match faces.get(&face_key) {
+            Some(face) => Arc::clone(face),
+            None => {
+                drop(faces);
+                let Ok(parsed) =
+                    OwnedFace::from_vec(text.font.data().to_vec(), text.font.face_index())
+                else {
+                    return;
+                };
+                let cached = Arc::new(CachedFace {
+                    _font: Arc::clone(&text.font),
+                    face: parsed,
+                });
+                font_faces
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .insert(face_key, Arc::clone(&cached));
+                cached
+            }
+        }
     };
+    let face = face.face.as_face_ref();
     let units = face.units_per_em();
     if units == 0 {
         return;

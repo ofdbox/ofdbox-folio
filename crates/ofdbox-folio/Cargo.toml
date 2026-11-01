@@ -47,6 +47,10 @@ name = "tiny_skia_compare"
 required-features = ["tiny-skia"]
 
 [[example]]
+name = "wgpu_text_bench"
+required-features = ["gpu30"]
+
+[[example]]
 name = "wgpu_compare"
 required-features = ["gpu30"]
 

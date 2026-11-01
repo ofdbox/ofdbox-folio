@@ -162,6 +162,7 @@ impl RasterTarget {
         &self.data
     }
 
+    #[cfg(feature = "tiny-skia")]
     pub(crate) fn data_mut(&mut self) -> &mut [u8] {
         &mut self.data
     }

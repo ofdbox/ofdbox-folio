@@ -167,37 +167,56 @@ pub(crate) fn rasterize_glyph(
     }
     let width = width as u32;
     let height = height as u32;
+    const S: u32 = 4;
+    let high_width = width * S;
+    let high_height = height * S;
+    let mut high = vec![0_u8; (high_width * high_height) as usize];
+    let mut crossings: Vec<(f64, i32)> = Vec::new();
+    for hy in 0..high_height {
+        let y = top + (f64::from(hy) + 0.5) / f64::from(S);
+        crossings.clear();
+        for edge in &edges {
+            let ax = f64::from(edge[0]);
+            let ay = f64::from(edge[1]);
+            let bx = f64::from(edge[2]);
+            let by = f64::from(edge[3]);
+            if (ay <= y && by > y) || (by <= y && ay > y) {
+                let t = (y - ay) / (by - ay);
+                crossings.push((ax + t * (bx - ax), if by > ay { 1 } else { -1 }));
+            }
+        }
+        if crossings.is_empty() {
+            continue;
+        }
+        crossings.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut winding = 0_i32;
+        let mut previous = crossings[0].0;
+        let mut index = 0_usize;
+        while index < crossings.len() {
+            let x = crossings[index].0;
+            if winding != 0 {
+                fill_span(&mut high, high_width, hy, previous, x, left);
+            }
+            while index < crossings.len() && crossings[index].0 == x {
+                winding += crossings[index].1;
+                index += 1;
+            }
+            previous = x;
+        }
+    }
     let mut coverage = vec![0_u8; (width * height) as usize];
-    const OFFSETS: [(f64, f64); 16] = [
-        (0.125, 0.125),
-        (0.375, 0.125),
-        (0.625, 0.125),
-        (0.875, 0.125),
-        (0.125, 0.375),
-        (0.375, 0.375),
-        (0.625, 0.375),
-        (0.875, 0.375),
-        (0.125, 0.625),
-        (0.375, 0.625),
-        (0.625, 0.625),
-        (0.875, 0.625),
-        (0.125, 0.875),
-        (0.375, 0.875),
-        (0.625, 0.875),
-        (0.875, 0.875),
-    ];
     for row in 0..height {
         for column in 0..width {
-            let mut covered = 0_u32;
-            for (dx, dy) in OFFSETS {
-                let x = left + f64::from(column) + dx;
-                let y = top + f64::from(row) + dy;
-                if inside_edges(&edges, x, y) {
-                    covered += 1;
+            let mut sum = 0_u32;
+            for sy in 0..S {
+                for sx in 0..S {
+                    let hx = column * S + sx;
+                    let hy = row * S + sy;
+                    sum += u32::from(high[(hy * high_width + hx) as usize]);
                 }
             }
-            if covered > 0 {
-                coverage[(row * width + column) as usize] = ((covered * 255 + 8) / 16) as u8;
+            if sum > 0 {
+                coverage[(row * width + column) as usize] = (sum / (S * S)) as u8;
             }
         }
     }
@@ -293,6 +312,23 @@ fn dilate(source: &[u8], width: usize, height: usize, radius: usize) -> Vec<u8> 
         }
     }
     vertical
+}
+
+fn fill_span(high: &mut [u8], high_width: u32, row: u32, start: f64, end: f64, left: f64) {
+    const S: f64 = 4.0;
+    let start = ((start - left) * S - 0.5).ceil().max(0.0) as u32;
+    let end = (((end - left) * S - 0.5).floor()).min(f64::from(high_width - 1));
+    if end < 0.0 {
+        return;
+    }
+    let end = end as u32;
+    if start > end {
+        return;
+    }
+    let base = (row * high_width) as usize;
+    for column in start..=end {
+        high[base + column as usize] = 255;
+    }
 }
 
 fn inside_edges(edges: &[[f32; 4]], x: f64, y: f64) -> bool {

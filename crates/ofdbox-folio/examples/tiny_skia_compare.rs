@@ -4,8 +4,8 @@ use std::env;
 use std::fs::File;
 use std::io::BufWriter;
 
-use ofdbox_folio::render::{CpuRenderer, RasterTarget, RenderOptions, TinySkiaRenderer};
 use ofdbox_folio::fonts::SystemFonts;
+use ofdbox_folio::render::{CpuRenderer, RasterTarget, RenderOptions, TinySkiaRenderer};
 use ofdbox_folio::{Document, OpenOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

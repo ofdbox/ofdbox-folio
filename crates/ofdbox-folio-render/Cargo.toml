@@ -21,6 +21,7 @@ skrifa.workspace = true
 thiserror.workspace = true
 tiff.workspace = true
 ttf-parser.workspace = true
+owned_ttf_parser.workspace = true
 vello_cpu.workspace = true
 tiny-skia = { workspace = true, optional = true }
 wgpu = { workspace = true, optional = true }
