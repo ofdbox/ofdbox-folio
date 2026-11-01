@@ -11,7 +11,8 @@ OFDBox Folio 是以“页”为中心的多格式文档引擎：读取 OFD、PDF
 - 以 Fixed IR 作为统一读取模型：按需加载、文本选择/搜索、页面缓存、增量渲染。
 - 排版产出的 `FixedDocument` 可以包回 Reader（`FixedDocumentSource`），复用缓存、选择与搜索。
 - 相同输入、相同字体字节、相同引擎版本，输出确定。
-- CPU 渲染器 + 可选 wgpu 后端；OFD/PDF 写出支持字体子集化。
+- CPU 渲染器 + 可选 GPU 后端；GPU 后端按构建时 `gpu27` / `gpu30` 特性二选一（wgpu 27 或 30）。
+- OFD/PDF 写出支持字体子集化。
 
 整个引擎围绕一条主流程组织：
 

@@ -4,12 +4,12 @@
 //! text outlines; images, radial gradients and blend modes are not implemented
 //! yet.
 
-#[cfg(not(feature = "wgpu"))]
+#[cfg(not(any(feature = "wgpu27", feature = "wgpu30")))]
 mod disabled;
-#[cfg(feature = "wgpu")]
+#[cfg(any(feature = "wgpu27", feature = "wgpu30"))]
 mod enabled;
 
-#[cfg(not(feature = "wgpu"))]
+#[cfg(not(any(feature = "wgpu27", feature = "wgpu30")))]
 pub use disabled::WgpuBackend;
-#[cfg(feature = "wgpu")]
+#[cfg(any(feature = "wgpu27", feature = "wgpu30"))]
 pub use enabled::{WgpuBackend, WgpuCapabilities, WgpuContext, WgpuTarget};

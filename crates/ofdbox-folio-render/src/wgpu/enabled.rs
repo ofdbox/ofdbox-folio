@@ -3,7 +3,12 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use wgpu::util::DeviceExt;
+#[cfg(all(feature = "wgpu30", not(feature = "wgpu27")))]
+use wgpu as wgpu_lib;
+#[cfg(feature = "wgpu27")]
+use wgpu27 as wgpu_lib;
+
+use wgpu_lib::util::DeviceExt;
 
 use ofdbox_folio_ir::{
     Element, FillRule, Group, Matrix, Paint, Path, PathSegment, Point, Rgba, Scene, Size,
@@ -28,20 +33,27 @@ struct DrawPath {
 
 /// A wgpu device context.
 pub struct WgpuContext {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    device: wgpu_lib::Device,
+    queue: wgpu_lib::Queue,
 }
 
 impl WgpuContext {
     /// Creates the default adapter and device.
     pub async fn new() -> Result<Self, RenderError> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        #[cfg(feature = "wgpu30")]
+        let descriptor = wgpu_lib::InstanceDescriptor::new_without_display_handle();
+        #[cfg(feature = "wgpu27")]
+        let descriptor = wgpu_lib::InstanceDescriptor::from_env_or_default();
+        #[cfg(feature = "wgpu30")]
+        let instance = wgpu_lib::Instance::new(descriptor);
+        #[cfg(feature = "wgpu27")]
+        let instance = wgpu_lib::Instance::new(&descriptor);
         let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
+            .request_adapter(&wgpu_lib::RequestAdapterOptions::default())
             .await
             .map_err(|error| RenderError::Backend(format!("wgpu adapter: {error}")))?;
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
+            .request_device(&wgpu_lib::DeviceDescriptor {
                 label: Some("ofdbox-wgpu"),
                 ..Default::default()
             })
@@ -61,17 +73,17 @@ impl WgpuContext {
     /// dioxus-native/anyrender), the framework's wgpu device must be reused to
     /// avoid creating a second GPU context in the same process or being unable to
     /// share textures.
-    pub fn from_device_queue(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+    pub fn from_device_queue(device: wgpu_lib::Device, queue: wgpu_lib::Queue) -> Self {
         Self { device, queue }
     }
 
     /// The device reference.
-    pub fn device(&self) -> &wgpu::Device {
+    pub fn device(&self) -> &wgpu_lib::Device {
         &self.device
     }
 
     /// The queue reference.
-    pub fn queue(&self) -> &wgpu::Queue {
+    pub fn queue(&self) -> &wgpu_lib::Queue {
         &self.queue
     }
 }
@@ -97,8 +109,8 @@ pub struct WgpuCapabilities {
 
 /// A wgpu render target.
 pub struct WgpuTarget {
-    texture: wgpu::Texture,
-    view: wgpu::TextureView,
+    texture: wgpu_lib::Texture,
+    view: wgpu_lib::TextureView,
     width: u32,
     height: u32,
     dpi: f64,
@@ -118,24 +130,24 @@ impl WgpuTarget {
         if width == 0 || height == 0 {
             return Err(RenderError::InvalidPage);
         }
-        let texture = context.device.create_texture(&wgpu::TextureDescriptor {
+        let texture = context.device.create_texture(&wgpu_lib::TextureDescriptor {
             label: Some("ofdbox-wgpu-tile"),
-            size: wgpu::Extent3d {
+            size: wgpu_lib::Extent3d {
                 width,
                 height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
             sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::TEXTURE_BINDING,
+            dimension: wgpu_lib::TextureDimension::D2,
+            format: wgpu_lib::TextureFormat::Rgba8Unorm,
+            usage: wgpu_lib::TextureUsages::STORAGE_BINDING
+                | wgpu_lib::TextureUsages::COPY_SRC
+                | wgpu_lib::TextureUsages::COPY_DST
+                | wgpu_lib::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = texture.create_view(&wgpu_lib::TextureViewDescriptor::default());
         Ok(Self {
             texture,
             view,
@@ -149,23 +161,23 @@ impl WgpuTarget {
     pub fn new(context: &WgpuContext, size: Size, dpi: f64) -> Result<Self, RenderError> {
         let width = (size.width / 25.4 * dpi).ceil().max(1.0) as u32;
         let height = (size.height / 25.4 * dpi).ceil().max(1.0) as u32;
-        let texture = context.device.create_texture(&wgpu::TextureDescriptor {
+        let texture = context.device.create_texture(&wgpu_lib::TextureDescriptor {
             label: Some("ofdbox-wgpu-target"),
-            size: wgpu::Extent3d {
+            size: wgpu_lib::Extent3d {
                 width,
                 height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
             sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::COPY_DST,
+            dimension: wgpu_lib::TextureDimension::D2,
+            format: wgpu_lib::TextureFormat::Rgba8Unorm,
+            usage: wgpu_lib::TextureUsages::STORAGE_BINDING
+                | wgpu_lib::TextureUsages::COPY_SRC
+                | wgpu_lib::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = texture.create_view(&wgpu_lib::TextureViewDescriptor::default());
         Ok(Self {
             texture,
             view,
@@ -185,38 +197,38 @@ impl WgpuTarget {
     }
 
     /// The target texture (can be handed directly to a UI framework for compositing).
-    pub fn texture(&self) -> &wgpu::Texture {
+    pub fn texture(&self) -> &wgpu_lib::Texture {
         &self.texture
     }
 
     /// Reads back the RGBA8 pixels.
     pub fn read_rgba(&self, context: &WgpuContext) -> Result<Vec<u8>, RenderError> {
         let row = self.width * 4;
-        let padded =
-            row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+        let padded = row.div_ceil(wgpu_lib::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu_lib::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let buffer = context.device.create_buffer(&wgpu_lib::BufferDescriptor {
             label: Some("ofdbox-wgpu-readback"),
             size: u64::from(padded) * u64::from(self.height),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            usage: wgpu_lib::BufferUsages::COPY_DST | wgpu_lib::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
         let mut encoder = context.device.create_command_encoder(&Default::default());
         encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
+            wgpu_lib::TexelCopyTextureInfo {
                 texture: &self.texture,
                 mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
+                origin: wgpu_lib::Origin3d::ZERO,
+                aspect: wgpu_lib::TextureAspect::All,
             },
-            wgpu::TexelCopyBufferInfo {
+            wgpu_lib::TexelCopyBufferInfo {
                 buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
+                layout: wgpu_lib::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded),
                     rows_per_image: Some(self.height),
                 },
             },
-            wgpu::Extent3d {
+            wgpu_lib::Extent3d {
                 width: self.width,
                 height: self.height,
                 depth_or_array_layers: 1,
@@ -227,21 +239,24 @@ impl WgpuTarget {
         let (sender, receiver) = std::sync::mpsc::channel();
         buffer
             .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
+            .map_async(wgpu_lib::MapMode::Read, move |result| {
                 let _ = sender.send(result);
             });
         context
             .device
-            .poll(wgpu::PollType::wait_indefinitely())
+            .poll(wgpu_lib::PollType::wait_indefinitely())
             .map_err(|error| RenderError::Backend(format!("wgpu poll: {error}")))?;
         receiver
             .recv()
             .map_err(|_| RenderError::Backend("wgpu readback channel".to_owned()))?
             .map_err(|error| RenderError::Backend(format!("wgpu readback: {error}")))?;
+        #[cfg(feature = "wgpu30")]
         let mapped = buffer
             .slice(..)
             .get_mapped_range()
             .map_err(|error| RenderError::Backend(format!("wgpu map range: {error}")))?;
+        #[cfg(feature = "wgpu27")]
+        let mapped = buffer.slice(..).get_mapped_range();
         let mut output = Vec::with_capacity((self.width * self.height * 4) as usize);
         for row in mapped.chunks(padded as usize) {
             output.extend_from_slice(&row[..(self.width * 4) as usize]);
@@ -255,8 +270,8 @@ impl WgpuTarget {
 /// The wgpu compute backend.
 pub struct WgpuBackend {
     context: Arc<WgpuContext>,
-    pipeline: wgpu::ComputePipeline,
-    layout: wgpu::BindGroupLayout,
+    pipeline: wgpu_lib::ComputePipeline,
+    layout: wgpu_lib::BindGroupLayout,
 }
 
 impl WgpuBackend {
@@ -269,48 +284,60 @@ impl WgpuBackend {
     pub fn from_shared(context: Arc<WgpuContext>) -> Result<Self, RenderError> {
         let module = context
             .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
+            .create_shader_module(wgpu_lib::ShaderModuleDescriptor {
                 label: Some("ofdbox-wgpu-shader"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SHADER)),
+                source: wgpu_lib::ShaderSource::Wgsl(Cow::Borrowed(SHADER)),
             });
-        let layout = context
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("ofdbox-wgpu-bind-layout"),
-                entries: &[
-                    storage_entry(0, true),
-                    storage_entry(1, true),
-                    storage_entry(2, true),
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::StorageTexture {
-                            access: wgpu::StorageTextureAccess::WriteOnly,
-                            format: wgpu::TextureFormat::Rgba8Unorm,
-                            view_dimension: wgpu::TextureViewDimension::D2,
+        let layout =
+            context
+                .device
+                .create_bind_group_layout(&wgpu_lib::BindGroupLayoutDescriptor {
+                    label: Some("ofdbox-wgpu-bind-layout"),
+                    entries: &[
+                        storage_entry(0, true),
+                        storage_entry(1, true),
+                        storage_entry(2, true),
+                        wgpu_lib::BindGroupLayoutEntry {
+                            binding: 3,
+                            visibility: wgpu_lib::ShaderStages::COMPUTE,
+                            ty: wgpu_lib::BindingType::StorageTexture {
+                                access: wgpu_lib::StorageTextureAccess::WriteOnly,
+                                format: wgpu_lib::TextureFormat::Rgba8Unorm,
+                                view_dimension: wgpu_lib::TextureViewDimension::D2,
+                            },
+                            count: None,
                         },
-                        count: None,
-                    },
-                ],
-            });
+                    ],
+                });
+        #[cfg(feature = "wgpu30")]
         let pipeline_layout =
             context
                 .device
-                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                .create_pipeline_layout(&wgpu_lib::PipelineLayoutDescriptor {
                     label: Some("ofdbox-wgpu-pipeline-layout"),
                     bind_group_layouts: &[Some(&layout)],
                     immediate_size: 0,
                 });
-        let pipeline = context
-            .device
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("ofdbox-wgpu-pipeline"),
-                layout: Some(&pipeline_layout),
-                module: &module,
-                entry_point: Some("main"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
+        #[cfg(feature = "wgpu27")]
+        let pipeline_layout =
+            context
+                .device
+                .create_pipeline_layout(&wgpu_lib::PipelineLayoutDescriptor {
+                    label: Some("ofdbox-wgpu-pipeline-layout"),
+                    bind_group_layouts: &[&layout],
+                    push_constant_ranges: &[],
+                });
+        let pipeline =
+            context
+                .device
+                .create_compute_pipeline(&wgpu_lib::ComputePipelineDescriptor {
+                    label: Some("ofdbox-wgpu-pipeline"),
+                    layout: Some(&pipeline_layout),
+                    module: &module,
+                    entry_point: Some("main"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
         Ok(Self {
             context,
             pipeline,
@@ -377,18 +404,18 @@ impl WgpuBackend {
         let edge_buffer =
             self.context
                 .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                .create_buffer_init(&wgpu_lib::util::BufferInitDescriptor {
                     label: Some("ofdbox-edge-buffer"),
                     contents: &edge_data,
-                    usage: wgpu::BufferUsages::STORAGE,
+                    usage: wgpu_lib::BufferUsages::STORAGE,
                 });
         let path_buffer =
             self.context
                 .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                .create_buffer_init(&wgpu_lib::util::BufferInitDescriptor {
                     label: Some("ofdbox-path-buffer"),
                     contents: &path_data,
-                    usage: wgpu::BufferUsages::STORAGE,
+                    usage: wgpu_lib::BufferUsages::STORAGE,
                 });
         let params = [
             target.width,
@@ -404,33 +431,33 @@ impl WgpuBackend {
         let params_buffer =
             self.context
                 .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                .create_buffer_init(&wgpu_lib::util::BufferInitDescriptor {
                     label: Some("ofdbox-params"),
                     contents: &params_bytes,
-                    usage: wgpu::BufferUsages::STORAGE,
+                    usage: wgpu_lib::BufferUsages::STORAGE,
                 });
         let bind_group = self
             .context
             .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
+            .create_bind_group(&wgpu_lib::BindGroupDescriptor {
                 label: Some("ofdbox-wgpu-bind-group"),
                 layout: &self.layout,
                 entries: &[
-                    wgpu::BindGroupEntry {
+                    wgpu_lib::BindGroupEntry {
                         binding: 0,
                         resource: edge_buffer.as_entire_binding(),
                     },
-                    wgpu::BindGroupEntry {
+                    wgpu_lib::BindGroupEntry {
                         binding: 1,
                         resource: path_buffer.as_entire_binding(),
                     },
-                    wgpu::BindGroupEntry {
+                    wgpu_lib::BindGroupEntry {
                         binding: 2,
                         resource: params_buffer.as_entire_binding(),
                     },
-                    wgpu::BindGroupEntry {
+                    wgpu_lib::BindGroupEntry {
                         binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&target.view),
+                        resource: wgpu_lib::BindingResource::TextureView(&target.view),
                     },
                 ],
             });
@@ -439,7 +466,7 @@ impl WgpuBackend {
             .device
             .create_command_encoder(&Default::default());
         {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            let mut pass = encoder.begin_compute_pass(&wgpu_lib::ComputePassDescriptor::default());
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(target.width.div_ceil(8), target.height.div_ceil(8), 1);
@@ -447,7 +474,7 @@ impl WgpuBackend {
         self.context.queue.submit([encoder.finish()]);
         self.context
             .device
-            .poll(wgpu::PollType::wait_indefinitely())
+            .poll(wgpu_lib::PollType::wait_indefinitely())
             .map_err(|error| RenderError::Backend(format!("wgpu poll: {error}")))?;
         Ok(())
     }
@@ -479,12 +506,12 @@ impl std::fmt::Debug for WgpuBackend {
     }
 }
 
-fn storage_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
+fn storage_entry(binding: u32, read_only: bool) -> wgpu_lib::BindGroupLayoutEntry {
+    wgpu_lib::BindGroupLayoutEntry {
         binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Storage { read_only },
+        visibility: wgpu_lib::ShaderStages::COMPUTE,
+        ty: wgpu_lib::BindingType::Buffer {
+            ty: wgpu_lib::BufferBindingType::Storage { read_only },
             has_dynamic_offset: false,
             min_binding_size: None,
         },

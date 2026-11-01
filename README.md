@@ -11,7 +11,8 @@ OFDBox Folio is a page-centric multi-format document engine: it reads OFD, PDF a
 - Fixed IR as the unified read model: lazy pages, text selection/search, page cache, incremental rendering.
 - Wrap any laid-out `FixedDocument` back into the reader (`FixedDocumentSource`) to reuse caching, selection and search.
 - Deterministic output for the same input, font bytes and engine version.
-- CPU renderer plus an optional wgpu backend; OFD/PDF writers with font subsetting.
+- CPU renderer plus an optional GPU backend; the GPU backend targets wgpu 27 or wgpu 30, selected at build time with `gpu27` / `gpu30`.
+- OFD/PDF writers with font subsetting.
 
 The engine is organized around a single flow:
 
