@@ -43,8 +43,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let context = WgpuContext::new_blocking()?;
     let backend = WgpuBackend::new(context)?;
-    let gpu_target = WgpuTarget::new(backend.context(), size, dpi)?;
-    backend.render_to_target(&page.content, &gpu_target)?;
+    let gpu_target = WgpuTarget::from_size(backend.context(), size, dpi)?;
+    backend.render_page(&page, &gpu_target)?;
     let gpu_pixels = gpu_target.read_rgba(backend.context())?;
 
     let cpu_pixels = cpu_target.data();

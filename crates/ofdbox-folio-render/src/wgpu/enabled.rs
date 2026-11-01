@@ -168,6 +168,11 @@ impl WgpuTarget {
     }
 
     /// Creates an offscreen target from the Scene size.
+    pub fn from_size(context: &WgpuContext, size: Size, dpi: f64) -> Result<Self, RenderError> {
+        Self::new(context, size, dpi)
+    }
+
+    /// Creates an offscreen target from the Scene size.
     pub fn new(context: &WgpuContext, size: Size, dpi: f64) -> Result<Self, RenderError> {
         let width = (size.width / 25.4 * dpi).ceil().max(1.0) as u32;
         let height = (size.height / 25.4 * dpi).ceil().max(1.0) as u32;
@@ -380,7 +385,7 @@ impl WgpuBackend {
                     compilation_options: Default::default(),
                     cache: None,
                 });
-        let atlas = Mutex::new(GpuAtlas::new(&context.device, 2048));
+        let atlas = Mutex::new(GpuAtlas::new(&context.device, 4096));
         let text_pipeline = TextPipeline::new(&context.device);
         let image_pipeline = ImagePipeline::new(&context.device);
         let image_sampler = context.device.create_sampler(&wgpu_lib::SamplerDescriptor {
@@ -447,6 +452,15 @@ impl WgpuBackend {
     /// Renders into an offscreen texture.
     pub fn render_to_target(&self, scene: &Scene, target: &WgpuTarget) -> Result<(), RenderError> {
         self.render_to_target_with_offset(scene, target, (0.0, 0.0))
+    }
+
+    /// Renders one Fixed IR page into an offscreen texture.
+    pub fn render_page(
+        &self,
+        page: &ofdbox_folio_ir::Page,
+        target: &WgpuTarget,
+    ) -> Result<(), RenderError> {
+        self.render_to_target(&page.content, target)
     }
 
     /// Renders the given region of a scene into an offscreen texture.
