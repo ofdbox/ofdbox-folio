@@ -32,11 +32,24 @@ The CPU renderer is built on `vello_cpu` and consumes Fixed IR only; it is unawa
 
 The `wgpu` feature of `ofdbox-folio-render` (facade `gpu`) provides the compute backend; `gpu` is off by default.
 
-Solid fills, strokes, linear gradients, clipping and text outlines.
+Solid fills, strokes, linear gradients, clipping, atlas-backed text and RGBA images.
+
+The backend batches all fill/stroke paths of a scene into one compute dispatch, all
+glyphs into one instanced text draw, and all image quads into one render pass. Text
+glyphs are rasterized into an R8 atlas; images are decoded once and cached as GPU
+textures. `WgpuBackend::render_page` is the page-level entry point, and
+`examples/wgpu_compare.rs` in the facade renders a page with both backends and
+reports the pixel difference.
 
 ## Known Limitations
 
-- Images, radial gradients and blend modes are not yet implemented in the GPU backend.
+- Radial gradients and blend modes are not yet implemented in the GPU backend.
+- GPU text uses solid-color atlas glyphs; synthetic bold is approximated by
+  stamping offset glyphs, but gradient text fills are still CPU-only.
+- Paths are drawn before all images and text; images and text keep their relative
+  scene order.
+- Clip paths clip text and image quads to the clip bounding box with a scissor
+  rect; non-rectangular clip paths are therefore approximate for glyphs/images.
 - Use the CPU renderer when you need the full feature set.
 - The GPU backend exists only with the `wgpu` feature; the default build exposes a placeholder `WgpuBackend` that reports `Unsupported`.
 

@@ -11,7 +11,8 @@ OFDBox Folio 是以“页”为中心的多格式文档引擎：读取 OFD、PDF
 - 以 Fixed IR 作为统一读取模型：按需加载、文本选择/搜索、页面缓存、增量渲染。
 - 排版产出的 `FixedDocument` 可以包回 Reader（`FixedDocumentSource`），复用缓存、选择与搜索。
 - 相同输入、相同字体字节、相同引擎版本，输出确定。
-- CPU 渲染器 + 可选 wgpu 后端；OFD/PDF 写出支持字体子集化。
+- CPU 渲染器 + 可选 GPU 后端；GPU 后端按构建时 `gpu27` / `gpu30` 特性二选一（wgpu 27 或 30）。
+- OFD/PDF 写出支持字体子集化。
 
 整个引擎围绕一条主流程组织：
 
@@ -107,7 +108,7 @@ cargo run -p ofdbox-folio --example docx_to_ofd -- input.docx output.ofd
 - OFD 未内嵌字体时需要调用方提供 `FontProvider`；否则文本仍保留在文本层，但不绘制。
 - OFD 模板页目前被展平进页面内容。
 - 页面缓存只计算页面结构；字体和图片是文档级共享资源。
-- GPU 后端覆盖实色填充、描边、线性渐变、裁剪和文字轮廓；图片、径向渐变和混合模式仅 CPU 支持。
+- GPU 后端覆盖实色填充、描边、线性渐变、裁剪、atlas 文字和 RGBA 图片；径向渐变和混合模式仅 CPU 支持。
 - OFD 的 Pattern/Mesh 填充尚未写出；PDF 的平铺 Pattern 和 JPEG2000 尚未读取。
 - DOCX 在打开时立即排版，页数与排版耗时都在打开阶段支付；页面缓存缓存的是排版后的页面，而不是延迟解析。
 - DOCX 排版只是近似 Word（不保证逐行一致）；表格、页眉页脚的保真度仍在打磨。

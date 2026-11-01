@@ -42,6 +42,7 @@ hayro-ccitt = "0.3"
 flate2 = "1"
 kurbo = "0.13"
 wgpu = "30"
+wgpu27 = { package = "wgpu", version = "27" }
 pollster = "1"
 
 ofdbox-folio-ir = { path = "crates/ofdbox-folio-ir", version = "0.0.1" }

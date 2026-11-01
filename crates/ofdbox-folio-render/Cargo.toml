@@ -23,10 +23,14 @@ tiff.workspace = true
 ttf-parser.workspace = true
 vello_cpu.workspace = true
 wgpu = { workspace = true, optional = true }
+wgpu27 = { workspace = true, optional = true }
 pollster = { workspace = true, optional = true }
 
 [features]
-wgpu = ["dep:wgpu", "dep:pollster"]
+# Backwards-compatible alias for wgpu 30.
+wgpu = ["wgpu30"]
+wgpu30 = ["dep:wgpu", "dep:pollster"]
+wgpu27 = ["dep:wgpu27", "dep:pollster"]
 
 [lints]
 workspace = true

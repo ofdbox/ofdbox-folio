@@ -28,10 +28,16 @@ pdf = ["dep:ofdbox-folio-pdf"]
 docx = ["dep:ofdbox-folio-docx"]
 layout = ["dep:ofdbox-folio-layout"]
 cpu = ["dep:ofdbox-folio-render"]
-gpu = ["dep:ofdbox-folio-render", "ofdbox-folio-render/wgpu"]
+gpu = ["gpu30"]
+gpu30 = ["dep:ofdbox-folio-render", "ofdbox-folio-render/wgpu30"]
+gpu27 = ["dep:ofdbox-folio-render", "ofdbox-folio-render/wgpu27"]
 
 [dev-dependencies]
 png.workspace = true
+
+[[example]]
+name = "wgpu_compare"
+required-features = ["gpu30"]
 
 [lints]
 workspace = true
