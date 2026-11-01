@@ -289,8 +289,15 @@ type TileCacheKey = (usize, u64, i32, i32, u32, u32);
 /// Flattened edges plus draw paths for one tile.
 type CachedGeometry = Arc<(Vec<[f32; 4]>, Vec<DrawPath>)>;
 
+/// A cached glyph outline, keeping its font alive while the pointer key is used.
+struct CachedGlyph {
+    _font: Arc<ofdbox_folio_ir::FontAsset>,
+    path: Arc<Path>,
+}
+
 /// A decoded image uploaded to a GPU texture.
 struct CachedImage {
+    _image: Arc<ImageAsset>,
     _texture: wgpu_lib::Texture,
     view: wgpu_lib::TextureView,
 }
@@ -357,7 +364,7 @@ pub struct WgpuBackend {
     pipeline: wgpu_lib::ComputePipeline,
     layout: wgpu_lib::BindGroupLayout,
     /// Font outlines keyed by `(font asset pointer, glyph id)`.
-    glyph_cache: Mutex<HashMap<(usize, u16), Arc<Path>>>,
+    glyph_cache: Mutex<HashMap<(usize, u16), CachedGlyph>>,
     /// Already-flattened scene geometry per scene / dpi / region.
     path_cache: Mutex<HashMap<TileCacheKey, CachedGeometry>>,
     atlas: Mutex<GpuAtlas>,
@@ -892,8 +899,8 @@ impl WgpuBackend {
 
 impl WgpuBackend {
     /// Decodes and uploads an image once, then reuses the GPU texture.
-    fn cached_image(&self, image: &ImageAsset) -> Option<Arc<CachedImage>> {
-        let key = image as *const ImageAsset as usize;
+    fn cached_image(&self, image: &Arc<ImageAsset>) -> Option<Arc<CachedImage>> {
+        let key = Arc::as_ptr(image) as usize;
         if let Some(cached) = self
             .image_cache
             .lock()
@@ -959,6 +966,7 @@ impl WgpuBackend {
         );
         let view = texture.create_view(&wgpu_lib::TextureViewDescriptor::default());
         let cached = Arc::new(CachedImage {
+            _image: Arc::clone(image),
             _texture: texture,
             view,
         });
@@ -1162,7 +1170,7 @@ fn emit_text_instances(
     scale: f64,
     origin_px: (f64, f64),
     viewport: Viewport,
-    glyph_cache: &Mutex<HashMap<(usize, u16), Arc<Path>>>,
+    glyph_cache: &Mutex<HashMap<(usize, u16), CachedGlyph>>,
     atlas: &mut GpuAtlas,
     queue: &wgpu_lib::Queue,
     instances: &mut Vec<GlyphInstance>,
@@ -1211,8 +1219,8 @@ fn emit_text_instances(
             let mut cache = glyph_cache
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            if let Some(path) = cache.get(&key) {
-                Arc::clone(path)
+            if let Some(glyph) = cache.get(&key) {
+                Arc::clone(&glyph.path)
             } else {
                 let mut builder = GlyphPathBuilder::default();
                 if face
@@ -1223,7 +1231,13 @@ fn emit_text_instances(
                     continue;
                 }
                 let path = Arc::new(builder.path);
-                cache.insert(key, Arc::clone(&path));
+                cache.insert(
+                    key,
+                    CachedGlyph {
+                        _font: Arc::clone(&text.font),
+                        path: Arc::clone(&path),
+                    },
+                );
                 path
             }
         };
