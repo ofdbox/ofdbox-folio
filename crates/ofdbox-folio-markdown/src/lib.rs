@@ -24,9 +24,9 @@ use std::sync::Arc;
 
 use ofdbox_folio_ir::{
     Align, AssetId, Block, Border, BorderStyle, Cell, Column, ColumnWidth, Diagnostic,
-    DiagnosticCode, FlowDocument, FontFamily, ImageAsset, ImageBlock, Inline, InlineImage,
-    LineSpacing, Link, LinkTarget, Margins, Metadata, PageSetup, ParaStyle, Paragraph, Rgba, Row,
-    Severity, Table, TableBorders, TextRun, TextStyle, Twips, detect_image_format,
+    DiagnosticCode, FlowDocument, FontFamily, ImageAsset, ImageBlock, ImageFormat, Inline,
+    InlineImage, LineSpacing, Link, LinkTarget, Margins, Metadata, PageSetup, ParaStyle, Paragraph,
+    Rgba, Row, Severity, Table, TableBorders, TextRun, TextStyle, Twips, detect_image_format,
     image_dimensions,
 };
 
@@ -831,6 +831,266 @@ fn load_image(
     Some(document.resources.add_image(asset))
 }
 
+/// Write a Flow document as Markdown.
+///
+/// Inline emphasis, links, tables and images are preserved. Embedded images are
+/// written as data URIs, and notes are written as `[^id]` footnotes. Page layout,
+/// colors, headers and footers have no Markdown representation and are omitted.
+pub fn write_markdown(document: &FlowDocument) -> String {
+    let mut out = String::new();
+    for section in &document.sections {
+        for block in &section.blocks {
+            write_block(block, document, &mut out);
+        }
+    }
+    for note in &document.notes {
+        let text = note_text(&note.blocks, document);
+        if !text.is_empty() {
+            out.push_str(&format!("[^{}]: {}\n", note.id, text));
+        }
+    }
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+fn write_block(block: &Block, document: &FlowDocument, out: &mut String) {
+    match block {
+        Block::Paragraph(paragraph) => {
+            let text = paragraph_markdown(paragraph, document);
+            if text.trim().is_empty() {
+                return;
+            }
+            if !out.is_empty() && !out.ends_with("\n\n") {
+                out.push('\n');
+            }
+            out.push_str(text.trim_end());
+            out.push_str("\n\n");
+        }
+        Block::Table(table) => {
+            write_table(table, document, out);
+            out.push('\n');
+        }
+        Block::Image(image) => {
+            if let Some(url) = image_data_uri(document, image.image) {
+                let alt = image.alt.as_deref().unwrap_or("");
+                out.push_str(&format!("![{alt}]({url})\n\n"));
+            }
+        }
+        Block::Toc(_) => out.push_str("[TOC]\n\n"),
+        Block::PageBreak => out.push_str("---\n\n"),
+        Block::Floating(floating) => write_block(&floating.block, document, out),
+        _ => {}
+    }
+}
+
+fn paragraph_markdown(paragraph: &Paragraph, document: &FlowDocument) -> String {
+    let content = paragraph
+        .runs
+        .iter()
+        .map(|inline| inline_markdown(inline, document))
+        .collect::<String>();
+    if let Some(level) = paragraph.heading_level {
+        let title = paragraph.runs.iter().map(plain_inline).collect::<String>();
+        return format!("{} {}", "#".repeat(usize::from(level)), title.trim());
+    }
+    if content.trim().chars().all(|ch| ch == '─') {
+        return "---".to_owned();
+    }
+    if let Some(rest) = content.strip_prefix("▏ ") {
+        return format!("> {rest}");
+    }
+    if let Some(rest) = content
+        .strip_prefix("• ")
+        .or_else(|| content.strip_prefix("· "))
+    {
+        let indent = list_indent(paragraph.style.left_indent);
+        return format!("{indent}- {}", rest.trim());
+    }
+    let indent = list_indent(paragraph.style.left_indent);
+    if indent.is_empty() {
+        content
+    } else {
+        format!("{indent}{content}")
+    }
+}
+
+fn list_indent(left: Twips) -> String {
+    let millimetres = left.to_mm().max(0.0);
+    let level = (millimetres / 6.0).floor() as usize;
+    "  ".repeat(level)
+}
+
+fn write_table(table: &Table, document: &FlowDocument, out: &mut String) {
+    if table.rows.is_empty() || table.columns.is_empty() {
+        return;
+    }
+    let mut rows = table.rows.iter().map(|row| {
+        row.cells
+            .iter()
+            .map(|cell| cell_text(&cell.blocks, document).replace('|', "\\|"))
+            .collect::<Vec<_>>()
+    });
+    let Some(header) = rows.next() else {
+        return;
+    };
+    out.push('|');
+    for cell in &header {
+        out.push_str(&format!(" {cell} |"));
+    }
+    out.push('\n');
+    out.push('|');
+    for _ in &header {
+        out.push_str(" --- |");
+    }
+    out.push('\n');
+    for row in rows {
+        out.push('|');
+        for cell in &row {
+            out.push_str(&format!(" {cell} |"));
+        }
+        out.push('\n');
+    }
+}
+
+fn cell_text(blocks: &[Block], document: &FlowDocument) -> String {
+    let mut parts = Vec::new();
+    for block in blocks {
+        if let Block::Paragraph(paragraph) = block {
+            parts.push(
+                paragraph
+                    .runs
+                    .iter()
+                    .map(|inline| inline_markdown(inline, document))
+                    .collect::<String>(),
+            );
+        }
+    }
+    parts.join("<br>").replace('\n', "<br>")
+}
+
+fn note_text(blocks: &[Block], document: &FlowDocument) -> String {
+    cell_text(blocks, document).replace("<br>", " ")
+}
+
+fn inline_markdown(inline: &Inline, document: &FlowDocument) -> String {
+    match inline {
+        Inline::Text(run) => {
+            let text = escape_markdown(&run.text);
+            let code = is_code_font(&run.style);
+            let mut text = if code {
+                format!("`{}`", run.text.replace('`', "\\`"))
+            } else {
+                text
+            };
+            if run.style.bold && run.style.italic {
+                text = format!("***{text}***");
+            } else if run.style.bold {
+                text = format!("**{text}**");
+            } else if run.style.italic {
+                text = format!("*{text}*");
+            }
+            if run.style.strike {
+                text = format!("~~{text}~~");
+            }
+            if run.style.superscript {
+                text = format!("<sup>{text}</sup>");
+            } else if run.style.subscript {
+                text = format!("<sub>{text}</sub>");
+            }
+            text
+        }
+        Inline::Link(link) => {
+            let text = link
+                .runs
+                .iter()
+                .map(|inline| inline_markdown(inline, document))
+                .collect::<String>();
+            match &link.target {
+                LinkTarget::Uri(uri) => format!("[{text}]({uri})"),
+                LinkTarget::Anchor(anchor) => format!("[{text}](#{})", anchor.get()),
+                _ => text,
+            }
+        }
+        Inline::Image(image) => {
+            let alt = image.alt.as_deref().unwrap_or("");
+            match image_data_uri(document, image.image) {
+                Some(url) => format!("![{alt}]({url})"),
+                None => alt.to_owned(),
+            }
+        }
+        Inline::Note(note) => format!("[^{}]", note.id),
+        Inline::Field(field) => match field.kind {
+            ofdbox_folio_ir::FieldKind::PageNumber => "{{PAGE}}".to_owned(),
+            _ => String::new(),
+        },
+        _ => String::new(),
+    }
+}
+
+fn plain_inline(inline: &Inline) -> String {
+    match inline {
+        Inline::Text(run) => escape_markdown(&run.text),
+        Inline::Link(link) => link.runs.iter().map(plain_inline).collect(),
+        Inline::Image(image) => image.alt.clone().unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+fn is_code_font(style: &TextStyle) -> bool {
+    let name = style.family.name.to_ascii_lowercase();
+    name.contains("courier") || name.contains("mono") || name.contains("consol")
+}
+
+fn escape_markdown(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if matches!(ch, '\\' | '*' | '_' | '[' | ']' | '<' | '>' | '|') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+fn image_data_uri(document: &FlowDocument, id: AssetId) -> Option<String> {
+    let image = document.resources.image(id)?;
+    let mime = match image.format {
+        ImageFormat::Png => "image/png",
+        ImageFormat::Jpeg => "image/jpeg",
+        ImageFormat::Bmp => "image/bmp",
+        ImageFormat::Tiff => "image/tiff",
+        _ => "application/octet-stream",
+    };
+    Some(format!("data:{mime};base64,{}", base64(&image.encoded)))
+}
+
+fn base64(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        out.push(char::from(TABLE[usize::from(first >> 2)]));
+        out.push(char::from(
+            TABLE[usize::from((first & 0b11) << 4 | second >> 4)],
+        ));
+        out.push(if chunk.len() > 1 {
+            char::from(TABLE[usize::from((second & 0b1111) << 2 | third >> 6)])
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            char::from(TABLE[usize::from(third & 0b11_1111)])
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -909,5 +1169,31 @@ mod tests {
         let flow = parse("![alt](missing.png)");
         assert!(!flow.report.warnings().collect::<Vec<_>>().is_empty());
         assert!(flow.sections[0].blocks.is_empty());
+    }
+
+    #[test]
+    fn writes_markdown_from_flow() {
+        let flow = parse("# Title\n\nHello **bold** and [link](https://example.com).");
+        let markdown = write_markdown(&flow);
+        assert!(markdown.contains("# Title"), "{markdown}");
+        assert!(markdown.contains("**bold**"));
+        assert!(markdown.contains("[link](https://example.com)"));
+    }
+
+    #[test]
+    fn writes_embedded_image_as_data_uri() {
+        let mut flow = FlowDocument::new(Metadata::default());
+        let image = ImageAsset::new(
+            ImageFormat::Png,
+            Arc::from(&[0x89, b'P', b'N', b'G'][..]),
+            1,
+            1,
+        );
+        let id = flow.resources.add_image(image);
+        let mut block = ImageBlock::new(id);
+        block.alt = Some("preview".to_owned());
+        flow.push(Block::Image(block));
+        let markdown = write_markdown(&flow);
+        assert!(markdown.contains("![preview](data:image/png;base64,"));
     }
 }
