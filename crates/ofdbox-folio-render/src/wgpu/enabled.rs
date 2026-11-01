@@ -1125,7 +1125,8 @@ fn emit_text_instances(
     let factor = scale * text.font_size / f64::from(pixel_size);
     let x_axis = (world.a * factor, world.b * factor);
     let y_axis = (world.c * factor, world.d * factor);
-    let color = scaled_color(*color, opacity);
+    let fill_color = *color;
+    let color = scaled_color(fill_color, opacity);
     let font_key = Arc::as_ptr(&text.font) as usize;
     for glyph in &text.run.glyphs {
         let Ok(glyph_id) = u16::try_from(glyph.id) else {
@@ -1202,7 +1203,7 @@ fn emit_text_instances(
         {
             continue;
         }
-        instances.push(GlyphInstance {
+        let instance = GlyphInstance {
             origin: [origin_x as f32, origin_y as f32],
             x_axis: [x_advance.0 as f32, x_advance.1 as f32],
             y_axis: [y_advance.0 as f32, y_advance.1 as f32],
@@ -1210,7 +1211,39 @@ fn emit_text_instances(
             uv1: [packed.u1, packed.v1],
             _pad: [0.0; 2],
             color,
-        });
+        };
+        instances.push(instance);
+        // Layout synthesizes bold text with a thin same-color stroke. Stamp the
+        // glyph at a few offset positions to approximate that thickening.
+        if let Some(stroke) = &text.stroke
+            && let Paint::Color(stroke_color) = &stroke.paint
+            && *stroke_color == fill_color
+        {
+            let radius = stroke.style.width * scale * 0.5;
+            if radius > 0.05 {
+                const OFFSETS: [(f64, f64); 8] = [
+                    (1.0, 0.0),
+                    (-1.0, 0.0),
+                    (0.0, 1.0),
+                    (0.0, -1.0),
+                    (0.707, 0.707),
+                    (-0.707, 0.707),
+                    (0.707, -0.707),
+                    (-0.707, -0.707),
+                ];
+                let stroke_color = scaled_color(*stroke_color, opacity);
+                for (dx, dy) in OFFSETS {
+                    instances.push(GlyphInstance {
+                        origin: [
+                            (origin_x + dx * radius) as f32,
+                            (origin_y + dy * radius) as f32,
+                        ],
+                        color: stroke_color,
+                        ..instance
+                    });
+                }
+            }
+        }
     }
 }
 

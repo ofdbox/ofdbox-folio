@@ -44,8 +44,8 @@ reports the pixel difference.
 ## Known Limitations
 
 - Radial gradients and blend modes are not yet implemented in the GPU backend.
-- GPU text uses solid-color atlas glyphs; gradient text fills and synthetic text
-  strokes are still drawn by the CPU renderer only.
+- GPU text uses solid-color atlas glyphs; synthetic bold is approximated by
+  stamping offset glyphs, but gradient text fills are still CPU-only.
 - Paths are drawn before all images and text; images and text keep their relative
   scene order. Clip paths cull whole glyph/image quads by their bounding box
   instead of clipping each fragment.
