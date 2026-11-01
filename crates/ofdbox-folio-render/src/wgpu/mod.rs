@@ -10,6 +10,8 @@ mod atlas;
 mod disabled;
 #[cfg(any(feature = "wgpu27", feature = "wgpu30"))]
 mod enabled;
+#[cfg(any(feature = "wgpu27", feature = "wgpu30"))]
+mod text;
 
 #[cfg(not(any(feature = "wgpu27", feature = "wgpu30")))]
 pub use disabled::WgpuBackend;
