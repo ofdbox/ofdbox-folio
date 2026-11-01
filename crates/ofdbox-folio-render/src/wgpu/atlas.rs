@@ -58,7 +58,7 @@ pub(crate) struct GlyphPacker {
     next_x: u32,
     next_y: u32,
     row_height: u32,
-    placed: HashMap<(usize, u16, u32), AtlasGlyph>,
+    placed: HashMap<(usize, u16, u32, bool), AtlasGlyph>,
 }
 
 impl GlyphPacker {
@@ -74,8 +74,14 @@ impl GlyphPacker {
     }
 
     /// Look up an already packed glyph.
-    pub(crate) fn get(&self, font: usize, glyph: u16, pixel_size: u32) -> Option<AtlasGlyph> {
-        self.placed.get(&(font, glyph, pixel_size)).copied()
+    pub(crate) fn get(
+        &self,
+        font: usize,
+        glyph: u16,
+        pixel_size: u32,
+        bold: bool,
+    ) -> Option<AtlasGlyph> {
+        self.placed.get(&(font, glyph, pixel_size, bold)).copied()
     }
 
     /// Pack a new glyph and return its atlas rectangle.
@@ -84,6 +90,7 @@ impl GlyphPacker {
         font: usize,
         glyph: u16,
         pixel_size: u32,
+        bold: bool,
         bitmap: &GlyphBitmap,
     ) -> Option<AtlasGlyph> {
         let width = bitmap.width.max(1);
@@ -114,7 +121,7 @@ impl GlyphPacker {
             width: bitmap.width as f32,
             height: bitmap.height as f32,
         };
-        self.placed.insert((font, glyph, pixel_size), packed);
+        self.placed.insert((font, glyph, pixel_size, bold), packed);
         Some(packed)
     }
 }
@@ -202,6 +209,91 @@ pub(crate) fn rasterize_glyph(
     })
 }
 
+/// Rasterize a synthetic-bold glyph by dilating an already rasterized coverage
+/// bitmap. The glyph is upsampled 4x, dilated with a separable max filter and
+/// area-averaged back down.
+fn rasterize_glyph_bold(
+    path: &Path,
+    units_per_em: u16,
+    pixel_size: f64,
+    radius_px: f32,
+) -> Option<GlyphBitmap> {
+    let base = rasterize_glyph(path, units_per_em, pixel_size)?;
+    if !(radius_px.is_finite() && radius_px > 0.0) {
+        return Some(base);
+    }
+    const SCALE: u32 = 4;
+    let pad = radius_px.ceil().max(1.0) as u32;
+    let out_width = base.width + pad * 2;
+    let out_height = base.height + pad * 2;
+    let high_width = out_width * SCALE;
+    let high_height = out_height * SCALE;
+    let mut high = vec![0_u8; (high_width * high_height) as usize];
+    for y in 0..base.height {
+        for x in 0..base.width {
+            let value = base.coverage[(y * base.width + x) as usize];
+            for sy in 0..SCALE {
+                for sx in 0..SCALE {
+                    let hx = (x + pad) * SCALE + sx;
+                    let hy = (y + pad) * SCALE + sy;
+                    high[(hy * high_width + hx) as usize] = value;
+                }
+            }
+        }
+    }
+    let radius = (radius_px * SCALE as f32).round().max(1.0) as usize;
+    let dilated = dilate(&high, high_width as usize, high_height as usize, radius);
+    let mut coverage = vec![0_u8; (out_width * out_height) as usize];
+    for y in 0..out_height {
+        for x in 0..out_width {
+            let mut sum = 0_u32;
+            for sy in 0..SCALE {
+                for sx in 0..SCALE {
+                    let hx = x * SCALE + sx;
+                    let hy = y * SCALE + sy;
+                    sum += u32::from(dilated[(hy * high_width + hx) as usize]);
+                }
+            }
+            coverage[(y * out_width + x) as usize] = (sum / (SCALE * SCALE)) as u8;
+        }
+    }
+    Some(GlyphBitmap {
+        width: out_width,
+        height: out_height,
+        left: base.left - pad as f32,
+        top: base.top - pad as f32,
+        coverage,
+    })
+}
+
+fn dilate(source: &[u8], width: usize, height: usize, radius: usize) -> Vec<u8> {
+    let mut horizontal = vec![0_u8; source.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let mut value = 0_u8;
+            let start = x.saturating_sub(radius);
+            let end = (x + radius + 1).min(width);
+            for sample in start..end {
+                value = value.max(source[y * width + sample]);
+            }
+            horizontal[y * width + x] = value;
+        }
+    }
+    let mut vertical = vec![0_u8; source.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let mut value = 0_u8;
+            let start = y.saturating_sub(radius);
+            let end = (y + radius + 1).min(height);
+            for sample in start..end {
+                value = value.max(horizontal[sample * width + x]);
+            }
+            vertical[y * width + x] = value;
+        }
+    }
+    vertical
+}
+
 fn inside_edges(edges: &[[f32; 4]], x: f64, y: f64) -> bool {
     let mut winding = 0_i32;
     for edge in edges {
@@ -279,20 +371,27 @@ impl GpuAtlas {
     }
 
     /// Rasterize, pack and upload a glyph if it is not already cached.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn glyph(
         &mut self,
         queue: &wgpu_lib::Queue,
         font: usize,
         glyph: u16,
         pixel_size: u32,
+        bold: bool,
+        radius_px: f32,
         path: &Path,
         units_per_em: u16,
     ) -> Option<AtlasGlyph> {
-        if let Some(packed) = self.packer.get(font, glyph, pixel_size) {
+        if let Some(packed) = self.packer.get(font, glyph, pixel_size, bold) {
             return Some(packed);
         }
-        let bitmap = rasterize_glyph(path, units_per_em, f64::from(pixel_size))?;
-        let packed = self.packer.insert(font, glyph, pixel_size, &bitmap)?;
+        let bitmap = if bold {
+            rasterize_glyph_bold(path, units_per_em, f64::from(pixel_size), radius_px)?
+        } else {
+            rasterize_glyph(path, units_per_em, f64::from(pixel_size))?
+        };
+        let packed = self.packer.insert(font, glyph, pixel_size, bold, &bitmap)?;
         let width = bitmap.width.max(1);
         let height = bitmap.height.max(1);
         let padded = wgpu_lib::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
@@ -420,9 +519,9 @@ mod tests {
             coverage: vec![255; 16],
         };
         let mut packer = GlyphPacker::new(16);
-        let first = packer.insert(1, 2, 3, &bitmap).expect("first");
-        let second = packer.insert(4, 5, 6, &bitmap).expect("second");
+        let first = packer.insert(1, 2, 3, false, &bitmap).expect("first");
+        let second = packer.insert(4, 5, 6, false, &bitmap).expect("second");
         assert_ne!((first.u0, first.v0), (second.u0, second.v0));
-        assert_eq!(packer.get(1, 2, 3), Some(first));
+        assert_eq!(packer.get(1, 2, 3, false), Some(first));
     }
 }

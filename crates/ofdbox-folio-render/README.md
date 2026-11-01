@@ -47,7 +47,7 @@ reports the pixel difference.
 
 - Radial gradients and blend modes are not yet implemented in the GPU backend.
 - GPU text supports solid, linear-gradient and radial-gradient fills; synthetic
-  bold is approximated by stamping offset glyphs.
+  bold is rendered by dilating the glyph coverage bitmap.
 - Text and image quads are clipped per fragment against the clip path edges; a
   nested clip uses the innermost clip path.
 - Use the CPU renderer when you need the full feature set.

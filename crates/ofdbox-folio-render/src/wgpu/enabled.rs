@@ -1586,8 +1586,22 @@ fn emit_text_instances(
                 path
             }
         };
-        let Some(packed) = atlas.glyph(queue, font_key, glyph_id, pixel_size, &glyph_path, units)
-        else {
+        let (bold, bold_radius) = match text.stroke.as_ref() {
+            Some(stroke) if matches!(&stroke.paint, Paint::Color(color) if *color == fill_color) => {
+                (true, (stroke.style.width * scale * 0.5) as f32)
+            }
+            _ => (false, 0.0),
+        };
+        let Some(packed) = atlas.glyph(
+            queue,
+            font_key,
+            glyph_id,
+            pixel_size,
+            bold,
+            bold_radius,
+            &glyph_path,
+            units,
+        ) else {
             continue;
         };
         if packed.width <= 0.0 || packed.height <= 0.0 {
@@ -1656,37 +1670,6 @@ fn emit_text_instances(
             _clip_pad: 0,
         };
         instances.push(instance);
-        // Layout synthesizes bold text with a thin same-color stroke. Stamp the
-        // glyph at a few offset positions to approximate that thickening.
-        if let Some(stroke) = &text.stroke
-            && let Paint::Color(stroke_color) = &stroke.paint
-            && *stroke_color == fill_color
-        {
-            let radius = stroke.style.width * scale * 0.5;
-            if radius > 0.05 {
-                const OFFSETS: [(f64, f64); 8] = [
-                    (1.0, 0.0),
-                    (-1.0, 0.0),
-                    (0.0, 1.0),
-                    (0.0, -1.0),
-                    (0.707, 0.707),
-                    (-0.707, 0.707),
-                    (0.707, -0.707),
-                    (-0.707, -0.707),
-                ];
-                let stroke_color = scaled_color(*stroke_color, opacity);
-                for (dx, dy) in OFFSETS {
-                    instances.push(GlyphInstance {
-                        origin: [
-                            (origin_x + dx * radius) as f32,
-                            (origin_y + dy * radius) as f32,
-                        ],
-                        color: stroke_color,
-                        ..instance
-                    });
-                }
-            }
-        }
     }
 }
 
@@ -2779,6 +2762,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn synthetic_bold_thickens_glyphs() {
+        let Ok(font_data) = std::fs::read("C:/Windows/Fonts/arial.ttf") else {
+            return;
+        };
+        let Ok(context) = WgpuContext::new_blocking() else {
+            return;
+        };
+        let font = std::sync::Arc::new(ofdbox_folio_ir::FontAsset::new(
+            std::sync::Arc::from(font_data.into_boxed_slice()),
+            0,
+        ));
+        let backend = WgpuBackend::new(context).expect("backend");
+        let count = |element: Element| {
+            let mut root = Group::default();
+            root.children.push(element);
+            let scene = Scene {
+                size: Size::new(30.0, 30.0),
+                root,
+                diagnostics: Vec::new(),
+            };
+            let target = WgpuTarget::new(backend.context(), scene.size, 96.0).expect("target");
+            backend.render_to_target(&scene, &target).expect("render");
+            target
+                .read_rgba(backend.context())
+                .expect("read")
+                .chunks(4)
+                .filter(|pixel| pixel[0] < 128)
+                .count()
+        };
+        let regular = count(text_element(&font, 'A', 5.0, 20.0));
+        let mut bold = text_element(&font, 'A', 5.0, 20.0);
+        if let Element::Text(text) = &mut bold {
+            text.stroke = Some(ofdbox_folio_ir::StrokePaint {
+                paint: Paint::Color(Rgba::from_rgb(0, 0, 0)),
+                style: ofdbox_folio_ir::StrokeStyle {
+                    width: 0.4,
+                    ..Default::default()
+                },
+            });
+        }
+        let thicker = count(bold);
+        assert!(
+            thicker > regular,
+            "synthetic bold must cover more pixels: {thicker} vs {regular}"
+        );
     }
 
     #[test]
