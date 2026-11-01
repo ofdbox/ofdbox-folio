@@ -722,7 +722,7 @@ impl WgpuBackend {
                         usage: wgpu_lib::BufferUsages::STORAGE,
                     });
             if !instances.is_empty() {
-                let mut instance_data = Vec::with_capacity(instances.len() * 128);
+                let mut instance_data = Vec::with_capacity(instances.len() * 144);
                 for instance in &instances {
                     instance.write_bytes(&mut instance_data);
                 }
@@ -1554,6 +1554,24 @@ fn emit_text_instances(
     let y_axis = (world.c * factor, world.d * factor);
     let color = scaled_color(fill_color, opacity);
     let end_color = scaled_color(end_fill_color, opacity);
+    let gradient_ellipse = if let Some(Paint::RadialGradient(gradient)) = text.fill.as_ref() {
+        if gradient.eccentricity > 1e-6 {
+            let ratio = (1.0 - gradient.eccentricity.clamp(0.0, 0.999).powi(2))
+                .max(1e-4)
+                .sqrt();
+            let (sin, cos) = gradient.angle.to_radians().sin_cos();
+            [
+                cos as f32,
+                sin as f32,
+                (-sin * ratio) as f32,
+                (cos * ratio) as f32,
+            ]
+        } else {
+            [1.0, 0.0, 0.0, 1.0]
+        }
+    } else {
+        [1.0, 0.0, 0.0, 1.0]
+    };
     let font_key = Arc::as_ptr(&text.font) as usize;
     for glyph in &text.run.glyphs {
         let Ok(glyph_id) = u16::try_from(glyph.id) else {
@@ -1668,6 +1686,7 @@ fn emit_text_instances(
             clip_count: 0,
             clip_rule: 0,
             _clip_pad: 0,
+            ellipse: gradient_ellipse,
         };
         instances.push(instance);
     }

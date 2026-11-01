@@ -50,6 +50,8 @@ reports the pixel difference.
   bold is rendered by dilating the glyph coverage bitmap.
 - Text and image quads are clipped per fragment against the clip path edges; a
   nested clip uses the innermost clip path.
+- Radial text gradients support one center plus optional ellipse squash; the
+  two-point conical form is not implemented.
 - Use the CPU renderer when you need the full feature set.
 - The GPU backend exists only with the `wgpu` feature; the default build exposes a placeholder `WgpuBackend` that reports `Unsupported`.
 

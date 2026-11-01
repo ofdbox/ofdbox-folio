@@ -144,6 +144,7 @@ struct Instance {
     clip_count: u32,
     clip_rule: u32,
     _clip_pad: u32,
+    ellipse: vec4f,
 };
 struct Params { size: vec2f, _pad: vec2f };
 struct VOut {
@@ -157,6 +158,7 @@ struct VOut {
     @location(6) @interpolate(flat) clip_start: u32,
     @location(7) @interpolate(flat) clip_count: u32,
     @location(8) @interpolate(flat) clip_rule: u32,
+    @location(9) ellipse: vec4f,
 };
 
 @group(0) @binding(0) var<storage, read> instances: array<Instance>;
@@ -204,6 +206,7 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
     out.clip_start = instance.clip_start;
     out.clip_count = instance.clip_count;
     out.clip_rule = instance.clip_rule;
+    out.ellipse = instance.ellipse;
     return out;
 }
 
@@ -211,7 +214,12 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
 fn fs(in: VOut) -> @location(0) vec4f {
     var t = 0.0;
     if (in.mode > 1.5) {
-        t = clamp(length(in.page - in.gradient.xy) / max(in.gradient.z, 0.0001), 0.0, 1.0);
+        let d = in.page - in.gradient.xy;
+        let local = vec2f(
+            in.ellipse.x * d.x + in.ellipse.z * d.y,
+            in.ellipse.y * d.x + in.ellipse.w * d.y,
+        );
+        t = clamp(length(local) / max(in.gradient.z, 0.0001), 0.0, 1.0);
     } else if (in.mode > 0.5) {
         if (in.clip_count > 0u && !inside_range(in.page, in.clip_start, in.clip_count, in.clip_rule)) {
         discard;
