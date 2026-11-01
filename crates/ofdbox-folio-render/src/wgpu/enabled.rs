@@ -1,7 +1,8 @@
 //! wgpu compute backend; W0 supports solid-color fill paths.
 
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 #[cfg(all(feature = "wgpu30", not(feature = "wgpu27")))]
 use wgpu as wgpu_lib;
@@ -29,6 +30,8 @@ struct DrawPath {
     clip_rule: u32,
     end_color: [f32; 4],
     gradient: [f32; 4],
+    /// Pixel-space bounds `(min_x, min_y, max_x, max_y)`.
+    bbox: [f32; 4],
 }
 
 /// A wgpu device context.
@@ -272,6 +275,8 @@ pub struct WgpuBackend {
     context: Arc<WgpuContext>,
     pipeline: wgpu_lib::ComputePipeline,
     layout: wgpu_lib::BindGroupLayout,
+    /// Font outlines keyed by `(font asset pointer, glyph id)`.
+    glyph_cache: Mutex<HashMap<(usize, u16), Arc<Path>>>,
 }
 
 impl WgpuBackend {
@@ -342,6 +347,7 @@ impl WgpuBackend {
             context,
             pipeline,
             layout,
+            glyph_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -372,7 +378,14 @@ impl WgpuBackend {
         target: &WgpuTarget,
         origin_px: (f64, f64),
     ) -> Result<(), RenderError> {
-        let (edges, paths) = collect_paths(scene, target.dpi, origin_px);
+        let (edges, paths) = collect_paths(
+            scene,
+            target.dpi,
+            origin_px,
+            target.width,
+            target.height,
+            &self.glyph_cache,
+        );
         if paths.is_empty() {
             return Ok(());
         }
@@ -382,7 +395,7 @@ impl WgpuBackend {
                 edge_data.extend_from_slice(&value.to_ne_bytes());
             }
         }
-        let mut path_data = Vec::with_capacity(paths.len() * 80);
+        let mut path_data = Vec::with_capacity(paths.len() * 96);
         for path in &paths {
             for value in [path.start, path.count, path.rule, path.kind] {
                 path_data.extend_from_slice(&value.to_ne_bytes());
@@ -398,6 +411,9 @@ impl WgpuBackend {
                 path_data.extend_from_slice(&value.to_ne_bytes());
             }
             for value in path.gradient {
+                path_data.extend_from_slice(&value.to_ne_bytes());
+            }
+            for value in path.bbox {
                 path_data.extend_from_slice(&value.to_ne_bytes());
             }
         }
@@ -519,10 +535,23 @@ fn storage_entry(binding: u32, read_only: bool) -> wgpu_lib::BindGroupLayoutEntr
     }
 }
 
-fn collect_paths(scene: &Scene, dpi: f64, origin_px: (f64, f64)) -> (Vec<[f32; 4]>, Vec<DrawPath>) {
+fn collect_paths(
+    scene: &Scene,
+    dpi: f64,
+    origin_px: (f64, f64),
+    width: u32,
+    height: u32,
+    glyph_cache: &Mutex<HashMap<(usize, u16), Arc<Path>>>,
+) -> (Vec<[f32; 4]>, Vec<DrawPath>) {
     let scale = dpi / 25.4;
     let mut edges = Vec::new();
     let mut paths = Vec::new();
+    let viewport = Viewport {
+        min_x: -1.0,
+        min_y: -1.0,
+        max_x: width as f32 + 1.0,
+        max_y: height as f32 + 1.0,
+    };
     collect_group(
         &scene.root,
         GroupState {
@@ -532,10 +561,27 @@ fn collect_paths(scene: &Scene, dpi: f64, origin_px: (f64, f64)) -> (Vec<[f32; 4
         },
         scale,
         origin_px,
+        viewport,
+        glyph_cache,
         &mut edges,
         &mut paths,
     );
     (edges, paths)
+}
+
+/// Visible pixel rectangle with a one-pixel bleed for antialiasing.
+#[derive(Clone, Copy)]
+struct Viewport {
+    min_x: f32,
+    min_y: f32,
+    max_x: f32,
+    max_y: f32,
+}
+
+impl Viewport {
+    fn intersects(&self, bbox: [f32; 4]) -> bool {
+        bbox[0] < self.max_x && bbox[2] > self.min_x && bbox[1] < self.max_y && bbox[3] > self.min_y
+    }
 }
 
 /// Shared transform/clip state while flattening a group tree.
@@ -546,20 +592,34 @@ struct GroupState {
     opacity: f32,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_group(
     group: &Group,
     state: GroupState,
     scale: f64,
     origin_px: (f64, f64),
+    viewport: Viewport,
+    glyph_cache: &Mutex<HashMap<(usize, u16), Arc<Path>>>,
     edges: &mut Vec<[f32; 4]>,
     paths: &mut Vec<DrawPath>,
 ) {
+    if state.opacity <= 0.0 {
+        return;
+    }
     let transform = group.transform.then(state.parent);
     let opacity = state.opacity * group.opacity.clamp(0.0, 1.0);
+    if opacity <= 0.0 {
+        return;
+    }
     let clip = if let Some(clip) = &group.clip {
         let start = u32::try_from(edges.len()).unwrap_or(u32::MAX);
         flatten_path(&clip.path, transform, scale, origin_px, edges);
         let count = u32::try_from(edges.len()).unwrap_or(u32::MAX) - start;
+        if count == 0
+            || !viewport.intersects(edge_bounds(&edges[start as usize..]).unwrap_or([0.0; 4]))
+        {
+            return;
+        }
         Some((start, count, u32::from(clip.rule == FillRule::EvenOdd)))
     } else {
         state.clip
@@ -575,6 +635,8 @@ fn collect_group(
                 },
                 scale,
                 origin_px,
+                viewport,
+                glyph_cache,
                 edges,
                 paths,
             ),
@@ -585,7 +647,12 @@ fn collect_group(
                 if count == 0 {
                     continue;
                 }
-                if let Some(fill) = &path.fill {
+                let Some(bounds) = edge_bounds(&edges[start as usize..]) else {
+                    continue;
+                };
+                if let Some(fill) = &path.fill
+                    && viewport.intersects(bounds)
+                {
                     let (kind, color, end_color, gradient) = match fill {
                         Paint::Color(color) => (
                             0,
@@ -635,23 +702,30 @@ fn collect_group(
                         clip_rule: clip.map_or(0, |value| value.2),
                         end_color,
                         gradient,
+                        bbox: bounds,
                     });
                 }
                 if let Some(stroke) = &path.stroke
                     && let Paint::Color(color) = &stroke.paint
                 {
+                    let width = (stroke.style.width * scale) as f32;
+                    let stroke_bounds = expand_bounds(bounds, width * 0.5);
+                    if !viewport.intersects(stroke_bounds) {
+                        continue;
+                    }
                     paths.push(DrawPath {
                         start,
                         count,
                         rule: 0,
                         kind: 1,
                         color: scaled_color(*color, opacity),
-                        width: (stroke.style.width * scale) as f32,
+                        width,
                         clip_start: clip.map_or(0, |value| value.0),
                         clip_count: clip.map_or(0, |value| value.1),
                         clip_rule: clip.map_or(0, |value| value.2),
                         end_color: scaled_color(*color, opacity),
                         gradient: [0.0; 4],
+                        bbox: stroke_bounds,
                     });
                 }
             }
@@ -672,22 +746,41 @@ fn collect_group(
                     let Ok(glyph_id) = u16::try_from(glyph.id) else {
                         continue;
                     };
-                    let mut builder = GlyphPathBuilder::default();
-                    if face
-                        .outline_glyph(ttf_parser::GlyphId(glyph_id), &mut builder)
-                        .is_none()
-                        || builder.path.is_empty()
-                    {
-                        continue;
-                    }
+                    let key = (Arc::as_ptr(&text.font) as usize, glyph_id);
+                    let glyph_path = {
+                        let mut cache = glyph_cache
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        if let Some(path) = cache.get(&key) {
+                            Arc::clone(path)
+                        } else {
+                            let mut builder = GlyphPathBuilder::default();
+                            if face
+                                .outline_glyph(ttf_parser::GlyphId(glyph_id), &mut builder)
+                                .is_none()
+                                || builder.path.is_empty()
+                            {
+                                continue;
+                            }
+                            let path = Arc::new(builder.path);
+                            cache.insert(key, Arc::clone(&path));
+                            path
+                        }
+                    };
                     let glyph_transform = Matrix::scale(glyph_scale, -glyph_scale)
                         .then(Matrix::translate(glyph.x, glyph.y))
                         .then(text.transform)
                         .then(transform);
                     let start = u32::try_from(edges.len()).unwrap_or(u32::MAX);
-                    flatten_path(&builder.path, glyph_transform, scale, origin_px, edges);
+                    flatten_path(&glyph_path, glyph_transform, scale, origin_px, edges);
                     let count = u32::try_from(edges.len()).unwrap_or(u32::MAX) - start;
                     if count == 0 {
+                        continue;
+                    }
+                    let Some(bounds) = edge_bounds(&edges[start as usize..]) else {
+                        continue;
+                    };
+                    if !viewport.intersects(bounds) {
                         continue;
                     }
                     paths.push(DrawPath {
@@ -702,6 +795,7 @@ fn collect_group(
                         clip_rule: clip.map_or(0, |value| value.2),
                         end_color: scaled_color(*color, opacity),
                         gradient: [0.0; 4],
+                        bbox: bounds,
                     });
                 }
             }
@@ -709,6 +803,35 @@ fn collect_group(
             _ => {}
         }
     }
+}
+
+fn edge_bounds(edges: &[[f32; 4]]) -> Option<[f32; 4]> {
+    let mut bounds = [
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    ];
+    for edge in edges {
+        for x in [edge[0], edge[2]] {
+            bounds[0] = bounds[0].min(x);
+            bounds[2] = bounds[2].max(x);
+        }
+        for y in [edge[1], edge[3]] {
+            bounds[1] = bounds[1].min(y);
+            bounds[3] = bounds[3].max(y);
+        }
+    }
+    bounds[0].is_finite().then_some(bounds)
+}
+
+fn expand_bounds(bounds: [f32; 4], padding: f32) -> [f32; 4] {
+    [
+        bounds[0] - padding,
+        bounds[1] - padding,
+        bounds[2] + padding,
+        bounds[3] + padding,
+    ]
 }
 
 fn color_float(color: Rgba) -> [f32; 4] {
@@ -840,7 +963,7 @@ impl ttf_parser::OutlineBuilder for GlyphPathBuilder {
 
 const SHADER: &str = r#"
 struct Edge { a: vec2f, b: vec2f };
-struct PathInfo { start: u32, count: u32, rule: u32, kind: u32, color: vec4f, width: f32, clip_start: u32, clip_count: u32, clip_rule: u32, end_color: vec4f, gradient: vec4f };
+struct PathInfo { start: u32, count: u32, rule: u32, kind: u32, color: vec4f, width: f32, clip_start: u32, clip_count: u32, clip_rule: u32, end_color: vec4f, gradient: vec4f, bbox: vec4f };
 struct Params { width: u32, height: u32, count: u32, scale: f32 };
 
 @group(0) @binding(0) var<storage, read> edges: array<Edge>;
@@ -905,6 +1028,10 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     var result = vec4f(1.0, 1.0, 1.0, 1.0);
     for (var pi = 0u; pi < params.count; pi = pi + 1u) {
         let info = paths[pi];
+        let pixel = vec2f(f32(id.x) + 0.5, f32(id.y) + 0.5);
+        if (pixel.x < info.bbox.x - 1.0 || pixel.x > info.bbox.z + 1.0 || pixel.y < info.bbox.y - 1.0 || pixel.y > info.bbox.w + 1.0) {
+            continue;
+        }
         var coverage = 0.0;
         if (info.kind == 0u) {
             let offsets = array<vec2f, 4>(vec2f(0.25, 0.25), vec2f(0.75, 0.25), vec2f(0.25, 0.75), vec2f(0.75, 0.75));
@@ -930,10 +1057,44 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
 #[cfg(test)]
 mod tests {
-    use super::{WgpuBackend, WgpuContext, WgpuTarget};
+    use super::{WgpuBackend, WgpuContext, WgpuTarget, collect_paths};
     use ofdbox_folio_ir::{
         Element, FillRule, Group, Matrix, Paint, Path, PathElement, Point, Rgba, Scene, Size,
     };
+
+    fn rectangle(x: f64, y: f64) -> PathElement {
+        let mut path = Path::new();
+        path.move_to(Point::new(x, y));
+        path.line_to(Point::new(x + 10.0, y));
+        path.line_to(Point::new(x + 10.0, y + 10.0));
+        path.line_to(Point::new(x, y + 10.0));
+        path.close();
+        PathElement {
+            path: std::sync::Arc::new(path),
+            transform: Matrix::IDENTITY,
+            fill: Some(Paint::Color(Rgba::from_rgb(255, 0, 0))),
+            stroke: None,
+            rule: FillRule::NonZero,
+        }
+    }
+
+    #[test]
+    fn culls_paths_outside_the_tile() {
+        let scene = Scene {
+            size: Size::new(120.0, 40.0),
+            root: Group {
+                children: vec![
+                    Element::Path(rectangle(0.0, 0.0)),
+                    Element::Path(rectangle(100.0, 0.0)),
+                ],
+                ..Group::default()
+            },
+            diagnostics: Vec::new(),
+        };
+        let cache = std::sync::Mutex::new(std::collections::HashMap::new());
+        let (_, paths) = collect_paths(&scene, 96.0, (0.0, 0.0), 100, 100, &cache);
+        assert_eq!(paths.len(), 1, "the right-hand path is outside the tile");
+    }
 
     #[test]
     fn renders_solid_rectangle() {
