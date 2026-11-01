@@ -56,7 +56,7 @@ fn tabbed(left: &str, right: &str, stop: TabStop) -> Paragraph {
     paragraph
 }
 
-/// The characters and positions in the page's text layer.
+/// The runs and their left positions in the page's text layer.
 fn chars(page: &ofdbox_folio_ir::Page) -> Vec<(String, f64)> {
     page.text
         .items
@@ -65,14 +65,30 @@ fn chars(page: &ofdbox_folio_ir::Page) -> Vec<(String, f64)> {
         .collect()
 }
 
-/// Right edge of a character (its first occurrence).
+/// Right edge of the run containing `needle` (its first occurrence).
 fn right_edge(page: &ofdbox_folio_ir::Page, needle: &str) -> f64 {
     page.text
         .items
         .iter()
-        .find(|item| item.run.text == needle)
+        .find(|item| item.run.text.contains(needle))
         .map(|item| item.bbox.right())
         .unwrap_or_else(|| panic!("did not find {needle}"))
+}
+
+/// Page-space x of the first glyph for `needle` inside a text run.
+fn glyph_x(page: &ofdbox_folio_ir::Page, needle: &str) -> f64 {
+    for item in &page.text.items {
+        if let Some(byte) = item.run.text.find(needle) {
+            let index = item.run.text[..byte].chars().count();
+            if let Some(glyph) = item.run.glyphs.get(index) {
+                return item
+                    .transform
+                    .transform_point(ofdbox_folio_ir::Point::new(glyph.x, glyph.y))
+                    .x;
+            }
+        }
+    }
+    panic!("did not find glyph {needle}");
 }
 
 const MARGIN: f64 = 25.4;
@@ -147,13 +163,7 @@ fn centre_and_decimal_tabs_align_as_expected() {
     let fixed = layout(&flow, &mut fonts).expect("layout");
     let page = &fixed.pages[0];
     // The decimal point "." should land on the tab stop.
-    let dot = page
-        .text
-        .items
-        .iter()
-        .find(|item| item.run.text == ".")
-        .map(|item| item.bbox.x)
-        .expect("decimal point");
+    let dot = glyph_x(page, ".");
     assert!(
         (dot - (MARGIN + 60.0)).abs() < 0.8,
         "decimal point at {dot}, expected {}",
@@ -170,13 +180,7 @@ fn centre_and_decimal_tabs_align_as_expected() {
     let fixed = layout(&flow, &mut fonts).expect("layout");
     let page = &fixed.pages[0];
     let middle_right = right_edge(page, "D");
-    let middle_left = page
-        .text
-        .items
-        .iter()
-        .find(|item| item.run.text == "M")
-        .map(|item| item.bbox.x)
-        .expect("M");
+    let middle_left = glyph_x(page, "M");
     let centre = (middle_left + middle_right) / 2.0;
     assert!(
         (centre - (MARGIN + 90.0)).abs() < 0.8,

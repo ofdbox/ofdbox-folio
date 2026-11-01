@@ -320,3 +320,17 @@ fn inherits_named_paragraph_style_through_based_on() {
         expected
     );
 }
+
+#[test]
+fn same_style_text_forms_one_run() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = doc();
+    flow.push(Block::Paragraph(paragraph("Hello")));
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let items = &fixed.pages[0].text.items;
+    assert_eq!(items.len(), 1, "same-style text should be one run");
+    assert_eq!(items[0].run.text, "Hello");
+    assert_eq!(items[0].run.glyphs.len(), 5);
+}

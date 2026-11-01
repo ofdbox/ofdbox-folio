@@ -1516,10 +1516,14 @@ impl<'a> Engine<'a> {
 
         let line_start_item = self.page.items.len() as u32;
         let mut positions = Vec::with_capacity(line.len());
+        let mut pending: Vec<(char, u32, f64, f64)> = Vec::new();
+        let mut pending_style: Option<(usize, TextStyle, Arc<FontAsset>)> = None;
+        let mut pending_origin = 0.0_f64;
         for (offset, index) in (line.start..line.end).enumerate() {
             positions.push(x);
             let piece = pieces[index];
             if piece.is_tab() {
+                self.flush_pending_text(&mut pending_style, &mut pending, pending_origin, baseline);
                 // A tab pushes x to the next tab stop and draws a leader when
                 // needed.
                 x = self.place_tab(style, pieces, line, index, x, baseline);
@@ -1527,14 +1531,36 @@ impl<'a> Engine<'a> {
             }
             let advance = piece.width + extra[offset];
             if let Some(object) = piece.object {
+                self.flush_pending_text(&mut pending_style, &mut pending, pending_origin, baseline);
                 if let Some(image) = images.get(object) {
                     self.place_image(image, x, baseline, piece.width);
                 }
             } else {
-                self.place_text_piece(piece, x, baseline);
+                let Some((piece_style, font, glyph)) = self.resolve_text_piece(piece) else {
+                    continue;
+                };
+                let same_run = pending_style
+                    .as_ref()
+                    .is_some_and(|(style_index, _, run_font)| {
+                        *style_index == piece.style && Arc::ptr_eq(run_font, &font)
+                    });
+                if pending_style.is_some() && !same_run {
+                    self.flush_pending_text(
+                        &mut pending_style,
+                        &mut pending,
+                        pending_origin,
+                        baseline,
+                    );
+                }
+                if pending_style.is_none() {
+                    pending_origin = x;
+                    pending_style = Some((piece.style, piece_style, font));
+                }
+                pending.push((piece.ch, glyph, x, piece.width));
             }
             x += advance;
         }
+        self.flush_pending_text(&mut pending_style, &mut pending, pending_origin, baseline);
         let line_end_item = self.page.items.len() as u32;
         // Footnote references on this line must reserve page-bottom space on this
         // page.
@@ -1738,10 +1764,8 @@ impl<'a> Engine<'a> {
         }));
     }
 
-    pub(crate) fn place_text_piece(&mut self, piece: Piece, x: f64, baseline: f64) {
-        let Some(style) = self.styles.get(piece.style).cloned() else {
-            return;
-        };
+    fn resolve_text_piece(&mut self, piece: Piece) -> Option<(TextStyle, Arc<FontAsset>, u32)> {
+        let style = self.styles.get(piece.style).cloned()?;
         let key = FontKey::new(&style.family.name, style.bold, style.italic);
         // Switch to the fallback font when the primary font lacks this glyph:
         // setting CJK text in an English style is very common in mixed
@@ -1761,27 +1785,47 @@ impl<'a> Engine<'a> {
             self.fallback_asset()
         } else {
             self.font_asset(&key)
-        };
-        let Some(font) = asset else {
+        }?;
+        Some((style, asset, glyph))
+    }
+
+    /// Flush a pending group of same-style pieces into one text run.
+    fn flush_pending_text(
+        &mut self,
+        pending_style: &mut Option<(usize, TextStyle, Arc<FontAsset>)>,
+        pending: &mut Vec<(char, u32, f64, f64)>,
+        origin_x: f64,
+        baseline: f64,
+    ) {
+        let Some((_, style, font)) = pending_style.take() else {
+            pending.clear();
             return;
         };
-        let size = style.size.to_mm();
-        let run = Arc::new(ofdbox_folio_ir::GlyphRun::new(
-            piece.ch.to_string(),
-            vec![ofdbox_folio_ir::Glyph {
+        if pending.is_empty() {
+            return;
+        }
+        let mut text = String::with_capacity(pending.len());
+        let mut glyphs = Vec::with_capacity(pending.len());
+        let mut clusters = Vec::with_capacity(pending.len());
+        for (index, (ch, glyph, x, advance)) in pending.drain(..).enumerate() {
+            text.push(ch);
+            let index = index as u32;
+            glyphs.push(ofdbox_folio_ir::Glyph {
                 id: glyph,
-                x: 0.0,
+                x: x - origin_x,
                 y: 0.0,
-                advance: piece.width,
-            }],
-            vec![ofdbox_folio_ir::Cluster {
-                text_start: 0,
-                text_end: 1,
-                glyph_start: 0,
-                glyph_end: 1,
-            }],
-        ));
-        let transform = Matrix::translate(x, baseline);
+                advance,
+            });
+            clusters.push(ofdbox_folio_ir::Cluster {
+                text_start: index,
+                text_end: index + 1,
+                glyph_start: index,
+                glyph_end: index + 1,
+            });
+        }
+        let run = Arc::new(ofdbox_folio_ir::GlyphRun::new(text, glyphs, clusters));
+        let size = style.size.to_mm();
+        let transform = Matrix::translate(origin_x, baseline);
         let element = TextElement {
             font: Arc::clone(&font),
             font_size: size,

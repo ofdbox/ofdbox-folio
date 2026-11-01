@@ -234,8 +234,8 @@ An empty paragraph still occupies one line. When it has no runs, layout uses the
 
 | Flow concept | Fixed IR target |
 | --- | --- |
-| Paragraph line | `Element::Text(TextElement)` per glyph; each element carries a one-glyph `GlyphRun` (merging into runs is a later optimization) |
-| Text layer | one `TextItem` per glyph, plus `TextLine` (items range + bbox + baseline) |
+| Paragraph line | one `Element::Text(TextElement)` per contiguous run with the same style and resolved font; its `GlyphRun` contains the glyphs of the run |
+| Text layer | one `TextItem` per run, plus `TextLine` (items range + bbox + baseline) |
 | Inline/block image | `Element::Image(ImageElement)`, with `transform` as a millimeter scale |
 | Pagination | one `Page` per page, with `PageInfo` from the page setup |
 | Page break | ends the current page and starts a new one |

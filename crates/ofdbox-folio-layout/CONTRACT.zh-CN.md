@@ -203,8 +203,8 @@
 
 | Flow 概念 | Fixed IR 落点 |
 | --- | --- |
-| 段落行 | `Element::Text(TextElement)` 每个字形一个；每个元素带一个单字形 `GlyphRun`（合并成 run 是后续优化） |
-| 文本层 | 每个字形一个 `TextItem`，另有 `TextLine`（items 范围 + bbox + baseline） |
+| 段落行 | 每个连续且样式、解析字体都相同的 run 一个 `Element::Text(TextElement)`；其 `GlyphRun` 包含该 run 的字形 |
+| 文本层 | 每个 run 一个 `TextItem`，另有 `TextLine`（items 范围 + bbox + baseline） |
 | 行内/块级图片 | `Element::Image(ImageElement)`，`transform` 为毫米缩放 |
 | 分页 | 一页一个 `Page`，`PageInfo` 用页面设置 |
 | 分页符 | 结束当前页，开始新页 |
