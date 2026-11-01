@@ -152,6 +152,11 @@ fn inspect_scene(scene: &Group, page: usize) {
     print_tree(scene, 0, &mut lines);
     let mut texts = Vec::new();
     collect_texts(scene, &mut texts);
+    let mut histogram = std::collections::BTreeMap::new();
+    for element in &texts {
+        *histogram.entry(element.run.glyphs.len()).or_insert(0_usize) += 1;
+    }
+    println!("    glyphs-per-text histogram: {histogram:?}");
     for element in texts.iter().take(8) {
         println!(
             "    leaf text {:?} glyphs={} font={:p} data={:p} size={} fill={:?} transform={:?}",
