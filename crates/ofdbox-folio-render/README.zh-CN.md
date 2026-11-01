@@ -36,7 +36,9 @@ CPU 渲染器基于 `vello_cpu`，只消费 Fixed IR，不感知源文档格式�
 
 后端把场景内所有填充/描边路径合批为一次 compute dispatch，所有字形合批为一次
 instanced text draw，所有图片四边形合批到同一个 render pass。字形栅格化到 R8
-atlas；图片只解码一次并缓存为 GPU 纹理。
+atlas；图片只解码一次并缓存为 GPU 纹理。页面级入口是
+`WgpuBackend::render_page`；门面中的 `examples/wgpu_compare.rs` 会用两种后端渲染
+同一页并输出像素差异。
 
 ## Known Limitations
 
