@@ -1518,7 +1518,7 @@ name = "ofdbox-folio-markdown"
 version = "0.0.1"
 dependencies = [
  "ofdbox-folio-ir",
- "thiserror",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
