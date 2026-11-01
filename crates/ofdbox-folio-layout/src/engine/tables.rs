@@ -1514,6 +1514,7 @@ impl<'a> Engine<'a> {
             }
         }
 
+        let line_size = self.max_size(pieces, line);
         let line_start_item = self.page.items.len() as u32;
         let mut positions = Vec::with_capacity(line.len());
         let mut pending: Vec<(char, u32, f64, f64)> = Vec::new();
@@ -1523,7 +1524,13 @@ impl<'a> Engine<'a> {
             positions.push(x);
             let piece = pieces[index];
             if piece.is_tab() {
-                self.flush_pending_text(&mut pending_style, &mut pending, pending_origin, baseline);
+                self.flush_pending_text(
+                    &mut pending_style,
+                    &mut pending,
+                    pending_origin,
+                    baseline,
+                    line_size,
+                );
                 // A tab pushes x to the next tab stop and draws a leader when
                 // needed.
                 x = self.place_tab(style, pieces, line, index, x, baseline);
@@ -1531,7 +1538,13 @@ impl<'a> Engine<'a> {
             }
             let advance = piece.width + extra[offset];
             if let Some(object) = piece.object {
-                self.flush_pending_text(&mut pending_style, &mut pending, pending_origin, baseline);
+                self.flush_pending_text(
+                    &mut pending_style,
+                    &mut pending,
+                    pending_origin,
+                    baseline,
+                    line_size,
+                );
                 if let Some(image) = images.get(object) {
                     self.place_image(image, x, baseline, piece.width);
                 }
@@ -1550,6 +1563,7 @@ impl<'a> Engine<'a> {
                         &mut pending,
                         pending_origin,
                         baseline,
+                        line_size,
                     );
                 }
                 if pending_style.is_none() {
@@ -1560,7 +1574,13 @@ impl<'a> Engine<'a> {
             }
             x += advance;
         }
-        self.flush_pending_text(&mut pending_style, &mut pending, pending_origin, baseline);
+        self.flush_pending_text(
+            &mut pending_style,
+            &mut pending,
+            pending_origin,
+            baseline,
+            line_size,
+        );
         let line_end_item = self.page.items.len() as u32;
         // Footnote references on this line must reserve page-bottom space on this
         // page.
@@ -1796,6 +1816,7 @@ impl<'a> Engine<'a> {
         pending: &mut Vec<(char, u32, f64, f64)>,
         origin_x: f64,
         baseline: f64,
+        line_size: f64,
     ) {
         let Some((_, style, font)) = pending_style.take() else {
             pending.clear();
@@ -1825,14 +1846,37 @@ impl<'a> Engine<'a> {
         }
         let run = Arc::new(ofdbox_folio_ir::GlyphRun::new(text, glyphs, clusters));
         let size = style.size.to_mm();
-        let transform = Matrix::translate(origin_x, baseline);
+        // Superscripts and subscripts are shifted from the shared line baseline.
+        let baseline = if style.superscript {
+            baseline - line_size * 0.33
+        } else if style.subscript {
+            baseline + line_size * 0.1
+        } else {
+            baseline
+        };
+        let mut transform = Matrix::translate(origin_x, baseline);
+        // CJK fonts usually have no italic face; synthesize the slant with a shear.
+        if style.italic && !font_is_italic(&font) {
+            transform = Matrix::new(1.0, 0.0, -0.21, 1.0, 0.0, 0.0).then(transform);
+        }
+        // Likewise synthesize bold with a thin stroke when the resolved font is
+        // not actually a bold face.
+        let stroke = (style.bold && !font_is_bold(&font)).then(|| StrokePaint {
+            paint: Paint::Color(style.color),
+            style: StrokeStyle {
+                width: (size * 0.03).max(0.01),
+                cap: LineCap::Round,
+                join: LineJoin::Round,
+                ..StrokeStyle::default()
+            },
+        });
         let element = TextElement {
             font: Arc::clone(&font),
             font_size: size,
             transform,
             run: Arc::clone(&run),
             fill: Some(Paint::Color(style.color)),
-            stroke: None,
+            stroke,
         };
         self.page.scene.children.push(Element::Text(element));
         let bbox = text_bbox(&run, size, transform);
@@ -1946,6 +1990,18 @@ impl<'a> Engine<'a> {
         }));
         self.cursor += height;
     }
+}
+
+fn font_is_bold(font: &FontAsset) -> bool {
+    ttf_parser::Face::parse(font.data(), font.face_index())
+        .map(|face| face.is_bold())
+        .unwrap_or(false)
+}
+
+fn font_is_italic(font: &FontAsset) -> bool {
+    ttf_parser::Face::parse(font.data(), font.face_index())
+        .map(|face| face.is_italic())
+        .unwrap_or(false)
 }
 
 fn cell_at_column(row: &Row, column: usize) -> Option<&ofdbox_folio_ir::Cell> {

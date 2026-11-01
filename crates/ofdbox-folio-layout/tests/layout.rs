@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
-    Align, Block, Field, FieldKind, FlowDocument, FontError, FontProvider, FontRequest, ImageAsset,
-    ImageBlock, ImageFormat, Inline, LineSpacing, Metadata, NamedStyle, PageSetup, ParaStyle,
-    Paragraph, Size, TextRun, TextStyle, Twips,
+    Align, Block, Element, Field, FieldKind, FlowDocument, FontError, FontProvider, FontRequest,
+    ImageAsset, ImageBlock, ImageFormat, Inline, LineSpacing, Metadata, NamedStyle, PageSetup,
+    ParaStyle, Paragraph, Size, TextRun, TextStyle, Twips,
 };
 use ofdbox_folio_layout::{LayoutOptions, layout, layout_with};
 
@@ -333,4 +333,86 @@ fn same_style_text_forms_one_run() {
     assert_eq!(items.len(), 1, "same-style text should be one run");
     assert_eq!(items[0].run.text, "Hello");
     assert_eq!(items[0].run.glyphs.len(), 5);
+}
+
+#[test]
+fn synthetic_bold_and_italic_are_applied() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = doc();
+    let mut paragraph = Paragraph::new(ParaStyle::default());
+    paragraph.runs.push(Inline::Text(TextRun::new(
+        "Bold",
+        TextStyle {
+            bold: true,
+            ..body_style()
+        },
+    )));
+    paragraph
+        .runs
+        .push(Inline::Text(TextRun::new(" ", body_style())));
+    paragraph.runs.push(Inline::Text(TextRun::new(
+        "Italic",
+        TextStyle {
+            italic: true,
+            ..body_style()
+        },
+    )));
+    flow.push(Block::Paragraph(paragraph));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let mut bold_stroke = false;
+    let mut italic_shear = false;
+    for element in &fixed.pages[0].content.root.children {
+        let Element::Text(text) = element else {
+            continue;
+        };
+        if text.run.text == "Bold" {
+            bold_stroke = text.stroke.is_some();
+        }
+        if text.run.text == "Italic" {
+            italic_shear = text.transform.c.abs() > 0.1;
+        }
+    }
+    assert!(bold_stroke, "bold text should get a synthetic stroke");
+    assert!(italic_shear, "italic text should get a synthetic shear");
+}
+
+#[test]
+fn superscript_is_raised_from_the_baseline() {
+    let Some(mut fonts) = fonts() else {
+        return;
+    };
+    let mut flow = doc();
+    let mut paragraph = Paragraph::new(ParaStyle::default());
+    paragraph
+        .runs
+        .push(Inline::Text(TextRun::new("E", body_style())));
+    paragraph.runs.push(Inline::Text(TextRun::new(
+        "2",
+        TextStyle {
+            size: Twips::from_pt(8.0),
+            superscript: true,
+            ..body_style()
+        },
+    )));
+    flow.push(Block::Paragraph(paragraph));
+
+    let fixed = layout(&flow, &mut fonts).expect("layout");
+    let items = &fixed.pages[0].text.items;
+    let normal = items
+        .iter()
+        .find(|item| item.run.text == "E")
+        .expect("normal text");
+    let superscript = items
+        .iter()
+        .find(|item| item.run.text == "2")
+        .expect("superscript text");
+    assert!(
+        superscript.transform.f < normal.transform.f - 0.8,
+        "superscript baseline {:.2} should be raised above normal baseline {:.2}",
+        superscript.transform.f,
+        normal.transform.f
+    );
 }

@@ -71,6 +71,10 @@ page ─ margins ─► content area (width W)
    - Justify stretches inline spaces first; when the whole line has no spaces, the remainder is distributed evenly between
      characters (for Chinese lines); the last line is aligned Left;
    - after stretching, word spacing may range from negative to 0 (glyphs are not compressed).
+7. Character styles:
+   - bold text whose resolved font face is not actually bold is drawn with a synthetic stroke (`0.03 × font size`);
+   - italic text whose resolved font face is not actually italic is sheared by `-0.21` around the baseline;
+   - superscript/subscript runs are placed `0.33` / `0.1 × line font size` above / below the shared baseline.
 
 An empty paragraph still occupies one line. When it has no runs, layout uses the default text size for that line, so empty table rows keep a normal row height and their borders.
 
