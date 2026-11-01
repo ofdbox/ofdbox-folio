@@ -56,8 +56,8 @@ jobs:
       - run: cargo clippy -p ofdbox-folio-render --no-default-features --features wgpu30 --all-targets --locked -- -D warnings
       - run: cargo check -p ofdbox-folio --no-default-features --features layout,cpu,gpu27 --locked
       - run: cargo check -p ofdbox-folio --no-default-features --features layout,cpu,gpu30 --locked
-      - run: cargo test -p ofdbox-folio-render --no-default-features --features wgpu27 --locked
-      - run: cargo test -p ofdbox-folio-render --no-default-features --features wgpu30 --locked
+      - run: cargo test -p ofdbox-folio-render --no-default-features --features wgpu27 --locked -- --test-threads=1
+      - run: cargo test -p ofdbox-folio-render --no-default-features --features wgpu30 --locked -- --test-threads=1
 
   doc:
     name: doc

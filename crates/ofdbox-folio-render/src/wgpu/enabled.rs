@@ -2667,9 +2667,9 @@ mod tests {
         if let Element::Text(text) = &mut element {
             text.fill = Some(Paint::RadialGradient(ofdbox_folio_ir::RadialGradient {
                 start_center: Point::new(8.5, 16.0),
-                start_radius: 6.0,
+                start_radius: 2.5,
                 end_center: Point::new(8.5, 16.0),
-                end_radius: 6.0,
+                end_radius: 2.5,
                 stops: vec![
                     ofdbox_folio_ir::GradientStop {
                         offset: 0.0,
@@ -2681,8 +2681,8 @@ mod tests {
                     },
                 ],
                 extend: Default::default(),
-                eccentricity: 0.0,
-                angle: 0.0,
+                eccentricity: 0.8,
+                angle: 30.0,
             }));
         }
         let mut root = Group::default();
