@@ -5,6 +5,7 @@ use std::fs::File;
 use std::io::BufWriter;
 
 use ofdbox_folio::render::{CpuRenderer, RasterTarget, RenderOptions, TinySkiaRenderer};
+use ofdbox_folio::fonts::SystemFonts;
 use ofdbox_folio::{Document, OpenOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,7 +21,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|value| value.parse::<f64>())
         .transpose()?
         .unwrap_or(96.0);
-    let mut document = Document::open_path(&input, OpenOptions::default())?;
+    let mut document = Document::open_path(
+        &input,
+        OpenOptions {
+            font_provider: Some(Box::new(SystemFonts::new())),
+            ..OpenOptions::default()
+        },
+    )?;
     let page = document.page(page_index)?;
     let size = page.display_size();
 
