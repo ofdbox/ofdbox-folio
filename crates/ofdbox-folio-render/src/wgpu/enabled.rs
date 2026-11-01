@@ -914,7 +914,7 @@ fn scaled_color(color: Rgba, opacity: f32) -> [f32; 4] {
     value
 }
 
-fn flatten_path(
+pub(crate) fn flatten_path(
     path: &Path,
     transform: Matrix,
     scale: f64,

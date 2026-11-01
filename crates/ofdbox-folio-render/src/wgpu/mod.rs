@@ -4,6 +4,8 @@
 //! text outlines; images, radial gradients and blend modes are not implemented
 //! yet.
 
+#[cfg(any(feature = "wgpu27", feature = "wgpu30"))]
+mod atlas;
 #[cfg(not(any(feature = "wgpu27", feature = "wgpu30")))]
 mod disabled;
 #[cfg(any(feature = "wgpu27", feature = "wgpu30"))]
