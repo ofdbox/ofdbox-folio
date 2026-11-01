@@ -37,7 +37,8 @@ Solid fills, strokes, linear gradients, clipping, atlas-backed text and RGBA ima
 The backend batches all fill/stroke paths of a scene into one compute dispatch, all
 glyphs into one instanced text draw, and all image quads into one render pass. Text
 glyphs are rasterized into an R8 atlas; images are decoded once and cached as GPU
-textures. `WgpuBackend::render_page` is the page-level entry point, and
+textures. `WgpuBackend::render_page` is the page-level entry point,
+`render_page_region` renders a tile of a page for incremental refresh, and
 `examples/wgpu_compare.rs` in the facade renders a page with both backends and
 reports the pixel difference.
 
