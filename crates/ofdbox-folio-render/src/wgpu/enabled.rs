@@ -1167,8 +1167,17 @@ fn emit_text_instances(
     queue: &wgpu_lib::Queue,
     instances: &mut Vec<GlyphInstance>,
 ) {
-    let Some(Paint::Color(color)) = text.fill.as_ref() else {
-        return;
+    let fill_color = match text.fill.as_ref() {
+        Some(Paint::Color(color)) => *color,
+        Some(Paint::LinearGradient(gradient)) => gradient
+            .stops
+            .first()
+            .map_or(Rgba::BLACK, |stop| stop.color),
+        Some(Paint::RadialGradient(gradient)) => gradient
+            .stops
+            .first()
+            .map_or(Rgba::BLACK, |stop| stop.color),
+        Some(_) | None => return,
     };
     let Ok(face) = ttf_parser::Face::parse(text.font.data(), text.font.face_index()) else {
         return;
@@ -1191,7 +1200,6 @@ fn emit_text_instances(
     let factor = scale * text.font_size / f64::from(pixel_size);
     let x_axis = (world.a * factor, world.b * factor);
     let y_axis = (world.c * factor, world.d * factor);
-    let fill_color = *color;
     let color = scaled_color(fill_color, opacity);
     let font_key = Arc::as_ptr(&text.font) as usize;
     for glyph in &text.run.glyphs {
