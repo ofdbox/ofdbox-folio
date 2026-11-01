@@ -1,8 +1,12 @@
 //! Complete example that builds a Flow IR from scratch and writes out both DOCX and OFD.
 //!
 //! ```text
-//! cargo run -p ofdbox-folio --example create_document -- out.docx
+//! cargo run -p ofdbox-folio --example create_document
+//! cargo run -p ofdbox-folio --example create_document -- /tmp/out.docx
 //! ```
+//!
+//! By default the files are written to `target/create_document.docx` and
+//! `target/create_document.ofd` so a checkout is not polluted.
 //!
 //! Covers: heading and body formatting, tab stops with dot leaders, tables, images,
 //! footnotes, TOC fields, headers/footers with page-number fields, and floating images.
@@ -11,6 +15,7 @@
 //! structure printed.
 
 use std::error::Error;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ofdbox_folio::docx::{DocxReadOptions, DocxWriteOptions, read_flow_path, write_flow_path};
@@ -44,7 +49,11 @@ fn paragraph(text: &str) -> Paragraph {
 fn main() -> Result<(), Box<dyn Error>> {
     let path = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "example.docx".to_owned());
+        .map(PathBuf::from)
+        .unwrap_or_else(default_output_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
 
     let mut flow = FlowDocument::new(Metadata {
         title: Some("创建 DOCX 示例".to_owned()),
@@ -259,7 +268,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ---- Write DOCX ----
     write_flow_path(&flow, &path, &DocxWriteOptions::default())?;
     let size = std::fs::metadata(&path)?.len();
-    println!("Wrote DOCX: {path} ({size} bytes)");
+    println!("Wrote DOCX: {} ({size} bytes)", path.display());
 
     // ---- Lay out the same Flow IR into Fixed IR, then write OFD ----
     let mut fonts = SystemFonts::new();
@@ -267,14 +276,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     for diagnostic in &fixed.report.diagnostics {
         eprintln!("  layout diagnostic: {}", diagnostic.message);
     }
-    let ofd_path = std::path::Path::new(&path)
-        .with_extension("ofd")
-        .to_string_lossy()
-        .to_string();
+    let ofd_path = Path::new(&path).with_extension("ofd");
     let ofd = write_fixed(&fixed, &OfdWriteOptions::default())?;
     std::fs::write(&ofd_path, &ofd)?;
     println!(
-        "Wrote OFD: {ofd_path} ({} bytes, {} pages)",
+        "Wrote OFD: {} ({} bytes, {} pages)",
+        ofd_path.display(),
         ofd.len(),
         fixed.pages.len()
     );
@@ -294,6 +301,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         back.notes.len()
     );
     Ok(())
+}
+
+/// Default output in the workspace `target` directory.
+fn default_output_path() -> PathBuf {
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("target")
+        });
+    target.join("create_document.docx")
 }
 
 /// Cell: one paragraph.
