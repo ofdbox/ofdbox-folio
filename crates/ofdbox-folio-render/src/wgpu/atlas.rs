@@ -126,6 +126,12 @@ impl GlyphPacker {
     }
 }
 
+/// Bytes per row for an atlas upload, aligned to wgpu's copy requirement.
+fn padded_row_bytes(width: u32) -> usize {
+    let alignment = wgpu_lib::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
+    (width as usize).div_ceil(alignment) * alignment
+}
+
 /// Rasterize a glyph path (in font units) at `pixel_size` into R8 coverage.
 pub(crate) fn rasterize_glyph(
     path: &Path,
@@ -431,7 +437,7 @@ impl GpuAtlas {
         let packed = self.packer.insert(font, glyph, pixel_size, bold, &bitmap)?;
         let width = bitmap.width.max(1);
         let height = bitmap.height.max(1);
-        let padded = wgpu_lib::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
+        let padded = padded_row_bytes(width);
         let mut data = vec![0_u8; padded * height as usize];
         for row in 0..height as usize {
             let source = &bitmap.coverage[row * width as usize..(row + 1) * width as usize];
@@ -541,6 +547,14 @@ impl GlyphInstance {
 mod tests {
     use super::*;
     use ofdbox_folio_ir::{Path, Point};
+
+    #[test]
+    fn pads_rows_wider_than_the_copy_alignment() {
+        assert_eq!(padded_row_bytes(1), 256);
+        assert_eq!(padded_row_bytes(256), 256);
+        assert_eq!(padded_row_bytes(257), 512);
+        assert_eq!(padded_row_bytes(75525), 75776);
+    }
 
     #[test]
     fn rasterizes_a_square_glyph() {
