@@ -16,12 +16,16 @@ mod error;
 mod image;
 mod options;
 mod renderer;
+#[cfg(feature = "tiny-skia")]
+mod tiny_skia_renderer;
 mod wgpu;
 
 pub use error::RenderError;
 pub use image::{DecodedImage, decode_image, detect_format};
 pub use options::RenderOptions;
 pub use renderer::{CpuRenderer, PixelRect, RasterTarget, RenderRegion};
+#[cfg(feature = "tiny-skia")]
+pub use tiny_skia_renderer::TinySkiaRenderer;
 pub use wgpu::WgpuBackend;
 #[cfg(any(feature = "wgpu27", feature = "wgpu30"))]
 pub use wgpu::{WgpuCapabilities, WgpuContext, WgpuTarget};

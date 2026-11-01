@@ -162,6 +162,10 @@ impl RasterTarget {
         &self.data
     }
 
+    pub(crate) fn data_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+
     /// Takes out the pixel data.
     pub fn into_data(self) -> Vec<u8> {
         self.data

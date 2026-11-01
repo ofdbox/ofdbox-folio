@@ -33,9 +33,14 @@ cpu = ["dep:ofdbox-folio-render"]
 gpu = ["gpu30"]
 gpu30 = ["dep:ofdbox-folio-render", "ofdbox-folio-render/wgpu30"]
 gpu27 = ["dep:ofdbox-folio-render", "ofdbox-folio-render/wgpu27"]
+tiny-skia = ["dep:ofdbox-folio-render", "ofdbox-folio-render/tiny-skia"]
 
 [dev-dependencies]
 png.workspace = true
+
+[[example]]
+name = "tiny_skia_compare"
+required-features = ["tiny-skia"]
 
 [[example]]
 name = "wgpu_compare"

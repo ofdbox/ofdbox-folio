@@ -28,6 +28,19 @@ let rgba = target.read_rgba(backend.context())?;
 
 The CPU renderer is built on `vello_cpu` and consumes Fixed IR only; it is unaware of the source document format. It draws Fixed IR scenes (paths, text and images) into RGBA8 targets at a chosen DPI, supports whole-page and tile-sized region rendering for incremental display, and caches decoded images under a byte budget, evicting entries in insertion order once it is exceeded.
 
+### tiny-skia Backend
+
+The optional `tiny-skia` feature provides `TinySkiaRenderer`, an alternative
+software renderer built on `tiny-skia`. It supports solid and gradient path
+fills/strokes, glyph outlines, RGBA images with masks, clip paths and group
+opacity, and exposes the same page/tile rendering API as `CpuRenderer`.
+
+Enable it with:
+
+```text
+cargo build -p ofdbox-folio-render --features tiny-skia
+```
+
 ### GPU Backend
 
 The `wgpu` feature of `ofdbox-folio-render` (facade `gpu`) provides the compute backend; `gpu` is off by default.
