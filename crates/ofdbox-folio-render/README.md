@@ -46,9 +46,9 @@ reports the pixel difference.
 - Radial gradients and blend modes are not yet implemented in the GPU backend.
 - GPU text uses solid-color atlas glyphs; gradient text fills and synthetic text
   strokes are still drawn by the CPU renderer only.
-- Paths are drawn before images and text; exact source draw order across element
-  kinds is not preserved yet. Clip paths cull whole glyph/image quads by their
-  bounding box instead of clipping each fragment.
+- Paths are drawn before all images and text; images and text keep their relative
+  scene order. Clip paths cull whole glyph/image quads by their bounding box
+  instead of clipping each fragment.
 - Use the CPU renderer when you need the full feature set.
 - The GPU backend exists only with the `wgpu` feature; the default build exposes a placeholder `WgpuBackend` that reports `Unsupported`.
 

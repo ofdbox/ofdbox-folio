@@ -304,6 +304,12 @@ struct ImageDraw {
     image: Arc<ImageAsset>,
 }
 
+/// An ordered text or image draw command.
+enum SceneOp {
+    Text(std::ops::Range<u32>),
+    Image(usize),
+}
+
 /// The wgpu compute backend.
 pub struct WgpuBackend {
     context: Arc<WgpuContext>,
@@ -512,19 +518,54 @@ impl WgpuBackend {
             }
         };
         let (edges, paths) = cached.as_ref();
-        let mut text_draw = None;
+        let mut scene_ops = Vec::new();
+        let mut image_draws = Vec::new();
+        let mut text_bind_group = None;
         {
             let mut atlas = self.atlas.lock().unwrap_or_else(|error| error.into_inner());
-            let instances = collect_text_instances(
-                scene,
-                target.dpi,
-                origin_px,
-                target.width,
-                target.height,
-                &self.glyph_cache,
-                &mut atlas,
-                &self.context.queue,
-            );
+            let mut instances = Vec::new();
+            for decoration in
+                collect_decorations(scene, target.dpi, origin_px, target.width, target.height)
+            {
+                match decoration {
+                    Decoration::Text {
+                        text,
+                        world,
+                        opacity,
+                        clip,
+                    } => {
+                        let start = u32::try_from(instances.len())
+                            .map_err(|_| RenderError::Backend("too many text glyphs".into()))?;
+                        emit_text_instances(
+                            text,
+                            world,
+                            opacity,
+                            clip,
+                            target.dpi / 25.4,
+                            origin_px,
+                            Viewport {
+                                min_x: -1.0,
+                                min_y: -1.0,
+                                max_x: target.width as f32 + 1.0,
+                                max_y: target.height as f32 + 1.0,
+                            },
+                            &self.glyph_cache,
+                            &mut atlas,
+                            &self.context.queue,
+                            &mut instances,
+                        );
+                        let end = u32::try_from(instances.len())
+                            .map_err(|_| RenderError::Backend("too many text glyphs".into()))?;
+                        if end > start {
+                            scene_ops.push(SceneOp::Text(start..end));
+                        }
+                    }
+                    Decoration::Image(draw) => {
+                        scene_ops.push(SceneOp::Image(image_draws.len()));
+                        image_draws.push(draw);
+                    }
+                }
+            }
             if !instances.is_empty() {
                 let mut instance_data = Vec::with_capacity(instances.len() * 64);
                 for instance in &instances {
@@ -575,14 +616,13 @@ impl WgpuBackend {
                                 },
                             ],
                         });
-                let count = u32::try_from(instances.len())
-                    .map_err(|_| RenderError::Backend("too many text glyphs".into()))?;
-                text_draw = Some((bind_group, count));
+                text_bind_group = Some(bind_group);
             }
         }
-        let mut image_batches = Vec::new();
-        for draw in collect_image_draws(scene, target.dpi, origin_px, target.width, target.height) {
+        let mut image_batches = Vec::with_capacity(image_draws.len());
+        for draw in &image_draws {
             let Some(cached) = self.cached_image(&draw.image) else {
+                image_batches.push(None);
                 continue;
             };
             let mut params = Vec::with_capacity(48);
@@ -631,7 +671,7 @@ impl WgpuBackend {
                             },
                         ],
                     });
-            image_batches.push(bind_group);
+            image_batches.push(Some(bind_group));
         }
         let mut encoder = self
             .context
@@ -731,7 +771,7 @@ impl WgpuBackend {
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(target.width.div_ceil(8), target.height.div_ceil(8), 1);
         }
-        if paths.is_empty() || text_draw.is_some() || !image_batches.is_empty() {
+        if paths.is_empty() || !scene_ops.is_empty() {
             let load = if paths.is_empty() {
                 wgpu_lib::LoadOp::Clear(wgpu_lib::Color {
                     r: 1.0,
@@ -752,22 +792,30 @@ impl WgpuBackend {
                 },
             });
             let descriptor = wgpu_lib::RenderPassDescriptor {
-                label: Some("ofdbox-text-pass"),
+                label: Some("ofdbox-decoration-pass"),
                 color_attachments: &[attachment],
                 ..Default::default()
             };
             let mut pass = encoder.begin_render_pass(&descriptor);
-            if !image_batches.is_empty() {
-                pass.set_pipeline(self.image_pipeline.pipeline());
-                for bind_group in &image_batches {
-                    pass.set_bind_group(0, bind_group, &[]);
-                    pass.draw(0..6, 0..1);
+            for op in &scene_ops {
+                match op {
+                    SceneOp::Image(index) => {
+                        let Some(Some(bind_group)) = image_batches.get(*index) else {
+                            continue;
+                        };
+                        pass.set_pipeline(self.image_pipeline.pipeline());
+                        pass.set_bind_group(0, bind_group, &[]);
+                        pass.draw(0..6, 0..1);
+                    }
+                    SceneOp::Text(range) => {
+                        let Some(bind_group) = &text_bind_group else {
+                            continue;
+                        };
+                        pass.set_pipeline(self.text_pipeline.pipeline());
+                        pass.set_bind_group(0, bind_group, &[]);
+                        pass.draw(0..6, range.clone());
+                    }
                 }
-            }
-            if let Some((bind_group, count)) = &text_draw {
-                pass.set_pipeline(self.text_pipeline.pipeline());
-                pass.set_bind_group(0, bind_group, &[]);
-                pass.draw(0..6, 0..*count);
             }
         }
         self.context.queue.submit([encoder.finish()]);
@@ -928,31 +976,37 @@ fn collect_paths(
     (edges, paths)
 }
 
-/// Collect atlas-backed glyph quads for a tile.
+/// One ordered text or image draw from the scene tree.
+enum Decoration<'a> {
+    Text {
+        text: &'a ofdbox_folio_ir::TextElement,
+        world: Matrix,
+        opacity: f32,
+        clip: Option<[f32; 4]>,
+    },
+    Image(ImageDraw),
+}
+
+/// Collect text and image draws in scene order.
 ///
-/// Text no longer goes through the path pass: every glyph is rasterized once per
-/// `(font, glyph, pixel size)` into the atlas, then drawn as a texture-mapped quad.
-/// Clip paths only cull whole quads by their bounding box; exact per-fragment
-/// clipping is not applied yet.
+/// Paths are still collected separately and drawn first; this ordering is used to
+/// preserve the relative stacking of images and text.
 #[allow(clippy::too_many_arguments)]
-fn collect_text_instances(
+fn collect_decorations(
     scene: &Scene,
     dpi: f64,
     origin_px: (f64, f64),
     width: u32,
     height: u32,
-    glyph_cache: &Mutex<HashMap<(usize, u16), Arc<Path>>>,
-    atlas: &mut GpuAtlas,
-    queue: &wgpu_lib::Queue,
-) -> Vec<GlyphInstance> {
+) -> Vec<Decoration<'_>> {
     let viewport = Viewport {
         min_x: -1.0,
         min_y: -1.0,
         max_x: width as f32 + 1.0,
         max_y: height as f32 + 1.0,
     };
-    let mut instances = Vec::new();
-    collect_text_group(
+    let mut decorations = Vec::new();
+    collect_decoration_group(
         &scene.root,
         Matrix::IDENTITY,
         1.0,
@@ -960,27 +1014,21 @@ fn collect_text_instances(
         dpi / 25.4,
         origin_px,
         viewport,
-        glyph_cache,
-        atlas,
-        queue,
-        &mut instances,
+        &mut decorations,
     );
-    instances
+    decorations
 }
 
 #[allow(clippy::too_many_arguments)]
-fn collect_text_group(
-    group: &Group,
+fn collect_decoration_group<'a>(
+    group: &'a Group,
     parent: Matrix,
     parent_opacity: f32,
     parent_clip: Option<[f32; 4]>,
     scale: f64,
     origin_px: (f64, f64),
     viewport: Viewport,
-    glyph_cache: &Mutex<HashMap<(usize, u16), Arc<Path>>>,
-    atlas: &mut GpuAtlas,
-    queue: &wgpu_lib::Queue,
-    instances: &mut Vec<GlyphInstance>,
+    decorations: &mut Vec<Decoration<'a>>,
 ) {
     let opacity = parent_opacity * group.opacity.clamp(0.0, 1.0);
     if opacity <= 0.0 {
@@ -1010,7 +1058,7 @@ fn collect_text_group(
     }
     for element in &group.children {
         match element {
-            Element::Group(child) => collect_text_group(
+            Element::Group(child) => collect_decoration_group(
                 child,
                 transform,
                 opacity,
@@ -1018,33 +1066,31 @@ fn collect_text_group(
                 scale,
                 origin_px,
                 viewport,
-                glyph_cache,
-                atlas,
-                queue,
-                instances,
+                decorations,
             ),
-            Element::Text(text) => collect_text_element(
+            Element::Text(text) => decorations.push(Decoration::Text {
                 text,
-                transform,
+                world: text.transform.then(transform),
                 opacity,
                 clip,
-                scale,
-                origin_px,
-                viewport,
-                glyph_cache,
-                atlas,
-                queue,
-                instances,
-            ),
+            }),
+            Element::Image(image) => {
+                if let Some(draw) =
+                    image_draw(image, transform, opacity, clip, scale, origin_px, viewport)
+                {
+                    decorations.push(Decoration::Image(draw));
+                }
+            }
             _ => {}
         }
     }
 }
 
+/// Emit atlas-backed glyph quads for one text element.
 #[allow(clippy::too_many_arguments)]
-fn collect_text_element(
+fn emit_text_instances(
     text: &ofdbox_folio_ir::TextElement,
-    parent: Matrix,
+    world: Matrix,
     opacity: f32,
     clip: Option<[f32; 4]>,
     scale: f64,
@@ -1065,7 +1111,6 @@ fn collect_text_element(
     if units == 0 {
         return;
     }
-    let world = text.transform.then(parent);
     let determinant = (world.a * world.d - world.b * world.c).abs();
     if !(determinant.is_finite() && determinant > 1.0e-12) {
         return;
@@ -1169,87 +1214,7 @@ fn collect_text_element(
     }
 }
 
-/// Collect image quads in page-pixel space.
-#[allow(clippy::too_many_arguments)]
-fn collect_image_draws(
-    scene: &Scene,
-    dpi: f64,
-    origin_px: (f64, f64),
-    width: u32,
-    height: u32,
-) -> Vec<ImageDraw> {
-    let viewport = Viewport {
-        min_x: -1.0,
-        min_y: -1.0,
-        max_x: width as f32 + 1.0,
-        max_y: height as f32 + 1.0,
-    };
-    let mut draws = Vec::new();
-    collect_image_group(
-        &scene.root,
-        Matrix::IDENTITY,
-        1.0,
-        None,
-        dpi / 25.4,
-        origin_px,
-        viewport,
-        &mut draws,
-    );
-    draws
-}
-
-#[allow(clippy::too_many_arguments)]
-fn collect_image_group(
-    group: &Group,
-    parent: Matrix,
-    parent_opacity: f32,
-    parent_clip: Option<[f32; 4]>,
-    scale: f64,
-    origin_px: (f64, f64),
-    viewport: Viewport,
-    draws: &mut Vec<ImageDraw>,
-) {
-    let opacity = parent_opacity * group.opacity.clamp(0.0, 1.0);
-    if opacity <= 0.0 {
-        return;
-    }
-    let transform = group.transform.then(parent);
-    let mut clip = parent_clip;
-    if let Some(group_clip) = &group.clip {
-        let mut clip_edges = Vec::new();
-        flatten_path(
-            &group_clip.path,
-            transform,
-            scale,
-            origin_px,
-            &mut clip_edges,
-        );
-        let Some(bounds) = edge_bounds(&clip_edges) else {
-            return;
-        };
-        let Some(intersected) = intersect_bounds(clip.unwrap_or(bounds), bounds) else {
-            return;
-        };
-        if !viewport.intersects(intersected) {
-            return;
-        }
-        clip = Some(intersected);
-    }
-    for element in &group.children {
-        match element {
-            Element::Group(child) => collect_image_group(
-                child, transform, opacity, clip, scale, origin_px, viewport, draws,
-            ),
-            Element::Image(image) => collect_image_element(
-                image, transform, opacity, clip, scale, origin_px, viewport, draws,
-            ),
-            _ => {}
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn collect_image_element(
+fn image_draw(
     element: &ImageElement,
     parent: Matrix,
     opacity: f32,
@@ -1257,8 +1222,7 @@ fn collect_image_element(
     scale: f64,
     origin_px: (f64, f64),
     viewport: Viewport,
-    draws: &mut Vec<ImageDraw>,
-) {
+) -> Option<ImageDraw> {
     let width = element
         .rect
         .width
@@ -1274,7 +1238,7 @@ fn collect_image_element(
         .filter(|height| *height > 0.0)
         .unwrap_or(f64::from(element.image.pixel_height));
     if width <= 0.0 || height <= 0.0 {
-        return;
+        return None;
     }
     let world = element.transform.then(parent);
     let x_axis = (world.a * width * scale, world.b * width * scale);
@@ -1301,20 +1265,20 @@ fn collect_image_element(
     }
     let bounds = [min_x, min_y, max_x, max_y];
     if !bounds.iter().all(|value| value.is_finite()) || !viewport.intersects(bounds) {
-        return;
+        return None;
     }
     if let Some(clip) = clip
         && intersect_bounds(bounds, clip).is_none()
     {
-        return;
+        return None;
     }
-    draws.push(ImageDraw {
+    Some(ImageDraw {
         origin: [origin.0 as f32, origin.1 as f32],
         x_axis: [x_axis.0 as f32, x_axis.1 as f32],
         y_axis: [y_axis.0 as f32, y_axis.1 as f32],
         alpha: element.alpha.clamp(0.0, 1.0) * opacity,
         image: Arc::clone(&element.image),
-    });
+    })
 }
 
 fn intersect_bounds(a: [f32; 4], b: [f32; 4]) -> Option<[f32; 4]> {
@@ -1902,6 +1866,99 @@ mod tests {
         let index = ((y * target.width() + x) * 4) as usize;
         assert!(pixels[index] > 200, "red channel: {}", pixels[index]);
         assert!(pixels[index + 1] < 40);
+    }
+
+    fn text_element(
+        font: &std::sync::Arc<ofdbox_folio_ir::FontAsset>,
+        character: char,
+        x: f64,
+        y: f64,
+    ) -> Element {
+        let face = ttf_parser::Face::parse(font.data(), font.face_index()).expect("face");
+        let glyph_id = face.glyph_index(character).expect("glyph").0;
+        let run = std::sync::Arc::new(ofdbox_folio_ir::GlyphRun::new(
+            character.to_string(),
+            vec![ofdbox_folio_ir::Glyph {
+                id: u32::from(glyph_id),
+                x,
+                y,
+                advance: 7.0,
+            }],
+            Vec::new(),
+        ));
+        Element::Text(ofdbox_folio_ir::TextElement {
+            font: std::sync::Arc::clone(font),
+            font_size: 10.0,
+            transform: Matrix::IDENTITY,
+            run,
+            fill: Some(Paint::Color(Rgba::from_rgb(0, 0, 0))),
+            stroke: None,
+        })
+    }
+
+    #[test]
+    fn preserves_text_and_image_order() {
+        let Ok(font_data) = std::fs::read("C:/Windows/Fonts/arial.ttf") else {
+            return;
+        };
+        let Ok(context) = WgpuContext::new_blocking() else {
+            return;
+        };
+        let font = std::sync::Arc::new(ofdbox_folio_ir::FontAsset::new(
+            std::sync::Arc::from(font_data.into_boxed_slice()),
+            0,
+        ));
+        let mut encoded = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut encoded, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("png header");
+            writer
+                .write_image_data(&[255, 0, 0, 255])
+                .expect("png data");
+        }
+        let image = std::sync::Arc::new(ofdbox_folio_ir::ImageAsset::new(
+            ofdbox_folio_ir::ImageFormat::Png,
+            std::sync::Arc::from(encoded.into_boxed_slice()),
+            1,
+            1,
+        ));
+        let mut root = Group::default();
+        root.children.push(text_element(&font, 'A', 5.0, 12.0));
+        root.children
+            .push(Element::Image(ofdbox_folio_ir::ImageElement {
+                image,
+                rect: ofdbox_folio_ir::Rect::new(0.0, 0.0, 30.0, 30.0),
+                transform: Matrix::IDENTITY,
+                alpha: 1.0,
+            }));
+        root.children.push(text_element(&font, 'B', 5.0, 25.0));
+        let scene = Scene {
+            size: Size::new(30.0, 30.0),
+            root,
+            diagnostics: Vec::new(),
+        };
+        let backend = WgpuBackend::new(context).expect("backend");
+        let target = WgpuTarget::new(backend.context(), scene.size, 96.0).expect("target");
+        backend.render_to_target(&scene, &target).expect("render");
+        let pixels = target.read_rgba(backend.context()).expect("read");
+        let mut dark_top = 0;
+        let mut dark_bottom = 0;
+        for y in 0..target.height() {
+            for x in 0..target.width() {
+                let index = ((y * target.width() + x) * 4) as usize;
+                if pixels[index] < 64 {
+                    if y < target.height() / 3 {
+                        dark_top += 1;
+                    } else if y > target.height() * 2 / 3 {
+                        dark_bottom += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(dark_top, 0, "the image must cover the first text run");
+        assert!(dark_bottom > 5, "the second text run must be on top");
     }
 
     #[test]
