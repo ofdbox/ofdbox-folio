@@ -142,6 +142,7 @@ pub(crate) fn rasterize_glyph(
         Matrix::scale(scale, -scale),
         1.0,
         (0.0, 0.0),
+        true,
         &mut edges,
     );
     if edges.is_empty() {

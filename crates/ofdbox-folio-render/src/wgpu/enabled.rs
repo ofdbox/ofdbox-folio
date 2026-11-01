@@ -649,6 +649,7 @@ impl WgpuBackend {
                                 clip.transform,
                                 target.dpi / 25.4,
                                 origin_px,
+                                true,
                                 &mut clip_edges,
                             );
                             let clip_count =
@@ -690,6 +691,7 @@ impl WgpuBackend {
                                 clip.transform,
                                 target.dpi / 25.4,
                                 origin_px,
+                                true,
                                 &mut clip_edges,
                             );
                             draw.clip_start = start;
@@ -1410,6 +1412,7 @@ fn collect_decoration_group<'a>(
             transform,
             scale,
             origin_px,
+            true,
             &mut clip_edges,
         );
         let Some(bounds) = edge_bounds(&clip_edges) else {
@@ -1828,7 +1831,7 @@ fn collect_group(
     }
     let clip = if let Some(clip) = &group.clip {
         let start = u32::try_from(edges.len()).unwrap_or(u32::MAX);
-        flatten_path(&clip.path, transform, scale, origin_px, edges);
+        flatten_path(&clip.path, transform, scale, origin_px, true, edges);
         let count = u32::try_from(edges.len()).unwrap_or(u32::MAX) - start;
         if count == 0
             || !viewport.intersects(edge_bounds(&edges[start as usize..]).unwrap_or([0.0; 4]))
@@ -1859,7 +1862,14 @@ fn collect_group(
                 let element_order = *order;
                 *order += 1;
                 let start = u32::try_from(edges.len()).unwrap_or(u32::MAX);
-                flatten_path(&path.path, transform, scale, origin_px, edges);
+                flatten_path(
+                    &path.path,
+                    transform,
+                    scale,
+                    origin_px,
+                    path.stroke.is_none(),
+                    edges,
+                );
                 let count = u32::try_from(edges.len()).unwrap_or(u32::MAX) - start;
                 if count == 0 {
                     continue;
@@ -2004,6 +2014,7 @@ pub(crate) fn flatten_path(
     transform: Matrix,
     scale: f64,
     origin_px: (f64, f64),
+    close: bool,
     edges: &mut Vec<[f32; 4]>,
 ) {
     let mut current = Point::default();
@@ -2021,6 +2032,9 @@ pub(crate) fn flatten_path(
     for segment in path.segments() {
         match segment {
             PathSegment::MoveTo(point) => {
+                if close && current != start {
+                    push(edges, current, start);
+                }
                 current = *point;
                 start = *point;
             }
@@ -2056,6 +2070,9 @@ pub(crate) fn flatten_path(
             }
             _ => {}
         }
+    }
+    if close && current != start {
+        push(edges, current, start);
     }
 }
 
@@ -2841,6 +2858,62 @@ mod tests {
             thicker > regular,
             "synthetic bold must cover more pixels: {thicker} vs {regular}"
         );
+    }
+
+    #[test]
+    fn renders_linear_gradient_path() {
+        let Ok(context) = WgpuContext::new_blocking() else {
+            return;
+        };
+        let mut path = Path::new();
+        path.move_to(Point::new(0.0, 0.0));
+        path.line_to(Point::new(20.0, 0.0));
+        path.line_to(Point::new(20.0, 20.0));
+        path.line_to(Point::new(0.0, 20.0));
+        path.close();
+        let mut root = Group::default();
+        root.children.push(Element::Path(PathElement {
+            path: std::sync::Arc::new(path),
+            transform: Matrix::IDENTITY,
+            fill: Some(Paint::LinearGradient(ofdbox_folio_ir::LinearGradient {
+                start: Point::new(0.0, 0.0),
+                end: Point::new(20.0, 0.0),
+                stops: vec![
+                    ofdbox_folio_ir::GradientStop {
+                        offset: 0.0,
+                        color: Rgba::from_rgb(255, 0, 0),
+                    },
+                    ofdbox_folio_ir::GradientStop {
+                        offset: 1.0,
+                        color: Rgba::from_rgb(0, 0, 255),
+                    },
+                ],
+                extend: Default::default(),
+            })),
+            stroke: None,
+            rule: FillRule::NonZero,
+        }));
+        let scene = Scene {
+            size: Size::new(20.0, 20.0),
+            root,
+            diagnostics: Vec::new(),
+        };
+        let backend = WgpuBackend::new(context).expect("backend");
+        let target = WgpuTarget::new(backend.context(), scene.size, 96.0).expect("target");
+        backend.render_to_target(&scene, &target).expect("render");
+        let pixels = target.read_rgba(backend.context()).expect("read");
+        let red = (
+            (5.0_f64 / 25.4 * 96.0) as u32,
+            (10.0_f64 / 25.4 * 96.0) as u32,
+        );
+        let blue = (
+            (15.0_f64 / 25.4 * 96.0) as u32,
+            (10.0_f64 / 25.4 * 96.0) as u32,
+        );
+        let red_index = ((red.1 * target.width() + red.0) * 4) as usize;
+        let blue_index = ((blue.1 * target.width() + blue.0) * 4) as usize;
+        assert!(pixels[red_index] > 180, "red gradient side missing");
+        assert!(pixels[blue_index + 2] > 180, "blue gradient side missing");
     }
 
     #[test]
