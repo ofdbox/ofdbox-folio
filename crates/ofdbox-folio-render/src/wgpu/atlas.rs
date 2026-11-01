@@ -355,10 +355,15 @@ pub(crate) struct GlyphInstance {
     pub _pad_a: f32,
     pub _pad_b: f32,
     pub _pad_c: f32,
+    /// Clip edge range and fill rule; clip_count == 0 means unclipped.
+    pub clip_start: u32,
+    pub clip_count: u32,
+    pub clip_rule: u32,
+    pub _clip_pad: u32,
 }
 
 impl GlyphInstance {
-    /// Serialize for the GPU instance buffer (112 bytes).
+    /// Serialize for the GPU instance buffer (128 bytes).
     pub(crate) fn write_bytes(self, out: &mut Vec<u8>) {
         for value in self
             .origin
@@ -373,6 +378,14 @@ impl GlyphInstance {
             .chain(self.end_color)
             .chain([self.mode, self._pad_a, self._pad_b, self._pad_c])
         {
+            out.extend_from_slice(&value.to_ne_bytes());
+        }
+        for value in [
+            self.clip_start,
+            self.clip_count,
+            self.clip_rule,
+            self._clip_pad,
+        ] {
             out.extend_from_slice(&value.to_ne_bytes());
         }
     }

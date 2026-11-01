@@ -49,6 +49,16 @@ impl ImagePipeline {
                     ty: wgpu_lib::BindingType::Sampler(wgpu_lib::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu_lib::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu_lib::ShaderStages::FRAGMENT,
+                    ty: wgpu_lib::BindingType::Buffer {
+                        ty: wgpu_lib::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         #[cfg(feature = "wgpu30")]
@@ -112,15 +122,38 @@ struct Params {
     x_axis: vec2f,
     y_axis: vec2f,
     alpha: f32,
+    clip_start: u32,
+    clip_count: u32,
+    clip_rule: u32,
 };
 struct VOut {
     @builtin(position) position: vec4f,
     @location(0) uv: vec2f,
+    @location(1) page: vec2f,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var image: texture_2d<f32>;
 @group(0) @binding(2) var image_sampler: sampler;
+@group(0) @binding(3) var<storage, read> clip_edges: array<vec4f>;
+
+fn inside_range(p: vec2f, start: u32, count: u32, rule: u32) -> bool {
+    var winding: i32 = 0;
+    for (var ei = 0u; ei < count; ei = ei + 1u) {
+        let e = clip_edges[start + ei];
+        let ay = e.y;
+        let by = e.w;
+        if ((ay <= p.y && by > p.y) || (by <= p.y && ay > p.y)) {
+            let t = (p.y - ay) / (by - ay);
+            let x = e.x + t * (e.z - e.x);
+            if (x > p.x) {
+                if (by > ay) { winding = winding + 1; } else { winding = winding - 1; }
+            }
+        }
+    }
+    if (rule != 0u) { return (winding & 1) != 0; }
+    return winding != 0;
+}
 
 @vertex
 fn vs(@builtin(vertex_index) vi: u32) -> VOut {
@@ -134,11 +167,15 @@ fn vs(@builtin(vertex_index) vi: u32) -> VOut {
     var out: VOut;
     out.position = vec4f(ndc, 0.0, 1.0);
     out.uv = corner;
+    out.page = page;
     return out;
 }
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4f {
+    if (params.clip_count > 0u && !inside_range(in.page, params.clip_start, params.clip_count, params.clip_rule)) {
+        discard;
+    }
     let texel = textureSample(image, image_sampler, in.uv);
     return vec4f(texel.rgb, texel.a * params.alpha);
 }

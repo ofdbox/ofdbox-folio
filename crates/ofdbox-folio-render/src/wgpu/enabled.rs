@@ -311,6 +311,9 @@ struct ImageDraw {
     y_axis: [f32; 2],
     alpha: f32,
     image: Arc<ImageAsset>,
+    clip_start: u32,
+    clip_count: u32,
+    clip_rule: u32,
 }
 
 /// A prepared text or image draw for one decoration element.
@@ -590,6 +593,8 @@ impl WgpuBackend {
         let mut decor_orders = Vec::with_capacity(decorations.len());
         let mut image_draws = Vec::new();
         let mut text_bind_group = None;
+        let mut clip_edges: Vec<[f32; 4]> = Vec::new();
+        let clip_buffer;
         {
             let mut atlas = self.atlas.lock().unwrap_or_else(|error| error.into_inner());
             let mut instances = Vec::new();
@@ -600,6 +605,7 @@ impl WgpuBackend {
                         world,
                         opacity,
                         clip,
+                        clip_path,
                         _order,
                     } => {
                         decor_orders.push(_order);
@@ -636,12 +642,35 @@ impl WgpuBackend {
                         );
                         let end = u32::try_from(instances.len())
                             .map_err(|_| RenderError::Backend("too many text glyphs".into()))?;
+                        if let Some(clip) = &clip_path {
+                            let clip_start = u32::try_from(clip_edges.len()).unwrap_or(u32::MAX);
+                            flatten_path(
+                                &clip.path,
+                                clip.transform,
+                                target.dpi / 25.4,
+                                origin_px,
+                                &mut clip_edges,
+                            );
+                            let clip_count =
+                                u32::try_from(clip_edges.len()).unwrap_or(u32::MAX) - clip_start;
+                            let clip_rule = u32::from(clip.rule == FillRule::EvenOdd);
+                            for instance in &mut instances[start as usize..end as usize] {
+                                instance.clip_start = clip_start;
+                                instance.clip_count = clip_count;
+                                instance.clip_rule = clip_rule;
+                            }
+                        }
                         decor_draws.push(DecorDraw::Text {
                             range: start..end,
                             scissor,
                         });
                     }
-                    Decoration::Image { draw, clip, _order } => {
+                    Decoration::Image {
+                        mut draw,
+                        clip,
+                        clip_path,
+                        _order,
+                    } => {
                         decor_orders.push(_order);
                         let scissor = clip
                             .map_or(Scissor::full(target.width, target.height), |clip| {
@@ -654,14 +683,46 @@ impl WgpuBackend {
                             });
                             continue;
                         }
+                        if let Some(clip) = clip_path {
+                            let start = u32::try_from(clip_edges.len()).unwrap_or(u32::MAX);
+                            flatten_path(
+                                &clip.path,
+                                clip.transform,
+                                target.dpi / 25.4,
+                                origin_px,
+                                &mut clip_edges,
+                            );
+                            draw.clip_start = start;
+                            draw.clip_count =
+                                u32::try_from(clip_edges.len()).unwrap_or(u32::MAX) - start;
+                            draw.clip_rule = u32::from(clip.rule == FillRule::EvenOdd);
+                        }
                         let index = image_draws.len();
                         image_draws.push(draw);
                         decor_draws.push(DecorDraw::Image { index, scissor });
                     }
                 }
             }
+            let mut clip_data = Vec::with_capacity(clip_edges.len().max(1) * 16);
+            if clip_edges.is_empty() {
+                clip_data.extend_from_slice(&[0_u8; 16]);
+            } else {
+                for edge in &clip_edges {
+                    for value in edge {
+                        clip_data.extend_from_slice(&value.to_ne_bytes());
+                    }
+                }
+            }
+            clip_buffer =
+                self.context
+                    .device
+                    .create_buffer_init(&wgpu_lib::util::BufferInitDescriptor {
+                        label: Some("ofdbox-clip-edges"),
+                        contents: &clip_data,
+                        usage: wgpu_lib::BufferUsages::STORAGE,
+                    });
             if !instances.is_empty() {
-                let mut instance_data = Vec::with_capacity(instances.len() * 112);
+                let mut instance_data = Vec::with_capacity(instances.len() * 128);
                 for instance in &instances {
                     instance.write_bytes(&mut instance_data);
                 }
@@ -708,6 +769,10 @@ impl WgpuBackend {
                                     binding: 3,
                                     resource: params_buffer.as_entire_binding(),
                                 },
+                                wgpu_lib::BindGroupEntry {
+                                    binding: 4,
+                                    resource: clip_buffer.as_entire_binding(),
+                                },
                             ],
                         });
                 text_bind_group = Some(bind_group);
@@ -730,10 +795,10 @@ impl WgpuBackend {
                 draw.y_axis[0],
                 draw.y_axis[1],
                 draw.alpha,
-                0.0,
-                0.0,
-                0.0,
             ] {
+                params.extend_from_slice(&value.to_ne_bytes());
+            }
+            for value in [draw.clip_start, draw.clip_count, draw.clip_rule] {
                 params.extend_from_slice(&value.to_ne_bytes());
             }
             let params_buffer =
@@ -762,6 +827,10 @@ impl WgpuBackend {
                             wgpu_lib::BindGroupEntry {
                                 binding: 2,
                                 resource: wgpu_lib::BindingResource::Sampler(&self.image_sampler),
+                            },
+                            wgpu_lib::BindGroupEntry {
+                                binding: 3,
+                                resource: clip_buffer.as_entire_binding(),
                             },
                         ],
                     });
@@ -1011,6 +1080,10 @@ impl WgpuBackend {
                                             &self.image_sampler,
                                         ),
                                     },
+                                    wgpu_lib::BindGroupEntry {
+                                        binding: 3,
+                                        resource: clip_buffer.as_entire_binding(),
+                                    },
                                 ],
                             });
                     let attachment = Some(wgpu_lib::RenderPassColorAttachment {
@@ -1249,6 +1322,14 @@ fn collect_paths(
     (edges, paths)
 }
 
+/// A clip path retained for per-fragment testing.
+#[derive(Clone)]
+struct ClipDraw {
+    path: Arc<Path>,
+    transform: Matrix,
+    rule: FillRule,
+}
+
 /// One ordered text or image draw from the scene tree.
 enum Decoration<'a> {
     Text {
@@ -1256,11 +1337,13 @@ enum Decoration<'a> {
         world: Matrix,
         opacity: f32,
         clip: Option<[f32; 4]>,
+        clip_path: Option<ClipDraw>,
         _order: u32,
     },
     Image {
         draw: ImageDraw,
         clip: Option<[f32; 4]>,
+        clip_path: Option<ClipDraw>,
         _order: u32,
     },
 }
@@ -1290,6 +1373,7 @@ fn collect_decorations(
         Matrix::IDENTITY,
         1.0,
         None,
+        None,
         dpi / 25.4,
         origin_px,
         viewport,
@@ -1305,6 +1389,7 @@ fn collect_decoration_group<'a>(
     parent: Matrix,
     parent_opacity: f32,
     parent_clip: Option<[f32; 4]>,
+    parent_clip_path: Option<ClipDraw>,
     scale: f64,
     origin_px: (f64, f64),
     viewport: Viewport,
@@ -1317,6 +1402,7 @@ fn collect_decoration_group<'a>(
     }
     let transform = group.transform.then(parent);
     let mut clip = parent_clip;
+    let mut clip_path = parent_clip_path;
     if let Some(group_clip) = &group.clip {
         let mut clip_edges = Vec::new();
         flatten_path(
@@ -1336,6 +1422,11 @@ fn collect_decoration_group<'a>(
             return;
         }
         clip = Some(intersected);
+        clip_path = Some(ClipDraw {
+            path: Arc::clone(&group_clip.path),
+            transform,
+            rule: group_clip.rule,
+        });
     }
     for element in &group.children {
         match element {
@@ -1344,6 +1435,7 @@ fn collect_decoration_group<'a>(
                 transform,
                 opacity,
                 clip,
+                clip_path.clone(),
                 scale,
                 origin_px,
                 viewport,
@@ -1358,6 +1450,7 @@ fn collect_decoration_group<'a>(
                     world: text.transform.then(transform),
                     opacity,
                     clip,
+                    clip_path: clip_path.clone(),
                     _order: element_order,
                 });
             }
@@ -1370,6 +1463,7 @@ fn collect_decoration_group<'a>(
                     decorations.push(Decoration::Image {
                         draw,
                         clip,
+                        clip_path: clip_path.clone(),
                         _order: element_order,
                     });
                 }
@@ -1556,6 +1650,10 @@ fn emit_text_instances(
             _pad_a: 0.0,
             _pad_b: 0.0,
             _pad_c: 0.0,
+            clip_start: 0,
+            clip_count: 0,
+            clip_rule: 0,
+            _clip_pad: 0,
         };
         instances.push(instance);
         // Layout synthesizes bold text with a thin same-color stroke. Stamp the
@@ -1656,6 +1754,9 @@ fn image_draw(
         y_axis: [y_axis.0 as f32, y_axis.1 as f32],
         alpha: element.alpha.clamp(0.0, 1.0) * opacity,
         image: Arc::clone(&element.image),
+        clip_start: 0,
+        clip_count: 0,
+        clip_rule: 0,
     })
 }
 
@@ -2631,7 +2732,6 @@ mod tests {
         let mut clip_path = Path::new();
         clip_path.move_to(Point::new(0.0, 0.0));
         clip_path.line_to(Point::new(7.0, 0.0));
-        clip_path.line_to(Point::new(7.0, 30.0));
         clip_path.line_to(Point::new(0.0, 30.0));
         clip_path.close();
         let mut group = Group {
@@ -2660,6 +2760,15 @@ mod tests {
         let target = WgpuTarget::new(backend.context(), scene.size, 96.0).expect("target");
         backend.render_to_target(&scene, &target).expect("render");
         let pixels = target.read_rgba(backend.context()).expect("read");
+        let inside_box = (
+            (25.0_f64 / 25.4 * 96.0) as u32,
+            (5.0_f64 / 25.4 * 96.0) as u32,
+        );
+        let index = ((inside_box.1 * target.width() + inside_box.0) * 4) as usize;
+        assert!(
+            pixels[index] > 200,
+            "a point inside the clip bounds but outside the triangle must be clipped"
+        );
         let clip_x = (7.0_f64 / 25.4 * 96.0).ceil() as u32 + 1;
         for y in 0..target.height() {
             for x in clip_x..target.width() {

@@ -59,6 +59,16 @@ impl TextPipeline {
                     },
                     count: None,
                 },
+                wgpu_lib::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu_lib::ShaderStages::FRAGMENT,
+                    ty: wgpu_lib::BindingType::Buffer {
+                        ty: wgpu_lib::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         #[cfg(feature = "wgpu30")]
@@ -130,6 +140,10 @@ struct Instance {
     _pad_a: f32,
     _pad_b: f32,
     _pad_c: f32,
+    clip_start: u32,
+    clip_count: u32,
+    clip_rule: u32,
+    _clip_pad: u32,
 };
 struct Params { size: vec2f, _pad: vec2f };
 struct VOut {
@@ -140,12 +154,34 @@ struct VOut {
     @location(3) end_color: vec4f,
     @location(4) gradient: vec4f,
     @location(5) mode: f32,
+    @location(6) @interpolate(flat) clip_start: u32,
+    @location(7) @interpolate(flat) clip_count: u32,
+    @location(8) @interpolate(flat) clip_rule: u32,
 };
 
 @group(0) @binding(0) var<storage, read> instances: array<Instance>;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
 @group(0) @binding(2) var atlas_sampler: sampler;
 @group(0) @binding(3) var<uniform> params: Params;
+@group(0) @binding(4) var<storage, read> clip_edges: array<vec4f>;
+
+fn inside_range(p: vec2f, start: u32, count: u32, rule: u32) -> bool {
+    var winding: i32 = 0;
+    for (var ei = 0u; ei < count; ei = ei + 1u) {
+        let e = clip_edges[start + ei];
+        let ay = e.y;
+        let by = e.w;
+        if ((ay <= p.y && by > p.y) || (by <= p.y && ay > p.y)) {
+            let t = (p.y - ay) / (by - ay);
+            let x = e.x + t * (e.z - e.x);
+            if (x > p.x) {
+                if (by > ay) { winding = winding + 1; } else { winding = winding - 1; }
+            }
+        }
+    }
+    if (rule != 0u) { return (winding & 1) != 0; }
+    return winding != 0;
+}
 
 @vertex
 fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
@@ -165,6 +201,9 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
     out.end_color = instance.end_color;
     out.gradient = instance.gradient;
     out.mode = instance.mode;
+    out.clip_start = instance.clip_start;
+    out.clip_count = instance.clip_count;
+    out.clip_rule = instance.clip_rule;
     return out;
 }
 
@@ -174,7 +213,10 @@ fn fs(in: VOut) -> @location(0) vec4f {
     if (in.mode > 1.5) {
         t = clamp(length(in.page - in.gradient.xy) / max(in.gradient.z, 0.0001), 0.0, 1.0);
     } else if (in.mode > 0.5) {
-        let axis = in.gradient.zw - in.gradient.xy;
+        if (in.clip_count > 0u && !inside_range(in.page, in.clip_start, in.clip_count, in.clip_rule)) {
+        discard;
+    }
+    let axis = in.gradient.zw - in.gradient.xy;
         t = clamp(dot(in.page - in.gradient.xy, axis) / max(dot(axis, axis), 0.0001), 0.0, 1.0);
     }
     let color = mix(in.color, in.end_color, t);

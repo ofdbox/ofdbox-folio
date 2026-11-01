@@ -48,8 +48,8 @@ reports the pixel difference.
 - Radial gradients and blend modes are not yet implemented in the GPU backend.
 - GPU text supports solid, linear-gradient and radial-gradient fills; synthetic
   bold is approximated by stamping offset glyphs.
-- Clip paths clip text and image quads to the clip bounding box with a scissor
-  rect; non-rectangular clip paths are therefore approximate for glyphs/images.
+- Text and image quads are clipped per fragment against the clip path edges; a
+  nested clip uses the innermost clip path.
 - Use the CPU renderer when you need the full feature set.
 - The GPU backend exists only with the `wgpu` feature; the default build exposes a placeholder `WgpuBackend` that reports `Unsupported`.
 
