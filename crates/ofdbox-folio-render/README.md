@@ -47,8 +47,9 @@ reports the pixel difference.
 - GPU text uses solid-color atlas glyphs; synthetic bold is approximated by
   stamping offset glyphs, but gradient text fills are still CPU-only.
 - Paths are drawn before all images and text; images and text keep their relative
-  scene order. Clip paths cull whole glyph/image quads by their bounding box
-  instead of clipping each fragment.
+  scene order.
+- Clip paths clip text and image quads to the clip bounding box with a scissor
+  rect; non-rectangular clip paths are therefore approximate for glyphs/images.
 - Use the CPU renderer when you need the full feature set.
 - The GPU backend exists only with the `wgpu` feature; the default build exposes a placeholder `WgpuBackend` that reports `Unsupported`.
 

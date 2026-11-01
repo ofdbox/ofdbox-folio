@@ -306,8 +306,49 @@ struct ImageDraw {
 
 /// An ordered text or image draw command.
 enum SceneOp {
-    Text(std::ops::Range<u32>),
-    Image(usize),
+    Text {
+        range: std::ops::Range<u32>,
+        scissor: Scissor,
+    },
+    Image {
+        index: usize,
+        scissor: Scissor,
+    },
+}
+
+/// Pixel-aligned scissor rectangle used to clip text and image quads.
+#[derive(Clone, Copy)]
+struct Scissor {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+impl Scissor {
+    fn full(width: u32, height: u32) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        }
+    }
+
+    fn from_clip(clip: [f32; 4], width: u32, height: u32) -> Self {
+        let max_x = width as f32;
+        let max_y = height as f32;
+        let x0 = clip[0].floor().clamp(0.0, max_x) as u32;
+        let y0 = clip[1].floor().clamp(0.0, max_y) as u32;
+        let x1 = clip[2].ceil().clamp(0.0, max_x) as u32;
+        let y1 = clip[3].ceil().clamp(0.0, max_y) as u32;
+        Self {
+            x: x0,
+            y: y0,
+            width: x1.saturating_sub(x0),
+            height: y1.saturating_sub(y0),
+        }
+    }
 }
 
 /// The wgpu compute backend.
@@ -534,6 +575,13 @@ impl WgpuBackend {
                         opacity,
                         clip,
                     } => {
+                        let scissor = clip
+                            .map_or(Scissor::full(target.width, target.height), |clip| {
+                                Scissor::from_clip(clip, target.width, target.height)
+                            });
+                        if scissor.width == 0 || scissor.height == 0 {
+                            continue;
+                        }
                         let start = u32::try_from(instances.len())
                             .map_err(|_| RenderError::Backend("too many text glyphs".into()))?;
                         emit_text_instances(
@@ -557,11 +605,24 @@ impl WgpuBackend {
                         let end = u32::try_from(instances.len())
                             .map_err(|_| RenderError::Backend("too many text glyphs".into()))?;
                         if end > start {
-                            scene_ops.push(SceneOp::Text(start..end));
+                            scene_ops.push(SceneOp::Text {
+                                range: start..end,
+                                scissor,
+                            });
                         }
                     }
-                    Decoration::Image(draw) => {
-                        scene_ops.push(SceneOp::Image(image_draws.len()));
+                    Decoration::Image { draw, clip } => {
+                        let scissor = clip
+                            .map_or(Scissor::full(target.width, target.height), |clip| {
+                                Scissor::from_clip(clip, target.width, target.height)
+                            });
+                        if scissor.width == 0 || scissor.height == 0 {
+                            continue;
+                        }
+                        scene_ops.push(SceneOp::Image {
+                            index: image_draws.len(),
+                            scissor,
+                        });
                         image_draws.push(draw);
                     }
                 }
@@ -799,18 +860,20 @@ impl WgpuBackend {
             let mut pass = encoder.begin_render_pass(&descriptor);
             for op in &scene_ops {
                 match op {
-                    SceneOp::Image(index) => {
+                    SceneOp::Image { index, scissor } => {
                         let Some(Some(bind_group)) = image_batches.get(*index) else {
                             continue;
                         };
+                        pass.set_scissor_rect(scissor.x, scissor.y, scissor.width, scissor.height);
                         pass.set_pipeline(self.image_pipeline.pipeline());
                         pass.set_bind_group(0, bind_group, &[]);
                         pass.draw(0..6, 0..1);
                     }
-                    SceneOp::Text(range) => {
+                    SceneOp::Text { range, scissor } => {
                         let Some(bind_group) = &text_bind_group else {
                             continue;
                         };
+                        pass.set_scissor_rect(scissor.x, scissor.y, scissor.width, scissor.height);
                         pass.set_pipeline(self.text_pipeline.pipeline());
                         pass.set_bind_group(0, bind_group, &[]);
                         pass.draw(0..6, range.clone());
@@ -984,7 +1047,10 @@ enum Decoration<'a> {
         opacity: f32,
         clip: Option<[f32; 4]>,
     },
-    Image(ImageDraw),
+    Image {
+        draw: ImageDraw,
+        clip: Option<[f32; 4]>,
+    },
 }
 
 /// Collect text and image draws in scene order.
@@ -1078,7 +1144,7 @@ fn collect_decoration_group<'a>(
                 if let Some(draw) =
                     image_draw(image, transform, opacity, clip, scale, origin_px, viewport)
                 {
-                    decorations.push(Decoration::Image(draw));
+                    decorations.push(Decoration::Image { draw, clip });
                 }
             }
             _ => {}
@@ -1992,6 +2058,55 @@ mod tests {
         }
         assert_eq!(dark_top, 0, "the image must cover the first text run");
         assert!(dark_bottom > 5, "the second text run must be on top");
+    }
+
+    #[test]
+    fn clips_text_to_group_bounds() {
+        let Ok(font_data) = std::fs::read("C:/Windows/Fonts/arial.ttf") else {
+            return;
+        };
+        let Ok(context) = WgpuContext::new_blocking() else {
+            return;
+        };
+        let font = std::sync::Arc::new(ofdbox_folio_ir::FontAsset::new(
+            std::sync::Arc::from(font_data.into_boxed_slice()),
+            0,
+        ));
+        let mut clip_path = Path::new();
+        clip_path.move_to(Point::new(0.0, 0.0));
+        clip_path.line_to(Point::new(7.0, 0.0));
+        clip_path.line_to(Point::new(7.0, 30.0));
+        clip_path.line_to(Point::new(0.0, 30.0));
+        clip_path.close();
+        let mut group = Group {
+            clip: Some(std::sync::Arc::new(ofdbox_folio_ir::Clip {
+                path: std::sync::Arc::new(clip_path),
+                rule: FillRule::NonZero,
+            })),
+            ..Group::default()
+        };
+        group.children.push(text_element(&font, 'A', 5.0, 20.0));
+        let mut root = Group::default();
+        root.children.push(Element::Group(group));
+        let scene = Scene {
+            size: Size::new(30.0, 30.0),
+            root,
+            diagnostics: Vec::new(),
+        };
+        let backend = WgpuBackend::new(context).expect("backend");
+        let target = WgpuTarget::new(backend.context(), scene.size, 96.0).expect("target");
+        backend.render_to_target(&scene, &target).expect("render");
+        let pixels = target.read_rgba(backend.context()).expect("read");
+        let clip_x = (7.0_f64 / 25.4 * 96.0).ceil() as u32 + 1;
+        for y in 0..target.height() {
+            for x in clip_x..target.width() {
+                let index = ((y * target.width() + x) * 4) as usize;
+                assert!(
+                    pixels[index] > 200,
+                    "pixel at ({x}, {y}) escaped the text clip"
+                );
+            }
+        }
     }
 
     #[test]
