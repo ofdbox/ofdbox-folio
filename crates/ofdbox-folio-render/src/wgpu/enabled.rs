@@ -313,8 +313,8 @@ struct ImageDraw {
     image: Arc<ImageAsset>,
 }
 
-/// An ordered text or image draw command.
-enum SceneOp {
+/// A prepared text or image draw for one decoration element.
+enum DecorDraw {
     Text {
         range: std::ops::Range<u32>,
         scissor: Scissor,
@@ -323,6 +323,12 @@ enum SceneOp {
         index: usize,
         scissor: Scissor,
     },
+}
+
+/// One source-ordered run of path draws or decoration draws.
+enum DrawRun {
+    Paths(Vec<usize>),
+    Decor(Vec<usize>),
 }
 
 /// Pixel-aligned scissor rectangle used to clip text and image quads.
@@ -578,28 +584,34 @@ impl WgpuBackend {
             }
         };
         let (edges, paths) = cached.as_ref();
-        let mut scene_ops = Vec::new();
+        let decorations =
+            collect_decorations(scene, target.dpi, origin_px, target.width, target.height);
+        let mut decor_draws = Vec::with_capacity(decorations.len());
+        let mut decor_orders = Vec::with_capacity(decorations.len());
         let mut image_draws = Vec::new();
         let mut text_bind_group = None;
         {
             let mut atlas = self.atlas.lock().unwrap_or_else(|error| error.into_inner());
             let mut instances = Vec::new();
-            for decoration in
-                collect_decorations(scene, target.dpi, origin_px, target.width, target.height)
-            {
+            for decoration in decorations {
                 match decoration {
                     Decoration::Text {
                         text,
                         world,
                         opacity,
                         clip,
-                        _order: _,
+                        _order,
                     } => {
+                        decor_orders.push(_order);
                         let scissor = clip
                             .map_or(Scissor::full(target.width, target.height), |clip| {
                                 Scissor::from_clip(clip, target.width, target.height)
                             });
                         if scissor.width == 0 || scissor.height == 0 {
+                            decor_draws.push(DecorDraw::Text {
+                                range: 0..0,
+                                scissor,
+                            });
                             continue;
                         }
                         let start = u32::try_from(instances.len())
@@ -624,30 +636,27 @@ impl WgpuBackend {
                         );
                         let end = u32::try_from(instances.len())
                             .map_err(|_| RenderError::Backend("too many text glyphs".into()))?;
-                        if end > start {
-                            scene_ops.push(SceneOp::Text {
-                                range: start..end,
-                                scissor,
-                            });
-                        }
+                        decor_draws.push(DecorDraw::Text {
+                            range: start..end,
+                            scissor,
+                        });
                     }
-                    Decoration::Image {
-                        draw,
-                        clip,
-                        _order: _,
-                    } => {
+                    Decoration::Image { draw, clip, _order } => {
+                        decor_orders.push(_order);
                         let scissor = clip
                             .map_or(Scissor::full(target.width, target.height), |clip| {
                                 Scissor::from_clip(clip, target.width, target.height)
                             });
                         if scissor.width == 0 || scissor.height == 0 {
+                            decor_draws.push(DecorDraw::Image {
+                                index: usize::MAX,
+                                scissor,
+                            });
                             continue;
                         }
-                        scene_ops.push(SceneOp::Image {
-                            index: image_draws.len(),
-                            scissor,
-                        });
+                        let index = image_draws.len();
                         image_draws.push(draw);
+                        decor_draws.push(DecorDraw::Image { index, scissor });
                     }
                 }
             }
@@ -758,149 +767,315 @@ impl WgpuBackend {
                     });
             image_batches.push(Some(bind_group));
         }
+        let mut path_groups: Vec<(u32, Vec<usize>)> = Vec::new();
+        for (index, path) in paths.iter().enumerate() {
+            if let Some(last) = path_groups.last_mut()
+                && last.0 == path.order
+            {
+                last.1.push(index);
+            } else {
+                path_groups.push((path.order, vec![index]));
+            }
+        }
+        let mut runs = Vec::new();
+        let (mut path_index, mut decor_index) = (0, 0);
+        while path_index < path_groups.len() || decor_index < decor_orders.len() {
+            let path_order = path_groups.get(path_index).map(|group| group.0);
+            let decoration_order = decor_orders.get(decor_index).copied();
+            let take_path = match (path_order, decoration_order) {
+                (Some(path), Some(decoration)) => path < decoration,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            if take_path {
+                let group = &path_groups[path_index].1;
+                if let Some(DrawRun::Paths(indices)) = runs.last_mut() {
+                    indices.extend_from_slice(group);
+                } else {
+                    runs.push(DrawRun::Paths(group.clone()));
+                }
+                path_index += 1;
+            } else {
+                if let Some(DrawRun::Decor(indices)) = runs.last_mut() {
+                    indices.push(decor_index);
+                } else {
+                    runs.push(DrawRun::Decor(vec![decor_index]));
+                }
+                decor_index += 1;
+            }
+        }
         let mut encoder = self
             .context
             .device
             .create_command_encoder(&Default::default());
-        if !paths.is_empty() {
+        let clear_attachment = Some(wgpu_lib::RenderPassColorAttachment {
+            view: &target.view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu_lib::Operations {
+                load: wgpu_lib::LoadOp::Clear(wgpu_lib::Color {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                }),
+                store: wgpu_lib::StoreOp::Store,
+            },
+        });
+        let clear_descriptor = wgpu_lib::RenderPassDescriptor {
+            label: Some("ofdbox-clear-pass"),
+            color_attachments: &[clear_attachment],
+            ..Default::default()
+        };
+        {
+            let _pass = encoder.begin_render_pass(&clear_descriptor);
+        }
+        let layer_texture = self
+            .context
+            .device
+            .create_texture(&wgpu_lib::TextureDescriptor {
+                label: Some("ofdbox-path-layer"),
+                size: wgpu_lib::Extent3d {
+                    width: target.width,
+                    height: target.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu_lib::TextureDimension::D2,
+                format: wgpu_lib::TextureFormat::Rgba8Unorm,
+                usage: wgpu_lib::TextureUsages::STORAGE_BINDING
+                    | wgpu_lib::TextureUsages::TEXTURE_BINDING
+                    | wgpu_lib::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+        let layer_view = layer_texture.create_view(&wgpu_lib::TextureViewDescriptor::default());
+        let edge_buffer = (!edges.is_empty()).then(|| {
             let mut edge_data = Vec::with_capacity(edges.len() * 16);
             for edge in edges {
                 for value in edge {
                     edge_data.extend_from_slice(&value.to_ne_bytes());
                 }
             }
-            let mut path_data = Vec::with_capacity(paths.len() * 96);
-            for path in paths {
-                for value in [path.start, path.count, path.rule, path.kind] {
-                    path_data.extend_from_slice(&value.to_ne_bytes());
-                }
-                for value in path.color {
-                    path_data.extend_from_slice(&value.to_ne_bytes());
-                }
-                path_data.extend_from_slice(&path.width.to_ne_bytes());
-                for value in [path.clip_start, path.clip_count, path.clip_rule] {
-                    path_data.extend_from_slice(&value.to_ne_bytes());
-                }
-                for value in path.end_color {
-                    path_data.extend_from_slice(&value.to_ne_bytes());
-                }
-                for value in path.gradient {
-                    path_data.extend_from_slice(&value.to_ne_bytes());
-                }
-                for value in path.bbox {
-                    path_data.extend_from_slice(&value.to_ne_bytes());
-                }
-            }
-            let edge_buffer =
-                self.context
-                    .device
-                    .create_buffer_init(&wgpu_lib::util::BufferInitDescriptor {
-                        label: Some("ofdbox-edge-buffer"),
-                        contents: &edge_data,
-                        usage: wgpu_lib::BufferUsages::STORAGE,
-                    });
-            let path_buffer =
-                self.context
-                    .device
-                    .create_buffer_init(&wgpu_lib::util::BufferInitDescriptor {
-                        label: Some("ofdbox-path-buffer"),
-                        contents: &path_data,
-                        usage: wgpu_lib::BufferUsages::STORAGE,
-                    });
-            let params = [
-                target.width,
-                target.height,
-                u32::try_from(paths.len())
-                    .map_err(|_| RenderError::Backend("too many paths".into()))?,
-                ((target.dpi / 25.4) as f32).to_bits(),
-            ];
-            let mut params_bytes = Vec::with_capacity(16);
-            for value in params {
-                params_bytes.extend_from_slice(&value.to_ne_bytes());
-            }
-            let params_buffer =
-                self.context
-                    .device
-                    .create_buffer_init(&wgpu_lib::util::BufferInitDescriptor {
-                        label: Some("ofdbox-params"),
-                        contents: &params_bytes,
-                        usage: wgpu_lib::BufferUsages::STORAGE,
-                    });
-            let bind_group =
-                self.context
-                    .device
-                    .create_bind_group(&wgpu_lib::BindGroupDescriptor {
-                        label: Some("ofdbox-wgpu-bind-group"),
-                        layout: &self.layout,
-                        entries: &[
-                            wgpu_lib::BindGroupEntry {
-                                binding: 0,
-                                resource: edge_buffer.as_entire_binding(),
-                            },
-                            wgpu_lib::BindGroupEntry {
-                                binding: 1,
-                                resource: path_buffer.as_entire_binding(),
-                            },
-                            wgpu_lib::BindGroupEntry {
-                                binding: 2,
-                                resource: params_buffer.as_entire_binding(),
-                            },
-                            wgpu_lib::BindGroupEntry {
-                                binding: 3,
-                                resource: wgpu_lib::BindingResource::TextureView(&target.view),
-                            },
-                        ],
-                    });
-            let mut pass = encoder.begin_compute_pass(&wgpu_lib::ComputePassDescriptor::default());
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(target.width.div_ceil(8), target.height.div_ceil(8), 1);
-        }
-        if paths.is_empty() || !scene_ops.is_empty() {
-            let load = if paths.is_empty() {
-                wgpu_lib::LoadOp::Clear(wgpu_lib::Color {
-                    r: 1.0,
-                    g: 1.0,
-                    b: 1.0,
-                    a: 1.0,
+            self.context
+                .device
+                .create_buffer_init(&wgpu_lib::util::BufferInitDescriptor {
+                    label: Some("ofdbox-edge-buffer"),
+                    contents: &edge_data,
+                    usage: wgpu_lib::BufferUsages::STORAGE,
                 })
-            } else {
-                wgpu_lib::LoadOp::Load
-            };
-            let attachment = Some(wgpu_lib::RenderPassColorAttachment {
-                view: &target.view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu_lib::Operations {
-                    load,
-                    store: wgpu_lib::StoreOp::Store,
-                },
-            });
-            let descriptor = wgpu_lib::RenderPassDescriptor {
-                label: Some("ofdbox-decoration-pass"),
-                color_attachments: &[attachment],
-                ..Default::default()
-            };
-            let mut pass = encoder.begin_render_pass(&descriptor);
-            for op in &scene_ops {
-                match op {
-                    SceneOp::Image { index, scissor } => {
-                        let Some(Some(bind_group)) = image_batches.get(*index) else {
-                            continue;
-                        };
-                        pass.set_scissor_rect(scissor.x, scissor.y, scissor.width, scissor.height);
-                        pass.set_pipeline(self.image_pipeline.pipeline());
-                        pass.set_bind_group(0, bind_group, &[]);
-                        pass.draw(0..6, 0..1);
+        });
+        for run in &runs {
+            match run {
+                DrawRun::Paths(indices) => {
+                    let mut path_data = Vec::with_capacity(indices.len() * 96);
+                    for index in indices {
+                        let path = &paths[*index];
+                        for value in [path.start, path.count, path.rule, path.kind] {
+                            path_data.extend_from_slice(&value.to_ne_bytes());
+                        }
+                        for value in path.color {
+                            path_data.extend_from_slice(&value.to_ne_bytes());
+                        }
+                        path_data.extend_from_slice(&path.width.to_ne_bytes());
+                        for value in [path.clip_start, path.clip_count, path.clip_rule] {
+                            path_data.extend_from_slice(&value.to_ne_bytes());
+                        }
+                        for value in path.end_color {
+                            path_data.extend_from_slice(&value.to_ne_bytes());
+                        }
+                        for value in path.gradient {
+                            path_data.extend_from_slice(&value.to_ne_bytes());
+                        }
+                        for value in path.bbox {
+                            path_data.extend_from_slice(&value.to_ne_bytes());
+                        }
                     }
-                    SceneOp::Text { range, scissor } => {
-                        let Some(bind_group) = &text_bind_group else {
-                            continue;
-                        };
-                        pass.set_scissor_rect(scissor.x, scissor.y, scissor.width, scissor.height);
-                        pass.set_pipeline(self.text_pipeline.pipeline());
-                        pass.set_bind_group(0, bind_group, &[]);
-                        pass.draw(0..6, range.clone());
+                    let Some(edge_buffer) = &edge_buffer else {
+                        continue;
+                    };
+                    let path_buffer = self.context.device.create_buffer_init(
+                        &wgpu_lib::util::BufferInitDescriptor {
+                            label: Some("ofdbox-path-buffer"),
+                            contents: &path_data,
+                            usage: wgpu_lib::BufferUsages::STORAGE,
+                        },
+                    );
+                    let params = [
+                        target.width,
+                        target.height,
+                        u32::try_from(indices.len())
+                            .map_err(|_| RenderError::Backend("too many paths".into()))?,
+                        1.0_f32.to_bits(),
+                    ];
+                    let mut params_bytes = Vec::with_capacity(16);
+                    for value in params {
+                        params_bytes.extend_from_slice(&value.to_ne_bytes());
+                    }
+                    let params_buffer = self.context.device.create_buffer_init(
+                        &wgpu_lib::util::BufferInitDescriptor {
+                            label: Some("ofdbox-layer-params"),
+                            contents: &params_bytes,
+                            usage: wgpu_lib::BufferUsages::STORAGE,
+                        },
+                    );
+                    let bind_group =
+                        self.context
+                            .device
+                            .create_bind_group(&wgpu_lib::BindGroupDescriptor {
+                                label: Some("ofdbox-layer-bind-group"),
+                                layout: &self.layout,
+                                entries: &[
+                                    wgpu_lib::BindGroupEntry {
+                                        binding: 0,
+                                        resource: edge_buffer.as_entire_binding(),
+                                    },
+                                    wgpu_lib::BindGroupEntry {
+                                        binding: 1,
+                                        resource: path_buffer.as_entire_binding(),
+                                    },
+                                    wgpu_lib::BindGroupEntry {
+                                        binding: 2,
+                                        resource: params_buffer.as_entire_binding(),
+                                    },
+                                    wgpu_lib::BindGroupEntry {
+                                        binding: 3,
+                                        resource: wgpu_lib::BindingResource::TextureView(
+                                            &layer_view,
+                                        ),
+                                    },
+                                ],
+                            });
+                    {
+                        let mut pass =
+                            encoder.begin_compute_pass(&wgpu_lib::ComputePassDescriptor::default());
+                        pass.set_pipeline(&self.pipeline);
+                        pass.set_bind_group(0, &bind_group, &[]);
+                        pass.dispatch_workgroups(
+                            target.width.div_ceil(8),
+                            target.height.div_ceil(8),
+                            1,
+                        );
+                    }
+                    let mut composite_params = Vec::with_capacity(48);
+                    for value in [
+                        target.width as f32,
+                        target.height as f32,
+                        0.0,
+                        0.0,
+                        target.width as f32,
+                        0.0,
+                        0.0,
+                        target.height as f32,
+                        1.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                    ] {
+                        composite_params.extend_from_slice(&value.to_ne_bytes());
+                    }
+                    let composite_buffer = self.context.device.create_buffer_init(
+                        &wgpu_lib::util::BufferInitDescriptor {
+                            label: Some("ofdbox-layer-composite-params"),
+                            contents: &composite_params,
+                            usage: wgpu_lib::BufferUsages::UNIFORM,
+                        },
+                    );
+                    let composite_group =
+                        self.context
+                            .device
+                            .create_bind_group(&wgpu_lib::BindGroupDescriptor {
+                                label: Some("ofdbox-layer-composite"),
+                                layout: self.image_pipeline.layout(),
+                                entries: &[
+                                    wgpu_lib::BindGroupEntry {
+                                        binding: 0,
+                                        resource: composite_buffer.as_entire_binding(),
+                                    },
+                                    wgpu_lib::BindGroupEntry {
+                                        binding: 1,
+                                        resource: wgpu_lib::BindingResource::TextureView(
+                                            &layer_view,
+                                        ),
+                                    },
+                                    wgpu_lib::BindGroupEntry {
+                                        binding: 2,
+                                        resource: wgpu_lib::BindingResource::Sampler(
+                                            &self.image_sampler,
+                                        ),
+                                    },
+                                ],
+                            });
+                    let attachment = Some(wgpu_lib::RenderPassColorAttachment {
+                        view: &target.view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu_lib::Operations {
+                            load: wgpu_lib::LoadOp::Load,
+                            store: wgpu_lib::StoreOp::Store,
+                        },
+                    });
+                    let descriptor = wgpu_lib::RenderPassDescriptor {
+                        label: Some("ofdbox-layer-composite-pass"),
+                        color_attachments: &[attachment],
+                        ..Default::default()
+                    };
+                    let mut pass = encoder.begin_render_pass(&descriptor);
+                    pass.set_pipeline(self.image_pipeline.pipeline());
+                    pass.set_bind_group(0, &composite_group, &[]);
+                    pass.set_scissor_rect(0, 0, target.width, target.height);
+                    pass.draw(0..6, 0..1);
+                }
+                DrawRun::Decor(indices) => {
+                    let attachment = Some(wgpu_lib::RenderPassColorAttachment {
+                        view: &target.view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu_lib::Operations {
+                            load: wgpu_lib::LoadOp::Load,
+                            store: wgpu_lib::StoreOp::Store,
+                        },
+                    });
+                    let descriptor = wgpu_lib::RenderPassDescriptor {
+                        label: Some("ofdbox-decoration-pass"),
+                        color_attachments: &[attachment],
+                        ..Default::default()
+                    };
+                    let mut pass = encoder.begin_render_pass(&descriptor);
+                    for index in indices {
+                        match &decor_draws[*index] {
+                            DecorDraw::Text { range, scissor } => {
+                                if range.is_empty() {
+                                    continue;
+                                }
+                                let Some(bind_group) = &text_bind_group else {
+                                    continue;
+                                };
+                                pass.set_scissor_rect(
+                                    scissor.x,
+                                    scissor.y,
+                                    scissor.width,
+                                    scissor.height,
+                                );
+                                pass.set_pipeline(self.text_pipeline.pipeline());
+                                pass.set_bind_group(0, bind_group, &[]);
+                                pass.draw(0..6, range.clone());
+                            }
+                            DecorDraw::Image { index, scissor } => {
+                                let Some(Some(bind_group)) = image_batches.get(*index) else {
+                                    continue;
+                                };
+                                pass.set_scissor_rect(
+                                    scissor.x,
+                                    scissor.y,
+                                    scissor.width,
+                                    scissor.height,
+                                );
+                                pass.set_pipeline(self.image_pipeline.pipeline());
+                                pass.set_bind_group(0, bind_group, &[]);
+                                pass.draw(0..6, 0..1);
+                            }
+                        }
                     }
                 }
             }
@@ -1840,7 +2015,8 @@ fn stroke_coverage(p: vec2f, info: PathInfo) -> f32 {
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3u) {
     if (id.x >= params.width || id.y >= params.height) { return; }
-    var result = vec4f(1.0, 1.0, 1.0, 1.0);
+    let layer = params.scale > 0.5;
+    var result = select(vec4f(1.0, 1.0, 1.0, 1.0), vec4f(0.0), layer);
     for (var pi = 0u; pi < params.count; pi = pi + 1u) {
         let info = paths[pi];
         let pixel = vec2f(f32(id.x) + 0.5, f32(id.y) + 0.5);
@@ -1863,8 +2039,15 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
         if (coverage > 0.0) {
             let color = paint_color(info, vec2f(f32(id.x) + 0.5, f32(id.y) + 0.5));
             let a = color.a * coverage;
-            result = vec4f(color.rgb * a + result.rgb * (1.0 - a), 1.0);
+            if (layer) {
+                result = vec4f(color.rgb * a, a) + result * (1.0 - a);
+            } else {
+                result = vec4f(color.rgb * a + result.rgb * (1.0 - a), 1.0);
+            }
         }
+    }
+    if (layer && result.a > 0.0) {
+        result = vec4f(result.rgb / result.a, result.a);
     }
     textureStore(output, vec2i(i32(id.x), i32(id.y)), result);
 }
@@ -2201,6 +2384,68 @@ mod tests {
         let pixels = target.read_rgba(backend.context()).expect("read");
         let dark = pixels.chunks(4).filter(|pixel| pixel[0] < 128).count();
         assert!(dark > 5, "expected glyph pixels in the tile, got {dark}");
+    }
+
+    #[test]
+    fn paths_follow_scene_order() {
+        let Ok(font_data) = std::fs::read("C:/Windows/Fonts/arial.ttf") else {
+            return;
+        };
+        let Ok(context) = WgpuContext::new_blocking() else {
+            return;
+        };
+        let font = std::sync::Arc::new(ofdbox_folio_ir::FontAsset::new(
+            std::sync::Arc::from(font_data.into_boxed_slice()),
+            0,
+        ));
+        let mut rectangle = Path::new();
+        rectangle.move_to(Point::new(0.0, 0.0));
+        rectangle.line_to(Point::new(30.0, 0.0));
+        rectangle.line_to(Point::new(30.0, 30.0));
+        rectangle.line_to(Point::new(0.0, 30.0));
+        rectangle.close();
+        let red = Element::Path(PathElement {
+            path: std::sync::Arc::new(rectangle),
+            transform: Matrix::IDENTITY,
+            fill: Some(Paint::Color(Rgba::from_rgb(255, 0, 0))),
+            stroke: None,
+            rule: FillRule::NonZero,
+        });
+        let mut covered = Group::default();
+        covered.children.push(text_element(&font, 'A', 5.0, 20.0));
+        covered.children.push(red.clone());
+        let mut covered_root = Group::default();
+        covered_root.children.push(Element::Group(covered));
+        let covered_scene = Scene {
+            size: Size::new(30.0, 30.0),
+            root: covered_root,
+            diagnostics: Vec::new(),
+        };
+        let backend = WgpuBackend::new(context).expect("backend");
+        let target = WgpuTarget::new(backend.context(), covered_scene.size, 96.0).expect("target");
+        backend
+            .render_to_target(&covered_scene, &target)
+            .expect("render");
+        let pixels = target.read_rgba(backend.context()).expect("read");
+        let dark = pixels.chunks(4).filter(|pixel| pixel[0] < 64).count();
+        assert_eq!(dark, 0, "the later path must cover the text");
+
+        let mut on_top = Group::default();
+        on_top.children.push(red);
+        on_top.children.push(text_element(&font, 'A', 5.0, 20.0));
+        let mut on_top_root = Group::default();
+        on_top_root.children.push(Element::Group(on_top));
+        let on_top_scene = Scene {
+            size: Size::new(30.0, 30.0),
+            root: on_top_root,
+            diagnostics: Vec::new(),
+        };
+        backend
+            .render_to_target(&on_top_scene, &target)
+            .expect("render");
+        let pixels = target.read_rgba(backend.context()).expect("read");
+        let dark = pixels.chunks(4).filter(|pixel| pixel[0] < 64).count();
+        assert!(dark > 5, "the later text must be visible over the path");
     }
 
     #[test]

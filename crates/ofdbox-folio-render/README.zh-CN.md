@@ -34,9 +34,10 @@ CPU 渲染器基于 `vello_cpu`，只消费 Fixed IR，不感知源文档格式�
 
 实色填充、描边、线性渐变、裁剪、atlas 文字与 RGBA 图片。
 
-后端把场景内所有填充/描边路径合批为一次 compute dispatch，所有字形合批为一次
-instanced text draw，所有图片四边形合批到同一个 render pass。字形栅格化到 R8
-atlas；图片只解码一次并缓存为 GPU 纹理。页面级入口是
+后端把连续路径元素按源顺序分段，每段先栅格化到透明 layer 再在正确位置合成，
+因此路径、文字与图片严格遵循场景树顺序。字形合批为一次 instanced text draw，
+图片四边形共用一个 render pass。字形栅格化到 R8 atlas；图片只解码一次并缓存为
+GPU 纹理。页面级入口是
 `WgpuBackend::render_page`，`render_page_region` 用于增量刷新的页面瓦片；门面中的
 `examples/wgpu_compare.rs` 会用两种后端渲染同一页并输出像素差异。
 
@@ -45,8 +46,8 @@ atlas；图片只解码一次并缓存为 GPU 纹理。页面级入口是
 - GPU 后端尚未实现径向渐变与混合模式。
 - GPU 文字目前只支持实色 atlas 字形；合成粗体通过偏移叠印近似，渐变文字填充回退到
   第一个色标。
-- 路径统一先于图片和文字绘制；图片与文字之间保留相对场景顺序。裁剪路径用 scissor
-  rect 把字形/图片裁剪到裁剪包围盒；非矩形裁剪路径对文字和图片仍是近似。
+- 裁剪路径用 scissor rect 把字形/图片裁剪到裁剪包围盒；非矩形裁剪路径对文字和
+  图片仍是近似。
 - 需要完整特性时使用 CPU 渲染器。
 - GPU 后端仅在启用 `wgpu` feature 时存在；默认构建暴露占位 `WgpuBackend`，其调用返回 `Unsupported`。
 

@@ -34,10 +34,11 @@ The `wgpu` feature of `ofdbox-folio-render` (facade `gpu`) provides the compute 
 
 Solid fills, strokes, linear gradients, clipping, atlas-backed text and RGBA images.
 
-The backend batches all fill/stroke paths of a scene into one compute dispatch, all
-glyphs into one instanced text draw, and all image quads into one render pass. Text
-glyphs are rasterized into an R8 atlas; images are decoded once and cached as GPU
-textures. `WgpuBackend::render_page` is the page-level entry point,
+The backend groups consecutive path elements into source-ordered runs, rasterizes
+each run into a transparent layer and composites it at the right position, so
+paths, text and images follow the scene tree order. Glyphs are batched into one
+instanced text draw, and all image quads share one render pass. Text glyphs are
+rasterized into an R8 atlas; images are decoded once and cached as GPU textures. `WgpuBackend::render_page` is the page-level entry point,
 `render_page_region` renders a tile of a page for incremental refresh, and
 `examples/wgpu_compare.rs` in the facade renders a page with both backends and
 reports the pixel difference.
@@ -48,8 +49,6 @@ reports the pixel difference.
 - GPU text uses solid-color atlas glyphs; synthetic bold is approximated by
   stamping offset glyphs, and gradient text fills fall back to the first color
   stop.
-- Paths are drawn before all images and text; images and text keep their relative
-  scene order.
 - Clip paths clip text and image quads to the clip bounding box with a scissor
   rect; non-rectangular clip paths are therefore approximate for glyphs/images.
 - Use the CPU renderer when you need the full feature set.
