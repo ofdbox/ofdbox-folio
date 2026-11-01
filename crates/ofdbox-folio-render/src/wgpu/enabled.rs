@@ -1620,7 +1620,8 @@ fn emit_text_instances(
         };
         let (bold, bold_radius) = match text.stroke.as_ref() {
             Some(stroke) if matches!(&stroke.paint, Paint::Color(color) if *color == fill_color) => {
-                (true, (stroke.style.width * scale * 0.5) as f32)
+                let radius = stroke.style.width * scale * determinant.sqrt() * 0.5;
+                (true, radius as f32)
             }
             _ => (false, 0.0),
         };
