@@ -110,6 +110,10 @@ pub struct WgpuOptions {
     pub max_tile_cache_entries: usize,
     /// Maximum number of prepared scenes retained across tiles.
     pub max_prepared_scenes: usize,
+    /// Maximum number of cached glyph outlines.
+    pub max_glyph_cache_entries: usize,
+    /// Glyph atlas edge length in pixels.
+    pub atlas_size: u32,
 }
 
 impl Default for WgpuOptions {
@@ -118,6 +122,8 @@ impl Default for WgpuOptions {
             max_image_cache_bytes: 64 * 1024 * 1024,
             max_tile_cache_entries: 64,
             max_prepared_scenes: 8,
+            max_glyph_cache_entries: 16_384,
+            atlas_size: 4096,
         }
     }
 }
@@ -551,7 +557,7 @@ impl WgpuBackend {
                     compilation_options: Default::default(),
                     cache: None,
                 });
-        let atlas = Mutex::new(GpuAtlas::new(&context.device, 4096));
+        let atlas = Mutex::new(GpuAtlas::new(&context.device, options.atlas_size.max(1024)));
         let text_pipeline = TextPipeline::new(&context.device);
         let image_pipeline = ImagePipeline::new(&context.device);
         let image_sampler = context.device.create_sampler(&wgpu_lib::SamplerDescriptor {
@@ -737,6 +743,9 @@ impl WgpuBackend {
         let clip_buffer;
         {
             let mut atlas = self.atlas.lock().unwrap_or_else(|error| error.into_inner());
+            if atlas.is_full() {
+                atlas.clear();
+            }
             let mut instances = Vec::new();
             for decoration in decorations {
                 match decoration {
@@ -776,6 +785,7 @@ impl WgpuBackend {
                                 max_y: target.height as f32 + 1.0,
                             },
                             &self.glyph_cache,
+                            self.options.max_glyph_cache_entries,
                             &self.font_faces,
                             &mut atlas,
                             &self.context.queue,
@@ -1850,6 +1860,7 @@ fn emit_text_instances(
     origin_px: (f64, f64),
     viewport: Viewport,
     glyph_cache: &Mutex<HashMap<(usize, u16), CachedGlyph>>,
+    max_glyph_cache_entries: usize,
     font_faces: &Mutex<HashMap<(usize, u32), Arc<CachedFace>>>,
     atlas: &mut GpuAtlas,
     queue: &wgpu_lib::Queue,
@@ -2001,6 +2012,9 @@ fn emit_text_instances(
                         path: Arc::clone(&path),
                     },
                 );
+                if cache.len() > max_glyph_cache_entries {
+                    cache.clear();
+                }
                 path
             }
         };

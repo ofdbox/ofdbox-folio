@@ -361,6 +361,7 @@ pub(crate) struct GpuAtlas {
     view: wgpu_lib::TextureView,
     sampler: wgpu_lib::Sampler,
     packer: GlyphPacker,
+    full: bool,
 }
 
 impl GpuAtlas {
@@ -392,6 +393,7 @@ impl GpuAtlas {
             view,
             sampler,
             packer: GlyphPacker::new(size),
+            full: false,
         }
     }
 
@@ -411,6 +413,12 @@ impl GpuAtlas {
     /// are overwritten as new glyphs are packed.
     pub(crate) fn clear(&mut self) {
         self.packer = GlyphPacker::new(self.packer.size);
+        self.full = false;
+    }
+
+    /// Whether the previous pack attempt exhausted the atlas.
+    pub(crate) fn is_full(&self) -> bool {
+        self.full
     }
 
     /// Rasterize, pack and upload a glyph if it is not already cached.
@@ -434,7 +442,10 @@ impl GpuAtlas {
         } else {
             rasterize_glyph(path, units_per_em, f64::from(pixel_size))?
         };
-        let packed = self.packer.insert(font, glyph, pixel_size, bold, &bitmap)?;
+        let Some(packed) = self.packer.insert(font, glyph, pixel_size, bold, &bitmap) else {
+            self.full = true;
+            return None;
+        };
         let width = bitmap.width.max(1);
         let height = bitmap.height.max(1);
         let padded = padded_row_bytes(width);
