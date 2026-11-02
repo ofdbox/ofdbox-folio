@@ -90,7 +90,8 @@ accepts `RenderRequest`, emits `Started` / `Frame` / `Error`, and supports
 `cancel()`. The same API renders inline when the feature is off. Embedded wgpu
 renderers should use `RenderService::new_with_shared_context` (and
 `PipelineService::open_path_with_shared_context`) so the host device is reused
-instead of creating a second GPU device. `request_to_target()` renders into a
+instead of creating a second GPU device. wgpu device-lost messages surface as
+`RenderEvent::Error` / `PipelineEvent::Error`. `request_to_target()` renders into a
 caller-provided `WgpuTarget` and emits a target event instead of readback RGBA.
 `request_fit()` scales and centers a whole page into a requested bitmap size;
 `request_fit_to_target()` combines fit scaling with the no-readback target path;

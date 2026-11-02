@@ -50,6 +50,7 @@ struct DrawPath {
 pub struct WgpuContext {
     device: wgpu_lib::Device,
     queue: wgpu_lib::Queue,
+    device_lost: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 /// Options for creating an embedded wgpu context.
@@ -107,7 +108,13 @@ impl WgpuContext {
             })
             .await
             .map_err(|error| RenderError::Backend(format!("wgpu device: {error}")))?;
-        Ok(Self { device, queue })
+        let device_lost = std::sync::Arc::new(std::sync::Mutex::new(None));
+        install_device_lost_handler(&device, &device_lost);
+        Ok(Self {
+            device,
+            queue,
+            device_lost,
+        })
     }
 
     /// Creates a context using wgpu environment variables for instance flags.
@@ -134,7 +141,13 @@ impl WgpuContext {
             })
             .await
             .map_err(|error| RenderError::Backend(format!("wgpu device: {error}")))?;
-        Ok(Self { device, queue })
+        let device_lost = std::sync::Arc::new(std::sync::Mutex::new(None));
+        install_device_lost_handler(&device, &device_lost);
+        Ok(Self {
+            device,
+            queue,
+            device_lost,
+        })
     }
 
     /// Creates the context in a blocking manner.
@@ -154,7 +167,27 @@ impl WgpuContext {
     /// avoid creating a second GPU context in the same process or being unable to
     /// share textures.
     pub fn from_device_queue(device: wgpu_lib::Device, queue: wgpu_lib::Queue) -> Self {
-        Self { device, queue }
+        Self {
+            device,
+            queue,
+            device_lost: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Installs a device-lost handler on an externally owned device.
+    ///
+    /// This replaces any callback the host already installed, so shared
+    /// contexts should call it only when the host does not provide one.
+    pub fn enable_device_lost_tracking(&self) {
+        install_device_lost_handler(&self.device, &self.device_lost);
+    }
+
+    /// Takes the last device-lost message, if any.
+    pub fn take_device_lost(&self) -> Option<String> {
+        self.device_lost
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
     }
 
     /// The device reference.
@@ -166,6 +199,16 @@ impl WgpuContext {
     pub fn queue(&self) -> &wgpu_lib::Queue {
         &self.queue
     }
+}
+
+fn install_device_lost_handler(
+    device: &wgpu_lib::Device,
+    slot: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+) {
+    let slot = std::sync::Arc::clone(slot);
+    device.set_device_lost_callback(move |_reason, message| {
+        *slot.lock().unwrap_or_else(|error| error.into_inner()) = Some(message);
+    });
 }
 
 /// Resource limits for a wgpu backend.
@@ -1811,6 +1854,11 @@ impl WgpuBackend {
             images: true,
             blend_modes: false,
         }
+    }
+
+    /// Takes a pending device-lost message from the backend context.
+    pub fn take_device_lost(&self) -> Option<String> {
+        self.context.take_device_lost()
     }
 
     /// Returns the shared wgpu context.

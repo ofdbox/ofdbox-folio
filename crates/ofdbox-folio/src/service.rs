@@ -1092,13 +1092,22 @@ impl Renderer {
         target: &Arc<ofdbox_folio_render::WgpuTarget>,
     ) -> Result<(), String> {
         match self {
-            Self::Wgpu(backend) => backend
-                .render_plan_region(
-                    Arc::clone(&request.snapshot.plan),
-                    target,
-                    request.origin_px,
-                )
-                .map_err(|error| error.to_string()),
+            Self::Wgpu(backend) => {
+                if let Some(message) = backend.take_device_lost() {
+                    return Err(format!("wgpu device lost: {message}"));
+                }
+                backend
+                    .render_plan_region(
+                        Arc::clone(&request.snapshot.plan),
+                        target,
+                        request.origin_px,
+                    )
+                    .map_err(|error| error.to_string())?;
+                if let Some(message) = backend.take_device_lost() {
+                    return Err(format!("wgpu device lost: {message}"));
+                }
+                Ok(())
+            }
             Self::Cpu(_) => Err("CPU renderer cannot render into a wgpu target".to_owned()),
         }
     }
