@@ -327,6 +327,60 @@ impl WgpuTarget {
         })
     }
 
+    /// Copies this target into another Rgba8Unorm texture on the same device.
+    ///
+    /// This is the GPU-side alternative to `read_rgba()` when the display
+    /// framework owns the final texture.
+    pub fn copy_to_texture(
+        &self,
+        context: &WgpuContext,
+        destination: &wgpu_lib::Texture,
+    ) -> Result<(), RenderError> {
+        if destination.format() != wgpu_lib::TextureFormat::Rgba8Unorm
+            || destination.width() != self.width
+            || destination.height() != self.height
+        {
+            return Err(RenderError::Backend(
+                "destination texture must be matching Rgba8Unorm dimensions".to_owned(),
+            ));
+        }
+        if !destination
+            .usage()
+            .contains(wgpu_lib::TextureUsages::COPY_DST)
+        {
+            return Err(RenderError::Backend(
+                "destination texture needs COPY_DST usage".to_owned(),
+            ));
+        }
+        let mut encoder =
+            context
+                .device
+                .create_command_encoder(&wgpu_lib::CommandEncoderDescriptor {
+                    label: Some("ofdbox-target-copy"),
+                });
+        encoder.copy_texture_to_texture(
+            wgpu_lib::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu_lib::Origin3d::ZERO,
+                aspect: wgpu_lib::TextureAspect::All,
+            },
+            wgpu_lib::TexelCopyTextureInfo {
+                texture: destination,
+                mip_level: 0,
+                origin: wgpu_lib::Origin3d::ZERO,
+                aspect: wgpu_lib::TextureAspect::All,
+            },
+            wgpu_lib::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        context.queue.submit(Some(encoder.finish()));
+        Ok(())
+    }
+
     /// Creates an offscreen target from the Scene size.
     pub fn from_size(context: &WgpuContext, size: Size, dpi: f64) -> Result<Self, RenderError> {
         Self::new(context, size, dpi)
@@ -2867,6 +2921,32 @@ mod tests {
             });
         let target = WgpuTarget::from_texture(&context, texture, 96.0).expect("target");
         assert_eq!((target.width(), target.height()), (8, 8));
+    }
+
+    #[test]
+    fn target_can_copy_to_a_display_texture() {
+        let context = WgpuContext::new_blocking().expect("context");
+        let destination = context
+            .device()
+            .create_texture(&super::wgpu_lib::TextureDescriptor {
+                label: Some("display-target-test"),
+                size: super::wgpu_lib::Extent3d {
+                    width: 8,
+                    height: 8,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: super::wgpu_lib::TextureDimension::D2,
+                format: super::wgpu_lib::TextureFormat::Rgba8Unorm,
+                usage: super::wgpu_lib::TextureUsages::COPY_DST
+                    | super::wgpu_lib::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+        let target = WgpuTarget::from_pixels(&context, 8, 8, 96.0).expect("target");
+        target
+            .copy_to_texture(&context, &destination)
+            .expect("copy");
     }
 
     use super::{CachedGlyph, GlyphCache, WgpuBackend, WgpuContext, WgpuTarget, collect_paths};

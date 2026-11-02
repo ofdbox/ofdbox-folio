@@ -752,6 +752,70 @@ mod tests {
         assert!(Arc::ptr_eq(&target, &rendered.expect("pipeline target")));
     }
 
+    #[cfg(all(any(feature = "gpu27", feature = "gpu30"), feature = "ofd"))]
+    #[test]
+    fn pipeline_fits_into_external_target() {
+        use super::{PipelineEvent, PipelineOptions};
+        use ofdbox_folio_ir::{FixedDocument, Page, PageInfo, Scene, Size};
+        use ofdbox_folio_ofd::{OfdWriteOptions, write_fixed};
+
+        let mut fixed = FixedDocument::default();
+        fixed.pages.push(Page::new(
+            PageInfo::default(),
+            Scene {
+                size: Size::new(10.0, 10.0),
+                ..Scene::default()
+            },
+        ));
+        let bytes = write_fixed(&fixed, &OfdWriteOptions::default()).expect("write ofd");
+        let path = std::env::temp_dir().join(format!(
+            "ofdbox-fit-target-{}-{}.ofd",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::write(&path, bytes).expect("write temp");
+        let context = Arc::new(ofdbox_folio_render::WgpuContext::new_blocking().expect("context"));
+        let target = Arc::new(
+            ofdbox_folio_render::WgpuTarget::from_pixels(&context, 20, 40, 96.0).expect("target"),
+        );
+        let mut pipeline = PipelineService::open_path_with_shared_context(
+            &path,
+            Arc::new(SystemFontsFactory),
+            RenderBackend::Wgpu,
+            context,
+        )
+        .expect("pipeline");
+        pipeline
+            .request_fit_to_target(
+                PipelineFitRequest {
+                    page: 0,
+                    width: 20,
+                    height: 40,
+                },
+                Arc::clone(&target),
+                PipelineOptions::default(),
+            )
+            .expect("fit target request");
+        let mut rendered = None;
+        for _ in 0..1000 {
+            while let Some(event) = pipeline.try_recv() {
+                if let PipelineEvent::Target { target: value, .. } = event {
+                    rendered = Some(value);
+                }
+            }
+            if rendered.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let _ = std::fs::remove_file(&path);
+        assert!(Arc::ptr_eq(&target, &rendered.expect("fit target")));
+        assert_eq!((target.width(), target.height()), (20, 40));
+    }
+
     #[cfg(all(feature = "threaded", feature = "ofd"))]
     #[test]
     fn threaded_pipeline_renders_generated_ofd() {
@@ -1625,6 +1689,45 @@ impl PipelineService {
                 fit: Some((request.width, request.height)),
                 #[cfg(any(feature = "gpu27", feature = "gpu30"))]
                 target: None,
+                snapshot_id: None,
+                render_id: None,
+            },
+        );
+        self.queued.push(id);
+        self.pump();
+        Ok(id)
+    }
+
+    /// Queues a fit-to-target render into a caller-provided wgpu target.
+    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+    pub fn request_fit_to_target(
+        &mut self,
+        request: PipelineFitRequest,
+        target: Arc<ofdbox_folio_render::WgpuTarget>,
+        options: PipelineOptions,
+    ) -> Result<u64, Error> {
+        if request.width == 0 || request.height == 0 {
+            return Err(Error::Service("fit target must be non-empty".to_owned()));
+        }
+        if self.pending.len() >= self.max_pending {
+            return Err(Error::Service("pipeline queue is full".to_owned()));
+        }
+        let id = self.next;
+        self.next += 1;
+        self.pending.insert(
+            id,
+            PendingPipeline {
+                request: PipelineRequest {
+                    page: request.page,
+                    width: request.width,
+                    height: request.height,
+                    dpi: 0.0,
+                    origin_px: (0.0, 0.0),
+                },
+                options,
+                seq: id,
+                fit: Some((request.width, request.height)),
+                target: Some(target),
                 snapshot_id: None,
                 render_id: None,
             },
