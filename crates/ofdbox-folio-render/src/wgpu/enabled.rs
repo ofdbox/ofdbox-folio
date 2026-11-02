@@ -848,6 +848,19 @@ impl WgpuBackend {
         prepared
     }
 
+    /// Renders a prepared RenderPlan region into an offscreen texture.
+    pub fn render_plan_region(
+        &self,
+        plan: Arc<PreparedScene>,
+        target: &WgpuTarget,
+        origin_px: (f64, f64),
+    ) -> Result<(), RenderError> {
+        if !(origin_px.0.is_finite() && origin_px.1.is_finite()) {
+            return Err(RenderError::InvalidPage);
+        }
+        self.render_prepared_to_target(plan, target, origin_px)
+    }
+
     fn render_to_target_with_offset(
         &self,
         scene: &Scene,
@@ -855,6 +868,15 @@ impl WgpuBackend {
         origin_px: (f64, f64),
     ) -> Result<(), RenderError> {
         let prepared = self.prepared_scene(scene);
+        self.render_prepared_to_target(prepared, target, origin_px)
+    }
+
+    fn render_prepared_to_target(
+        &self,
+        prepared: Arc<PreparedScene>,
+        target: &WgpuTarget,
+        origin_px: (f64, f64),
+    ) -> Result<(), RenderError> {
         let device_plan = self
             .device_plans
             .lock()
@@ -867,7 +889,7 @@ impl WgpuBackend {
                 target.height,
             );
         let key = (
-            scene as *const Scene as usize,
+            Arc::as_ptr(&prepared) as usize,
             target.dpi.to_bits(),
             origin_px.0.round() as i32,
             origin_px.1.round() as i32,
@@ -919,7 +941,7 @@ impl WgpuBackend {
             .create_command_encoder(&Default::default());
         {
             let mut atlas = self.atlas.lock().unwrap_or_else(|error| error.into_inner());
-            let scene_id = scene as *const Scene as usize;
+            let scene_id = Arc::as_ptr(&prepared) as usize;
             let mut atlas_scene = self
                 .atlas_scene
                 .lock()

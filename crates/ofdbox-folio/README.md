@@ -85,9 +85,12 @@ with threaded:    a worker owns Document and returns PageSnapshot values
 Only `Arc<PageSnapshot>` crosses the thread boundary; `Document` remains
 thread-confined and does not need to implement `Send`.
 
-`threaded-render` adds `service::RenderService`. It owns a CPU renderer, accepts
-`RenderRequest`, emits `Started` / `Frame` / `Error`, and supports `cancel()`.
-The same API renders inline when the feature is off.
+`threaded-render` adds `service::RenderService`. It owns a CPU or wgpu renderer,
+accepts `RenderRequest`, emits `Started` / `Frame` / `Error`, and supports
+`cancel()`. The same API renders inline when the feature is off.
+
+`service::PipelineService` chains page loading and rendering. `FontProviderFactory`
+lets a worker construct a custom provider. See `examples/pipeline.rs`.
 
 ## Reader Cache
 

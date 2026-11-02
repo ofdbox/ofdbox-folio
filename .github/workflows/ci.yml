@@ -76,6 +76,7 @@ jobs:
       - run: cargo check -p ofdbox-folio --no-default-features --features ofd,layout,tiny-skia --locked
       - run: cargo check -p ofdbox-folio --features threaded --locked
       - run: cargo check -p ofdbox-folio --features threaded-render --locked
+      - run: cargo check -p ofdbox-folio --features gpu30,threaded-render --locked
 
   doc:
     name: doc
