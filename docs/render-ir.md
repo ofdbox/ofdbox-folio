@@ -45,6 +45,7 @@ This avoids requiring `DocumentSource: Send` or `Page: Send`.
 ## Planned Layers
 
 - `RenderPlan`: page-space commands and bounds (current); tile culling is implemented.
+- `DevicePlan`: per-DPI/tile command visibility (current; CPU and tiny-skia consume it).
 - `DevicePlan`: optional per-DPI/tile culling and precomputed device data.
 - Backend caches: glyph outlines, atlases, decoded images and textures.
 

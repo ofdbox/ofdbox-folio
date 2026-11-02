@@ -445,7 +445,7 @@ impl CpuRenderer {
         device: Matrix,
     ) -> Result<(), RenderError> {
         let prepared = self.prepared_scene(scene);
-        self.render_prepared_with(&prepared, target, device)
+        self.render_prepared_with(&prepared, target, device, None)
     }
 
     /// Renders a RenderPlan into a raster target.
@@ -474,7 +474,7 @@ impl CpuRenderer {
         target: &mut RasterTarget,
     ) -> Result<(), RenderError> {
         let scale = target.dpi / 25.4;
-        self.render_prepared_with(prepared, target, Matrix::scale(scale, scale))
+        self.render_prepared_with(prepared, target, Matrix::scale(scale, scale), None)
     }
 
     /// Renders a region of an already prepared scene into the target.
@@ -489,10 +489,14 @@ impl CpuRenderer {
         {
             return Err(RenderError::InvalidPage);
         }
-        let k = region.dpi / 25.4;
-        let device =
-            Matrix::scale(k, k).then(Matrix::translate(-region.origin_px.0, -region.origin_px.1));
-        self.render_prepared_with(prepared, target, device)
+        let device_plan = crate::prepared::DevicePlan::new(
+            prepared,
+            region.dpi,
+            region.origin_px,
+            u32::from(target.width()),
+            u32::from(target.height()),
+        );
+        self.render_prepared_with(prepared, target, device_plan.device(), Some(&device_plan))
     }
 
     fn render_prepared_with(
@@ -500,6 +504,7 @@ impl CpuRenderer {
         prepared: &PreparedScene,
         target: &mut RasterTarget,
         device: Matrix,
+        device_plan: Option<&crate::prepared::DevicePlan>,
     ) -> Result<(), RenderError> {
         let mut context = RenderContext::new(target.width, target.height);
         context.set_transform(Affine::IDENTITY);
@@ -510,7 +515,10 @@ impl CpuRenderer {
             f64::from(target.width),
             f64::from(target.height),
         ));
-        for command in &prepared.commands {
+        for (index, command) in prepared.commands.iter().enumerate() {
+            if device_plan.is_some_and(|plan| !plan.is_visible(index)) {
+                continue;
+            }
             if let Some(bounds) = command.bounds()
                 && !crate::prepared::bounds_visible(
                     bounds,

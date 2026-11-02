@@ -235,6 +235,71 @@ fn text_bounds(text: &ofdbox_folio_ir::TextElement, transform: Matrix) -> Rect {
     ))
 }
 
+/// A RenderPlan culled for one DPI / tile.
+#[derive(Clone, Debug)]
+pub struct DevicePlan {
+    /// Target width in pixels.
+    pub width: u32,
+    /// Target height in pixels.
+    pub height: u32,
+    /// Tile origin in whole-page device pixels.
+    pub origin_px: (f64, f64),
+    /// DPI used to build the plan.
+    pub dpi: f64,
+    visible: Vec<bool>,
+}
+
+impl DevicePlan {
+    /// Culls a plan to the target tile.
+    pub fn new(
+        plan: &RenderPlan,
+        dpi: f64,
+        origin_px: (f64, f64),
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let k = dpi / 25.4;
+        let device = Matrix::scale(k, k).then(Matrix::translate(-origin_px.0, -origin_px.1));
+        let visible = plan
+            .commands
+            .iter()
+            .map(|command| {
+                command
+                    .bounds()
+                    .is_none_or(|bounds| bounds_visible(bounds, device, width, height))
+            })
+            .collect();
+        Self {
+            width,
+            height,
+            origin_px,
+            dpi,
+            visible,
+        }
+    }
+
+    /// Whether the command at `index` intersects this tile.
+    pub fn is_visible(&self, index: usize) -> bool {
+        self.visible.get(index).copied().unwrap_or(false)
+    }
+
+    /// Number of commands in the source plan.
+    pub fn len(&self) -> usize {
+        self.visible.len()
+    }
+
+    /// Whether the source plan is empty.
+    pub fn is_empty(&self) -> bool {
+        self.visible.is_empty()
+    }
+
+    /// The device transform for this tile.
+    pub fn device(&self) -> Matrix {
+        let k = self.dpi / 25.4;
+        Matrix::scale(k, k).then(Matrix::translate(-self.origin_px.0, -self.origin_px.1))
+    }
+}
+
 /// Alias kept for the previous display-list name.
 pub type PreparedScene = RenderPlan;
 /// Alias kept for the previous command name.
@@ -443,6 +508,15 @@ mod tests {
             },
             diagnostics: Vec::new(),
         }
+    }
+
+    #[test]
+    fn device_plan_culls_offscreen_commands() {
+        let plan = RenderPlan::from_scene(&scene(vec![path_element(0.0)]));
+        let full = DevicePlan::new(&plan, 96.0, (0.0, 0.0), 100, 100);
+        assert!(full.is_visible(0));
+        let outside = DevicePlan::new(&plan, 96.0, (1000.0, 1000.0), 10, 10);
+        assert!(!outside.is_visible(0));
     }
 
     #[test]
