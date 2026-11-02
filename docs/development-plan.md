@@ -29,9 +29,10 @@ Non-goals for the first pass:
 - Phase 2: in progress. Font faces and glyph/atlas keys are content-addressed,
   the wgpu image cache has a configurable byte budget, glyph outlines are an
   entry-bounded LRU, the CPU/Tiny image caches are LRUs, and all three backends
-  expose cache statistics, and the atlas resets before a frame above a
-  configurable occupancy threshold. Fine-grained per-entry atlas eviction,
-  batched atlas uploads and DPI-tier image decoding remain.
+  expose cache statistics, the atlas resets before a frame above a configurable
+  occupancy threshold, and new glyph bitmaps upload through one staging buffer.
+  Fine-grained per-entry atlas eviction, DPI-tier image decoding and a shared
+  cross-backend budget remain.
 - Phase 3: started. Page cache hits are O(1) via a clock-based LRU,
   and search exposes page progress callbacks; damaged pages have a placeholder
   API, while the background worker and cancellable prefetch remain.

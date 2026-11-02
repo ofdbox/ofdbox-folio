@@ -362,6 +362,15 @@ pub(crate) struct GpuAtlas {
     sampler: wgpu_lib::Sampler,
     packer: GlyphPacker,
     full: bool,
+    pending: Vec<PendingGlyph>,
+}
+
+struct PendingGlyph {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    data: Vec<u8>,
 }
 
 impl GpuAtlas {
@@ -394,6 +403,7 @@ impl GpuAtlas {
             sampler,
             packer: GlyphPacker::new(size),
             full: false,
+            pending: Vec::new(),
         }
     }
 
@@ -414,6 +424,7 @@ impl GpuAtlas {
     pub(crate) fn clear(&mut self) {
         self.packer = GlyphPacker::new(self.packer.size);
         self.full = false;
+        self.pending.clear();
     }
 
     /// Whether the previous pack attempt exhausted the atlas.
@@ -430,7 +441,6 @@ impl GpuAtlas {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn glyph(
         &mut self,
-        queue: &wgpu_lib::Queue,
         font: usize,
         glyph: u16,
         pixel_size: u32,
@@ -459,30 +469,70 @@ impl GpuAtlas {
             let source = &bitmap.coverage[row * width as usize..(row + 1) * width as usize];
             data[row * padded..row * padded + width as usize].copy_from_slice(source);
         }
-        queue.write_texture(
-            wgpu_lib::TexelCopyTextureInfo {
-                texture: &self.texture,
-                mip_level: 0,
-                origin: wgpu_lib::Origin3d {
-                    x: (packed.u0 * self.packer.size as f32).round() as u32,
-                    y: (packed.v0 * self.packer.size as f32).round() as u32,
-                    z: 0,
-                },
-                aspect: wgpu_lib::TextureAspect::All,
-            },
-            &data,
-            wgpu_lib::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded as u32),
-                rows_per_image: Some(height),
-            },
-            wgpu_lib::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
+        self.pending.push(PendingGlyph {
+            x: (packed.u0 * self.packer.size as f32).round() as u32,
+            y: (packed.v0 * self.packer.size as f32).round() as u32,
+            width,
+            height,
+            data,
+        });
         Some(packed)
+    }
+
+    /// Uploads deferred glyph bitmaps with one staging buffer.
+    pub(crate) fn flush(&mut self, device: &wgpu_lib::Device, queue: &wgpu_lib::Queue) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let mut bytes = Vec::new();
+        let mut offsets = Vec::with_capacity(self.pending.len());
+        for glyph in &self.pending {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(&glyph.data);
+        }
+        if bytes.is_empty() {
+            self.pending.clear();
+            return;
+        }
+        let buffer = device.create_buffer(&wgpu_lib::BufferDescriptor {
+            label: Some("ofdbox-glyph-upload"),
+            size: bytes.len() as u64,
+            usage: wgpu_lib::BufferUsages::COPY_SRC | wgpu_lib::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buffer, 0, &bytes);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        for (glyph, offset) in self.pending.iter().zip(offsets) {
+            encoder.copy_buffer_to_texture(
+                wgpu_lib::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu_lib::TexelCopyBufferLayout {
+                        offset: offset as u64,
+                        bytes_per_row: Some(
+                            (glyph.data.len() / glyph.height.max(1) as usize) as u32,
+                        ),
+                        rows_per_image: Some(glyph.height),
+                    },
+                },
+                wgpu_lib::TexelCopyTextureInfo {
+                    texture: &self.texture,
+                    mip_level: 0,
+                    origin: wgpu_lib::Origin3d {
+                        x: glyph.x,
+                        y: glyph.y,
+                        z: 0,
+                    },
+                    aspect: wgpu_lib::TextureAspect::All,
+                },
+                wgpu_lib::Extent3d {
+                    width: glyph.width,
+                    height: glyph.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        queue.submit([encoder.finish()]);
+        self.pending.clear();
     }
 }
 

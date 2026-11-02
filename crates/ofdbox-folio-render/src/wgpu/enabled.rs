@@ -915,7 +915,6 @@ impl WgpuBackend {
                             &self.font_faces,
                             &self.font_hashes,
                             &mut atlas,
-                            &self.context.queue,
                             &mut instances,
                         );
                         let end = u32::try_from(instances.len())
@@ -1001,6 +1000,7 @@ impl WgpuBackend {
                         contents: &clip_data,
                         usage: wgpu_lib::BufferUsages::STORAGE,
                     });
+            atlas.flush(&self.context.device, &self.context.queue);
             if !instances.is_empty() {
                 let mut instance_data = Vec::with_capacity(instances.len() * 160);
                 for instance in &instances {
@@ -1990,7 +1990,6 @@ fn emit_text_instances(
     font_faces: &Mutex<HashMap<(u64, u32), Arc<CachedFace>>>,
     font_hashes: &Mutex<HashMap<(usize, u32), u64>>,
     atlas: &mut GpuAtlas,
-    queue: &wgpu_lib::Queue,
     instances: &mut Vec<GlyphInstance>,
 ) {
     let (fill_color, end_fill_color, gradient, gradient_mode) = match text.fill.as_ref() {
@@ -2167,7 +2166,6 @@ fn emit_text_instances(
             _ => (false, 0.0),
         };
         let Some(packed) = atlas.glyph(
-            queue,
             font_key,
             glyph_id,
             pixel_size,
