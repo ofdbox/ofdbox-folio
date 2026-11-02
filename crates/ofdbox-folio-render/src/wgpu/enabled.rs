@@ -288,6 +288,45 @@ impl WgpuTarget {
         })
     }
 
+    /// Creates a target from a caller-owned texture.
+    ///
+    /// The texture must be `Rgba8Unorm` and support storage texture writes plus
+    /// render attachment use. A GPU copy to the display texture can then replace
+    /// the CPU readback.
+    pub fn from_texture(
+        context: &WgpuContext,
+        texture: wgpu_lib::Texture,
+        dpi: f64,
+    ) -> Result<Self, RenderError> {
+        if texture.format() != wgpu_lib::TextureFormat::Rgba8Unorm
+            || !texture
+                .usage()
+                .contains(wgpu_lib::TextureUsages::STORAGE_BINDING)
+            || !texture
+                .usage()
+                .contains(wgpu_lib::TextureUsages::RENDER_ATTACHMENT)
+        {
+            return Err(RenderError::Backend(
+                "target texture must be Rgba8Unorm with storage and render attachment usage"
+                    .to_owned(),
+            ));
+        }
+        let width = texture.width();
+        let height = texture.height();
+        if width == 0 || height == 0 {
+            return Err(RenderError::InvalidPage);
+        }
+        let view = texture.create_view(&wgpu_lib::TextureViewDescriptor::default());
+        let _ = context;
+        Ok(Self {
+            texture,
+            view,
+            width,
+            height,
+            dpi,
+        })
+    }
+
     /// Creates an offscreen target from the Scene size.
     pub fn from_size(context: &WgpuContext, size: Size, dpi: f64) -> Result<Self, RenderError> {
         Self::new(context, size, dpi)
@@ -632,6 +671,16 @@ pub struct WgpuBackend {
     image_cache: Mutex<ImageCache>,
     image_sampler: wgpu_lib::Sampler,
     options: WgpuOptions,
+}
+
+impl std::fmt::Debug for WgpuTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WgpuTarget")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("dpi", &self.dpi)
+            .finish_non_exhaustive()
+    }
 }
 
 impl WgpuBackend {
@@ -2793,6 +2842,31 @@ mod tests {
     fn wgpu_context_defaults_to_empty_flags() {
         let options = super::WgpuContextOptions::default();
         assert!(options.flags.is_empty());
+    }
+
+    #[test]
+    fn external_texture_can_be_wrapped_as_a_target() {
+        let context = WgpuContext::new_blocking().expect("context");
+        let texture = context
+            .device()
+            .create_texture(&super::wgpu_lib::TextureDescriptor {
+                label: Some("external-target-test"),
+                size: super::wgpu_lib::Extent3d {
+                    width: 8,
+                    height: 8,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: super::wgpu_lib::TextureDimension::D2,
+                format: super::wgpu_lib::TextureFormat::Rgba8Unorm,
+                usage: super::wgpu_lib::TextureUsages::STORAGE_BINDING
+                    | super::wgpu_lib::TextureUsages::RENDER_ATTACHMENT
+                    | super::wgpu_lib::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+        let target = WgpuTarget::from_texture(&context, texture, 96.0).expect("target");
+        assert_eq!((target.width(), target.height()), (8, 8));
     }
 
     use super::{CachedGlyph, GlyphCache, WgpuBackend, WgpuContext, WgpuTarget, collect_paths};

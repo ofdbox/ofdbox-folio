@@ -85,20 +85,6 @@ impl SnapshotService {
         })
     }
 
-    /// Creates an inline render service from an existing wgpu context.
-    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
-    pub fn new_with_shared_context(
-        backend: RenderBackend,
-        context: Arc<ofdbox_folio_render::WgpuContext>,
-    ) -> Result<Self, Error> {
-        Ok(Self {
-            renderer: Renderer::new_shared(backend, context).map_err(Error::Service)?,
-            events: VecDeque::new(),
-            cancelled: std::collections::HashSet::new(),
-            next: 1,
-        })
-    }
-
     /// Requests a page snapshot; the result is queued for [`Self::try_recv`].
     pub fn request(&mut self, page: usize) -> u64 {
         let request = self.next;
@@ -268,8 +254,10 @@ pub use threaded::SnapshotService;
 
 #[cfg(test)]
 mod tests {
-    #[cfg(all(feature = "threaded", feature = "ofd"))]
+    #[cfg(all(any(feature = "gpu27", feature = "gpu30"), feature = "ofd"))]
     use super::PipelineEvent;
+    #[cfg(all(any(feature = "gpu27", feature = "gpu30"), feature = "ofd"))]
+    use super::SystemFontsFactory;
     #[cfg(feature = "ofd")]
     use super::{PipelineRequest, PipelineService};
     use super::{RenderBackend, RenderEvent, RenderRequest, RenderService, SnapshotService};
@@ -441,6 +429,54 @@ mod tests {
 
     #[cfg(any(feature = "gpu27", feature = "gpu30"))]
     #[test]
+    fn render_service_can_render_into_a_target_without_readback() {
+        let context =
+            Arc::new(ofdbox_folio_render::WgpuContext::new_blocking().expect("shared context"));
+        let target = Arc::new(
+            ofdbox_folio_render::WgpuTarget::from_pixels(&context, 4, 4, 96.0).expect("target"),
+        );
+        let scene = Scene {
+            size: Size::new(10.0, 10.0),
+            ..Scene::default()
+        };
+        let snapshot = Arc::new(PageSnapshot::from_page(Page::new(
+            PageInfo::default(),
+            scene,
+        )));
+        let mut service = RenderService::new_with_shared_context(RenderBackend::Wgpu, context)
+            .expect("shared render service");
+        let id = service.request_to_target(
+            RenderRequest {
+                snapshot,
+                width: 4,
+                height: 4,
+                dpi: 96.0,
+                origin_px: (0.0, 0.0),
+            },
+            Arc::clone(&target),
+        );
+        let mut rendered = None;
+        for _ in 0..1000 {
+            while let Some(event) = service.try_recv() {
+                if let RenderEvent::Target {
+                    request,
+                    target: value,
+                } = event
+                {
+                    assert_eq!(request, id);
+                    rendered = Some(value);
+                }
+            }
+            if rendered.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(Arc::ptr_eq(&target, &rendered.expect("target frame")));
+    }
+
+    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+    #[test]
     fn render_service_reuses_shared_wgpu_context() {
         let context =
             Arc::new(ofdbox_folio_render::WgpuContext::new_blocking().expect("shared context"));
@@ -592,6 +628,71 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    #[cfg(all(any(feature = "gpu27", feature = "gpu30"), feature = "ofd"))]
+    #[test]
+    fn pipeline_renders_into_external_target() {
+        use super::{PipelineEvent, PipelineOptions};
+        use ofdbox_folio_ir::{FixedDocument, Page, PageInfo, Scene, Size};
+        use ofdbox_folio_ofd::{OfdWriteOptions, write_fixed};
+
+        let mut fixed = FixedDocument::default();
+        fixed.pages.push(Page::new(
+            PageInfo::default(),
+            Scene {
+                size: Size::new(10.0, 10.0),
+                ..Scene::default()
+            },
+        ));
+        let bytes = write_fixed(&fixed, &OfdWriteOptions::default()).expect("write ofd");
+        let path = std::env::temp_dir().join(format!(
+            "ofdbox-pipeline-target-{}-{}.ofd",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::write(&path, bytes).expect("write temp");
+        let context = Arc::new(ofdbox_folio_render::WgpuContext::new_blocking().expect("context"));
+        let target = Arc::new(
+            ofdbox_folio_render::WgpuTarget::from_pixels(&context, 8, 8, 96.0).expect("target"),
+        );
+        let mut pipeline = PipelineService::open_path_with_shared_context(
+            &path,
+            Arc::new(SystemFontsFactory),
+            RenderBackend::Wgpu,
+            context,
+        )
+        .expect("pipeline");
+        pipeline
+            .request_to_target(
+                PipelineRequest {
+                    page: 0,
+                    width: 8,
+                    height: 8,
+                    dpi: 96.0,
+                    origin_px: (0.0, 0.0),
+                },
+                Arc::clone(&target),
+                PipelineOptions::default(),
+            )
+            .expect("request");
+        let mut rendered = None;
+        for _ in 0..1000 {
+            while let Some(event) = pipeline.try_recv() {
+                if let PipelineEvent::Target { target: value, .. } = event {
+                    rendered = Some(value);
+                }
+            }
+            if rendered.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let _ = std::fs::remove_file(&path);
+        assert!(Arc::ptr_eq(&target, &rendered.expect("pipeline target")));
+    }
+
     #[cfg(all(feature = "threaded", feature = "ofd"))]
     #[test]
     fn threaded_pipeline_renders_generated_ofd() {
@@ -728,6 +829,14 @@ pub enum RenderEvent {
         /// Straight-alpha RGBA pixels.
         rgba: Vec<u8>,
     },
+    /// A caller-provided wgpu target finished rendering.
+    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+    Target {
+        /// Request identifier.
+        request: u64,
+        /// Rendered target.
+        target: Arc<ofdbox_folio_render::WgpuTarget>,
+    },
     /// Rendering failed.
     Error {
         /// Request identifier.
@@ -831,6 +940,24 @@ impl Renderer {
             }
         }
     }
+
+    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+    fn render_to_target(
+        &mut self,
+        request: &RenderRequest,
+        target: &Arc<ofdbox_folio_render::WgpuTarget>,
+    ) -> Result<(), String> {
+        match self {
+            Self::Wgpu(backend) => backend
+                .render_plan_region(
+                    Arc::clone(&request.snapshot.plan),
+                    target,
+                    request.origin_px,
+                )
+                .map_err(|error| error.to_string()),
+            Self::Cpu(_) => Err("CPU renderer cannot render into a wgpu target".to_owned()),
+        }
+    }
 }
 
 #[cfg(not(feature = "threaded-render"))]
@@ -857,6 +984,43 @@ impl RenderService {
             cancelled: std::collections::HashSet::new(),
             next: 1,
         })
+    }
+
+    /// Creates an inline render service from an existing wgpu context.
+    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+    pub fn new_with_shared_context(
+        backend: RenderBackend,
+        context: Arc<ofdbox_folio_render::WgpuContext>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            renderer: Renderer::new_shared(backend, context).map_err(Error::Service)?,
+            events: VecDeque::new(),
+            cancelled: std::collections::HashSet::new(),
+            next: 1,
+        })
+    }
+
+    /// Renders into a caller-provided wgpu target without CPU readback.
+    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+    pub fn request_to_target(
+        &mut self,
+        request: RenderRequest,
+        target: Arc<ofdbox_folio_render::WgpuTarget>,
+    ) -> u64 {
+        let id = self.next;
+        self.next += 1;
+        self.events.push_back(RenderEvent::Started { request: id });
+        match self.renderer.render_to_target(&request, &target) {
+            Ok(()) => self.events.push_back(RenderEvent::Target {
+                request: id,
+                target,
+            }),
+            Err(message) => self.events.push_back(RenderEvent::Error {
+                request: id,
+                message,
+            }),
+        }
+        id
     }
 
     /// Renders synchronously and queues `Started` / `Frame` / `Error`.
@@ -892,6 +1056,8 @@ impl RenderService {
                 RenderEvent::Started { request }
                 | RenderEvent::Frame { request, .. }
                 | RenderEvent::Error { request, .. } => *request,
+                #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+                RenderEvent::Target { request, .. } => *request,
             };
             if !self.cancelled.contains(&id) {
                 return Some(event);
@@ -921,10 +1087,20 @@ mod render_thread {
     type SharedContext = Arc<ofdbox_folio_render::WgpuContext>;
     #[cfg(not(any(feature = "gpu27", feature = "gpu30")))]
     type SharedContext = ();
+    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+    type TargetHandle = Arc<ofdbox_folio_render::WgpuTarget>;
+    #[cfg(not(any(feature = "gpu27", feature = "gpu30")))]
+    type TargetHandle = ();
 
     enum Command {
-        Render { id: u64, request: RenderRequest },
-        Cancel { id: u64 },
+        Render {
+            id: u64,
+            request: RenderRequest,
+            target: Option<TargetHandle>,
+        },
+        Cancel {
+            id: u64,
+        },
     }
 
     /// Compile-time threaded render service.
@@ -976,7 +1152,11 @@ mod render_thread {
                             Command::Cancel { id } => {
                                 cancelled.insert(id);
                             }
-                            Command::Render { id, request } => {
+                            Command::Render {
+                                id,
+                                request,
+                                target,
+                            } => {
                                 if cancelled.contains(&id) {
                                     continue;
                                 }
@@ -1004,6 +1184,24 @@ mod render_thread {
                                 if event_tx.send(RenderEvent::Started { request: id }).is_err() {
                                     break;
                                 }
+                                #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+                                if let Some(target) = target {
+                                    let event = match renderer.render_to_target(&request, &target) {
+                                        Ok(()) => RenderEvent::Target {
+                                            request: id,
+                                            target,
+                                        },
+                                        Err(message) => RenderEvent::Error {
+                                            request: id,
+                                            message,
+                                        },
+                                    };
+                                    if event_tx.send(event).is_err() {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                                let _ = &target;
                                 let event = match renderer.render(&request) {
                                     Ok(rgba) => RenderEvent::Frame {
                                         request: id,
@@ -1042,7 +1240,23 @@ mod render_thread {
         /// Queues a render request.
         pub fn request(&mut self, request: RenderRequest) -> u64 {
             let id = self.next.fetch_add(1, Ordering::Relaxed);
-            let _ = self.tx.send(Command::Render { id, request });
+            let _ = self.tx.send(Command::Render {
+                id,
+                request,
+                target: None,
+            });
+            id
+        }
+
+        /// Queues a render into a caller-provided wgpu target without CPU readback.
+        #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+        pub fn request_to_target(&mut self, request: RenderRequest, target: TargetHandle) -> u64 {
+            let id = self.next.fetch_add(1, Ordering::Relaxed);
+            let _ = self.tx.send(Command::Render {
+                id,
+                request,
+                target: Some(target),
+            });
             id
         }
 
@@ -1059,6 +1273,8 @@ mod render_thread {
                     RenderEvent::Started { request }
                     | RenderEvent::Frame { request, .. }
                     | RenderEvent::Error { request, .. } => *request,
+                    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+                    RenderEvent::Target { request, .. } => *request,
                 };
                 if !self.cancelled.contains(&id) {
                     return Some(event);
@@ -1168,6 +1384,16 @@ pub enum PipelineEvent {
         /// Straight-alpha RGBA pixels.
         rgba: Vec<u8>,
     },
+    /// A caller-provided wgpu target finished rendering.
+    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+    Target {
+        /// Pipeline request identifier.
+        request: u64,
+        /// Caller generation.
+        generation: u64,
+        /// Rendered target.
+        target: Arc<ofdbox_folio_render::WgpuTarget>,
+    },
     /// Page or render failure.
     Error {
         /// Pipeline request identifier.
@@ -1183,6 +1409,8 @@ struct PendingPipeline {
     request: PipelineRequest,
     options: PipelineOptions,
     seq: u64,
+    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+    target: Option<Arc<ofdbox_folio_render::WgpuTarget>>,
     snapshot_id: Option<u64>,
     render_id: Option<u64>,
 }
@@ -1285,6 +1513,37 @@ impl PipelineService {
                 request,
                 options,
                 seq: id,
+                #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+                target: None,
+                snapshot_id: None,
+                render_id: None,
+            },
+        );
+        self.queued.push(id);
+        self.pump();
+        Ok(id)
+    }
+
+    /// Queues a render into a caller-provided wgpu target without CPU readback.
+    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+    pub fn request_to_target(
+        &mut self,
+        request: PipelineRequest,
+        target: Arc<ofdbox_folio_render::WgpuTarget>,
+        options: PipelineOptions,
+    ) -> Result<u64, Error> {
+        if self.pending.len() >= self.max_pending {
+            return Err(Error::Service("pipeline queue is full".to_owned()));
+        }
+        let id = self.next;
+        self.next += 1;
+        self.pending.insert(
+            id,
+            PendingPipeline {
+                request,
+                options,
+                seq: id,
+                target: Some(target),
                 snapshot_id: None,
                 render_id: None,
             },
@@ -1367,13 +1626,21 @@ impl PipelineService {
                         self.pending.remove(&pipeline);
                         continue;
                     }
-                    let render_id = self.renderer.request(RenderRequest {
+                    let render_request = RenderRequest {
                         snapshot: Arc::clone(&snapshot),
                         width: pending.request.width,
                         height: pending.request.height,
                         dpi: pending.request.dpi,
                         origin_px: pending.request.origin_px,
-                    });
+                    };
+                    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+                    let render_id = if let Some(target) = pending.target.take() {
+                        self.renderer.request_to_target(render_request, target)
+                    } else {
+                        self.renderer.request(render_request)
+                    };
+                    #[cfg(not(any(feature = "gpu27", feature = "gpu30")))]
+                    let render_id = self.renderer.request(render_request);
                     self.by_render.insert(render_id, pipeline);
                     pending.render_id = Some(render_id);
                     self.events.push_back(PipelineEvent::Page {
@@ -1403,6 +1670,8 @@ impl PipelineService {
                 RenderEvent::Started { request }
                 | RenderEvent::Frame { request, .. }
                 | RenderEvent::Error { request, .. } => self.by_render.get(request).copied(),
+                #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+                RenderEvent::Target { request, .. } => self.by_render.get(request).copied(),
             };
             let Some(pipeline) = pipeline else {
                 continue;
@@ -1444,6 +1713,15 @@ impl PipelineService {
                         request: pipeline,
                         generation,
                         message,
+                    });
+                }
+                #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+                RenderEvent::Target { target, .. } => {
+                    self.pending.remove(&pipeline);
+                    self.events.push_back(PipelineEvent::Target {
+                        request: pipeline,
+                        generation,
+                        target,
                     });
                 }
             }

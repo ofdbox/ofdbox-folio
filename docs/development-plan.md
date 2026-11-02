@@ -43,7 +43,8 @@ Non-goals for the first pass:
   `PipelineService` exist with compile-time inline and `threaded` implementations,
   backend error events, `FontProviderFactory`, priority, generation filtering,
   bounded pending requests, arbitrary `origin_px` tiles, empty-flags wgpu contexts,
-  shared wgpu context/service entry points, `Started` progress, `cancel()`,
+  shared wgpu context/service entry points, external/no-readback target output,
+  `Started` progress, `cancel()`,
   integration examples and a multi-page benchmark; the reader UI integration
   remains.
 - Phase 3: started. Page cache hits are O(1) via a clock-based LRU,

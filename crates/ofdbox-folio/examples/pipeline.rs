@@ -61,6 +61,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }) => {
                 return Err(format!("request {request}: {message}").into());
             }
+            #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+            Some(PipelineEvent::Target { request, .. }) => {
+                println!("request {request}: target rendered");
+                break;
+            }
             None => std::thread::sleep(std::time::Duration::from_millis(10)),
         }
     }
