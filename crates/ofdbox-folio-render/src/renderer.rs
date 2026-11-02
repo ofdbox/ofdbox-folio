@@ -23,7 +23,7 @@ use vello_cpu::peniko::{Fill, ImageAlphaType};
 use vello_cpu::{Glyph, ImageSource, PaintType, PixelMetadata, Pixmap, RenderContext, Resources};
 
 use crate::error::RenderError;
-use crate::image::decode_image;
+use crate::image::{decode_image, decode_image_tier};
 use crate::options::RenderOptions;
 use crate::prepared::{PreparedCommand, PreparedScene, scene_fingerprint};
 
@@ -227,7 +227,7 @@ pub struct CpuRenderer {
 
 /// Decoded image cache: evicted against a byte budget; a budget of 0 disables caching entirely.
 struct PixmapCache {
-    entries: HashMap<u64, (Arc<Pixmap>, u64)>,
+    entries: HashMap<(u64, u32), (Arc<Pixmap>, u64)>,
     clock: u64,
     bytes: u64,
     budget: u64,
@@ -243,14 +243,14 @@ impl PixmapCache {
         }
     }
 
-    fn get(&mut self, id: u64) -> Option<Arc<Pixmap>> {
+    fn get(&mut self, id: (u64, u32)) -> Option<Arc<Pixmap>> {
         self.clock = self.clock.wrapping_add(1);
         let entry = self.entries.get_mut(&id)?;
         entry.1 = self.clock;
         Some(Arc::clone(&entry.0))
     }
 
-    fn insert(&mut self, id: u64, pixmap: Arc<Pixmap>) {
+    fn insert(&mut self, id: (u64, u32), pixmap: Arc<Pixmap>) {
         if self.entries.contains_key(&id) {
             return;
         }
@@ -682,7 +682,8 @@ impl CpuRenderer {
         element: &ImageElement,
         parent: Matrix,
     ) -> Result<(), RenderError> {
-        let pixmap = match self.pixmap(element) {
+        let max_dim = image_tier(element, element.transform.then(parent));
+        let pixmap = match self.pixmap(element, max_dim) {
             Ok(pixmap) => pixmap,
             Err(error) => {
                 self.warn(format!("image could not be drawn, skipping it: {error}"));
@@ -730,14 +731,16 @@ impl CpuRenderer {
         Some(data)
     }
 
-    fn pixmap(&mut self, element: &ImageElement) -> Result<Arc<Pixmap>, RenderError> {
-        if let Some(pixmap) = self.pixmaps.get(element.image.id().get()) {
+    fn pixmap(&mut self, element: &ImageElement, max_dim: u32) -> Result<Arc<Pixmap>, RenderError> {
+        let key = (element.image.id().get(), max_dim);
+        if let Some(pixmap) = self.pixmaps.get(key) {
             return Ok(pixmap);
         }
-        let mut decoded = decode_image(
+        let mut decoded = decode_image_tier(
             element.image.format,
             &element.image.encoded,
             self.options.max_image_pixels,
+            max_dim,
         )?;
         if let Some(mask) = &element.image.mask {
             match decode_image(mask.format, &mask.encoded, self.options.max_image_pixels) {
@@ -756,10 +759,35 @@ impl CpuRenderer {
             }
         }
         let pixmap = Arc::new(create_pixmap(&decoded)?);
-        self.pixmaps
-            .insert(element.image.id().get(), Arc::clone(&pixmap));
+        self.pixmaps.insert(key, Arc::clone(&pixmap));
         Ok(pixmap)
     }
+}
+
+/// Quantize the on-screen image size into a cache tier; 0 means full size.
+fn image_tier(element: &ImageElement, transform: Matrix) -> u32 {
+    if !(element.rect.width.is_finite()
+        && element.rect.height.is_finite()
+        && element.rect.width > 0.0
+        && element.rect.height > 0.0)
+    {
+        return 0;
+    }
+    let scale = (transform.a * transform.d - transform.b * transform.c)
+        .abs()
+        .sqrt();
+    if !(scale.is_finite() && scale > 0.0) {
+        return 0;
+    }
+    let pixels = element.rect.width.max(element.rect.height) * scale;
+    if !(pixels.is_finite() && pixels >= 1.0) {
+        return 0;
+    }
+    let mut tier = 64_u32;
+    while f64::from(tier) < pixels && tier < 4096 {
+        tier *= 2;
+    }
+    tier
 }
 
 fn create_pixmap(decoded: &crate::image::DecodedImage) -> Result<Pixmap, RenderError> {
@@ -1047,24 +1075,24 @@ mod tests {
     fn evicts_pixmaps_over_budget() {
         // Two 2×2 RGBA images exactly fill the budget; touching entry 1 makes entry 2 the LRU victim.
         let mut cache = PixmapCache::new(2 * 2 * 4 * 2);
-        cache.insert(1, Arc::new(Pixmap::new(2, 2)));
-        cache.insert(2, Arc::new(Pixmap::new(2, 2)));
-        assert!(cache.get(1).is_some());
-        cache.insert(3, Arc::new(Pixmap::new(2, 2)));
+        cache.insert((1, 64), Arc::new(Pixmap::new(2, 2)));
+        cache.insert((2, 64), Arc::new(Pixmap::new(2, 2)));
+        assert!(cache.get((1, 64)).is_some());
+        cache.insert((3, 64), Arc::new(Pixmap::new(2, 2)));
         assert!(
-            cache.get(2).is_none(),
+            cache.get((2, 64)).is_none(),
             "the least recently used entry should be evicted"
         );
-        assert!(cache.get(1).is_some());
-        assert!(cache.get(3).is_some());
+        assert!(cache.get((1, 64)).is_some());
+        assert!(cache.get((3, 64)).is_some());
         assert!(cache.bytes <= cache.budget);
     }
 
     #[test]
     fn skips_cache_when_budget_is_zero() {
         let mut cache = PixmapCache::new(0);
-        cache.insert(1, Arc::new(Pixmap::new(2, 2)));
-        assert!(cache.get(1).is_none());
+        cache.insert((1, 64), Arc::new(Pixmap::new(2, 2)));
+        assert!(cache.get((1, 64)).is_none());
     }
 
     fn solid_rect_scene() -> Scene {

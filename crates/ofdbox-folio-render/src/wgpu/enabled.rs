@@ -19,7 +19,7 @@ use ofdbox_folio_ir::{
 };
 
 use crate::RenderError;
-use crate::image::decode_image;
+use crate::image::{decode_image, decode_image_tier};
 use crate::prepared::{PreparedClip, PreparedCommand, PreparedScene, scene_fingerprint};
 use crate::renderer::RenderCacheStats;
 
@@ -417,8 +417,8 @@ struct CachedImage {
 
 /// Byte-budgeted image texture cache with insertion-order eviction.
 struct ImageCache {
-    entries: HashMap<usize, Arc<CachedImage>>,
-    order: VecDeque<usize>,
+    entries: HashMap<(usize, u32), Arc<CachedImage>>,
+    order: VecDeque<(usize, u32)>,
     bytes: usize,
     max_bytes: usize,
 }
@@ -433,14 +433,14 @@ impl ImageCache {
         }
     }
 
-    fn get(&mut self, key: usize) -> Option<Arc<CachedImage>> {
+    fn get(&mut self, key: (usize, u32)) -> Option<Arc<CachedImage>> {
         let image = Arc::clone(self.entries.get(&key)?);
         self.order.retain(|value| *value != key);
         self.order.push_back(key);
         Some(image)
     }
 
-    fn insert(&mut self, key: usize, image: Arc<CachedImage>) {
+    fn insert(&mut self, key: (usize, u32), image: Arc<CachedImage>) {
         if let Some(previous) = self.entries.remove(&key) {
             self.bytes = self.bytes.saturating_sub(previous.bytes);
             self.order.retain(|value| *value != key);
@@ -1077,7 +1077,8 @@ impl WgpuBackend {
         }
         let mut image_batches = Vec::with_capacity(image_draws.len());
         for draw in &image_draws {
-            let Some(cached) = self.cached_image(&draw.image) else {
+            let tier = image_draw_tier(&draw);
+            let Some(cached) = self.cached_image(&draw.image, tier) else {
                 image_batches.push(None);
                 continue;
             };
@@ -1464,8 +1465,8 @@ impl WgpuBackend {
 
 impl WgpuBackend {
     /// Decodes and uploads an image once, then reuses the GPU texture.
-    fn cached_image(&self, image: &Arc<ImageAsset>) -> Option<Arc<CachedImage>> {
-        let key = Arc::as_ptr(image) as usize;
+    fn cached_image(&self, image: &Arc<ImageAsset>, max_dim: u32) -> Option<Arc<CachedImage>> {
+        let key = (Arc::as_ptr(image) as usize, max_dim);
         if let Some(cached) = self
             .image_cache
             .lock()
@@ -1474,7 +1475,8 @@ impl WgpuBackend {
         {
             return Some(cached);
         }
-        let mut decoded = decode_image(image.format, &image.encoded, 64_000_000).ok()?;
+        let mut decoded =
+            decode_image_tier(image.format, &image.encoded, 64_000_000, max_dim).ok()?;
         if let Some(mask) = &image.mask
             && let Ok(mask) = decode_image(mask.format, &mask.encoded, 64_000_000)
         {
@@ -2258,6 +2260,20 @@ fn emit_text_instances(
         };
         instances.push(instance);
     }
+}
+
+fn image_draw_tier(draw: &ImageDraw) -> u32 {
+    let width = (draw.x_axis[0] * draw.x_axis[0] + draw.x_axis[1] * draw.x_axis[1]).sqrt();
+    let height = (draw.y_axis[0] * draw.y_axis[0] + draw.y_axis[1] * draw.y_axis[1]).sqrt();
+    let pixels = width.max(height);
+    if !(pixels.is_finite() && pixels >= 1.0) {
+        return 0;
+    }
+    let mut tier = 64_u32;
+    while (tier as f32) < pixels && tier < 4096 {
+        tier *= 2;
+    }
+    tier
 }
 
 fn image_draw(

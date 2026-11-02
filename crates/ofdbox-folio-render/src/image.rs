@@ -91,6 +91,57 @@ pub fn decode_image(
     Ok(image)
 }
 
+/// Decode an image and downscale it so its longest edge is at most `max_dim`.
+///
+/// The encoded image is decoded at full resolution first; the result is kept
+/// smaller in the decoded cache, which is where most long-session memory lives.
+pub fn decode_image_tier(
+    format: ImageFormat,
+    data: &[u8],
+    max_pixels: u64,
+    max_dim: u32,
+) -> Result<DecodedImage, RenderError> {
+    let image = decode_image(format, data, max_pixels)?;
+    Ok(resize_rgba(image, max_dim))
+}
+
+fn resize_rgba(image: DecodedImage, max_dim: u32) -> DecodedImage {
+    let longest = image.width.max(image.height);
+    if max_dim == 0 || max_dim >= longest || image.width == 0 || image.height == 0 {
+        return image;
+    }
+    let scale = f64::from(max_dim) / f64::from(longest);
+    let width = ((f64::from(image.width) * scale).round() as u32).max(1);
+    let height = ((f64::from(image.height) * scale).round() as u32).max(1);
+    let mut rgba = vec![0_u8; width as usize * height as usize * 4];
+    for y in 0..height {
+        let source_y = (f64::from(y) + 0.5) / f64::from(height) * f64::from(image.height) - 0.5;
+        let y0 = source_y.floor().max(0.0) as u32;
+        let y1 = (y0 + 1).min(image.height - 1);
+        let fy = (source_y - f64::from(y0)).clamp(0.0, 1.0);
+        for x in 0..width {
+            let source_x = (f64::from(x) + 0.5) / f64::from(width) * f64::from(image.width) - 0.5;
+            let x0 = source_x.floor().max(0.0) as u32;
+            let x1 = (x0 + 1).min(image.width - 1);
+            let fx = (source_x - f64::from(x0)).clamp(0.0, 1.0);
+            let sample = |sx: u32, sy: u32, channel: usize| -> f64 {
+                f64::from(image.rgba[((sy * image.width + sx) * 4) as usize + channel])
+            };
+            let target = ((y * width + x) * 4) as usize;
+            for channel in 0..4 {
+                let top = sample(x0, y0, channel) * (1.0 - fx) + sample(x1, y0, channel) * fx;
+                let bottom = sample(x0, y1, channel) * (1.0 - fx) + sample(x1, y1, channel) * fx;
+                rgba[target + channel] = (top * (1.0 - fy) + bottom * fy).round() as u8;
+            }
+        }
+    }
+    DecodedImage {
+        width,
+        height,
+        rgba,
+    }
+}
+
 fn decode_png(data: &[u8], max_pixels: u64) -> Result<DecodedImage, RenderError> {
     let mut decoder = png::Decoder::new(Cursor::new(data));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
@@ -323,8 +374,20 @@ fn decode_jbig2(data: &[u8]) -> Result<DecodedImage, RenderError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DecodedImage, decode_image, detect_format};
+    use super::{DecodedImage, decode_image, detect_format, resize_rgba};
     use ofdbox_folio_ir::ImageFormat;
+
+    #[test]
+    fn resize_tier_preserves_aspect_ratio() {
+        let image = DecodedImage {
+            width: 4,
+            height: 2,
+            rgba: vec![128; 4 * 2 * 4],
+        };
+        let resized = resize_rgba(image, 2);
+        assert_eq!((resized.width, resized.height), (2, 1));
+        assert_eq!(resized.rgba.len(), 8);
+    }
 
     #[test]
     fn applies_grayscale_mask() {

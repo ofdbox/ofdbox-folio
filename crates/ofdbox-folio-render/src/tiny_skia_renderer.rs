@@ -14,7 +14,7 @@ use tiny_skia::{
 };
 
 use crate::error::RenderError;
-use crate::image::decode_image;
+use crate::image::{decode_image, decode_image_tier};
 use crate::options::RenderOptions;
 use crate::prepared::{PreparedClip, PreparedCommand, PreparedScene, scene_fingerprint};
 use crate::renderer::{PixelRect, RasterTarget, RenderCacheStats, RenderRegion};
@@ -24,8 +24,8 @@ pub struct TinySkiaRenderer {
     options: RenderOptions,
     report: Report,
     glyphs: HashMap<(usize, u16), Arc<tiny_skia::Path>>,
-    images: HashMap<u64, Arc<Pixmap>>,
-    image_order: VecDeque<u64>,
+    images: HashMap<(u64, u32), Arc<Pixmap>>,
+    image_order: VecDeque<(u64, u32)>,
     image_bytes: usize,
     prepared: Option<(usize, u64, Arc<PreparedScene>)>,
 }
@@ -454,7 +454,8 @@ impl TinySkiaRenderer {
         parent: Matrix,
         mask: Option<&Mask>,
     ) {
-        let Some(image) = self.image(&element.image) else {
+        let tier = Self::image_tier(element, element.transform.then(parent));
+        let Some(image) = self.image(&element.image, tier) else {
             return;
         };
         let width = if element.rect.width.is_finite() && element.rect.width > 0.0 {
@@ -504,19 +505,24 @@ impl TinySkiaRenderer {
         Some(path)
     }
 
-    fn image(&mut self, asset: &Arc<ImageAsset>) -> Option<Arc<Pixmap>> {
-        let key = asset.id().get();
+    fn image(&mut self, asset: &Arc<ImageAsset>, max_dim: u32) -> Option<Arc<Pixmap>> {
+        let key = (asset.id().get(), max_dim);
         if let Some(image) = self.images.get(&key) {
             return Some(Arc::clone(image));
         }
-        let mut decoded = decode_image(asset.format, &asset.encoded, self.options.max_image_pixels)
-            .map_err(|error| {
-                self.report.diagnostics.push(Diagnostic::warning(
-                    DiagnosticCode::Image,
-                    error.to_string(),
-                ));
-            })
-            .ok()?;
+        let mut decoded = decode_image_tier(
+            asset.format,
+            &asset.encoded,
+            self.options.max_image_pixels,
+            max_dim,
+        )
+        .map_err(|error| {
+            self.report.diagnostics.push(Diagnostic::warning(
+                DiagnosticCode::Image,
+                error.to_string(),
+            ));
+        })
+        .ok()?;
         if let Some(mask) = &asset.mask
             && let Ok(mask) =
                 decode_image(mask.format, &mask.encoded, self.options.max_image_pixels)
@@ -548,6 +554,31 @@ impl TinySkiaRenderer {
             }
         }
         Some(image)
+    }
+
+    fn image_tier(element: &ImageElement, transform: Matrix) -> u32 {
+        if !(element.rect.width.is_finite()
+            && element.rect.height.is_finite()
+            && element.rect.width > 0.0
+            && element.rect.height > 0.0)
+        {
+            return 0;
+        }
+        let scale = (transform.a * transform.d - transform.b * transform.c)
+            .abs()
+            .sqrt();
+        if !(scale.is_finite() && scale > 0.0) {
+            return 0;
+        }
+        let pixels = element.rect.width.max(element.rect.height) * scale;
+        if !(pixels.is_finite() && pixels >= 1.0) {
+            return 0;
+        }
+        let mut tier = 64_u32;
+        while f64::from(tier) < pixels && tier < 4096 {
+            tier *= 2;
+        }
+        tier
     }
 
     fn skia_paint(&self, paint: &Paint) -> SkPaint<'_> {
