@@ -32,7 +32,9 @@ Document (thread-confined)
 - `DrawText`: font, size, transform, glyph run, fill and stroke.
 
 Commands carry references to shared resources (`Arc<Path>`, `Arc<FontAsset>`,
-`Arc<ImageAsset>`, `Arc<GlyphRun>`), never parser-owned state.
+`Arc<ImageAsset>`, `Arc<GlyphRun>`), never parser-owned state. Every drawing
+command also carries page-space bounds; renderers skip commands outside the
+current tile before flattening or rasterizing.
 
 ## Thread Boundary
 
@@ -42,7 +44,7 @@ This avoids requiring `DocumentSource: Send` or `Page: Send`.
 
 ## Planned Layers
 
-- `RenderPlan`: page-space commands and bounds (current).
+- `RenderPlan`: page-space commands and bounds (current); tile culling is implemented.
 - `DevicePlan`: optional per-DPI/tile culling and precomputed device data.
 - Backend caches: glyph outlines, atlases, decoded images and textures.
 

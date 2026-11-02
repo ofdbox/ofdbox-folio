@@ -48,6 +48,8 @@ pub enum RenderCommand {
         paint: Paint,
         /// Fill rule.
         rule: FillRule,
+        /// Page-space bounds.
+        bounds: Rect,
     },
     /// Stroke a path.
     StrokePath {
@@ -57,6 +59,8 @@ pub enum RenderCommand {
         transform: Matrix,
         /// Stroke paint and style.
         stroke: StrokePaint,
+        /// Page-space bounds.
+        bounds: Rect,
     },
     /// Draw an image.
     DrawImage {
@@ -68,6 +72,8 @@ pub enum RenderCommand {
         transform: Matrix,
         /// Image opacity in `0.0..=1.0`.
         alpha: f32,
+        /// Page-space bounds.
+        bounds: Rect,
     },
     /// Draw a shaped text run.
     DrawText {
@@ -83,6 +89,8 @@ pub enum RenderCommand {
         fill: Option<Paint>,
         /// Stroke paint and style.
         stroke: Option<StrokePaint>,
+        /// Page-space bounds.
+        bounds: Rect,
     },
 }
 
@@ -102,12 +110,22 @@ impl RenderPlan {
     pub fn from_scene(scene: &Scene) -> Self {
         let mut commands = Vec::new();
         walk_group(&scene.root, Matrix::IDENTITY, &mut commands);
-        let bounds = (scene.size.is_valid() && !scene.size.is_empty()).then_some(Rect::new(
-            0.0,
-            0.0,
-            scene.size.width,
-            scene.size.height,
-        ));
+        let mut bounds = None;
+        for command in &commands {
+            if let Some(command_bounds) = command.bounds() {
+                bounds = Some(bounds.map_or(command_bounds, |current: Rect| {
+                    rect_union(current, command_bounds)
+                }));
+            }
+        }
+        let bounds = bounds.or_else(|| {
+            (scene.size.is_valid() && !scene.size.is_empty()).then_some(Rect::new(
+                0.0,
+                0.0,
+                scene.size.width,
+                scene.size.height,
+            ))
+        });
         Self {
             size: scene.size,
             commands,
@@ -124,6 +142,97 @@ impl RenderPlan {
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
     }
+}
+
+impl RenderCommand {
+    /// Page-space bounds of this command, if it draws something.
+    pub fn bounds(&self) -> Option<Rect> {
+        match self {
+            Self::FillPath { bounds, .. }
+            | Self::StrokePath { bounds, .. }
+            | Self::DrawImage { bounds, .. }
+            | Self::DrawText { bounds, .. } => Some(*bounds),
+            Self::PushLayer { .. } | Self::PopLayer => None,
+        }
+    }
+}
+
+/// Whether a page-space rectangle intersects a device-space target.
+pub(crate) fn bounds_visible(bounds: Rect, device: Matrix, width: u32, height: u32) -> bool {
+    let rect = device.transform_rect(bounds);
+    rect.x.is_finite()
+        && rect.y.is_finite()
+        && rect.width.is_finite()
+        && rect.height.is_finite()
+        && rect.right() > 0.0
+        && rect.bottom() > 0.0
+        && rect.x < f64::from(width)
+        && rect.y < f64::from(height)
+}
+
+fn rect_union(a: Rect, b: Rect) -> Rect {
+    let x0 = a.x.min(b.x);
+    let y0 = a.y.min(b.y);
+    let x1 = a.right().max(b.right());
+    let y1 = a.bottom().max(b.bottom());
+    Rect::new(x0, y0, x1 - x0, y1 - y0)
+}
+
+fn uniform_scale(matrix: Matrix) -> f64 {
+    (matrix.a * matrix.d - matrix.b * matrix.c).abs().sqrt()
+}
+
+fn path_bounds(path: &Path, transform: Matrix, stroke_width: f64) -> Rect {
+    let Some(local) = path.bounds() else {
+        return Rect::new(0.0, 0.0, 0.0, 0.0);
+    };
+    let rect = transform.transform_rect(local);
+    if stroke_width > 0.0 {
+        let padding = stroke_width * uniform_scale(transform) * 0.5;
+        Rect::new(
+            rect.x - padding,
+            rect.y - padding,
+            rect.width + padding * 2.0,
+            rect.height + padding * 2.0,
+        )
+    } else {
+        rect
+    }
+}
+
+fn image_bounds(image: &ofdbox_folio_ir::ImageElement, transform: Matrix) -> Rect {
+    let width = if image.rect.width.is_finite() && image.rect.width > 0.0 {
+        image.rect.width
+    } else {
+        f64::from(image.image.pixel_width)
+    };
+    let height = if image.rect.height.is_finite() && image.rect.height > 0.0 {
+        image.rect.height
+    } else {
+        f64::from(image.image.pixel_height)
+    };
+    transform.transform_rect(Rect::new(image.rect.x, image.rect.y, width, height))
+}
+
+fn text_bounds(text: &ofdbox_folio_ir::TextElement, transform: Matrix) -> Rect {
+    let Some(first) = text.run.glyphs.first() else {
+        return Rect::new(0.0, 0.0, 0.0, 0.0);
+    };
+    let mut min_x = first.x;
+    let mut max_x = first.x + first.advance;
+    let mut baseline = first.y;
+    for glyph in &text.run.glyphs {
+        min_x = min_x.min(glyph.x);
+        max_x = max_x.max(glyph.x + glyph.advance);
+        baseline = baseline.max(glyph.y);
+    }
+    let height = text.font_size.max(0.1);
+    transform.transform_rect(Rect::new(
+        min_x,
+        baseline - height,
+        (max_x - min_x).max(0.0),
+        height * 1.2,
+    ))
 }
 
 /// Alias kept for the previous display-list name.
@@ -191,13 +300,16 @@ fn walk_group(group: &Group, parent: Matrix, commands: &mut Vec<RenderCommand>) 
                         transform,
                         paint: paint.clone(),
                         rule: path.rule,
+                        bounds: path_bounds(&path.path, transform, 0.0),
                     });
                 }
                 if let Some(stroke) = &path.stroke {
+                    let width = stroke.style.width * uniform_scale(transform);
                     commands.push(RenderCommand::StrokePath {
                         path: Arc::clone(&path.path),
                         transform,
                         stroke: stroke.clone(),
+                        bounds: path_bounds(&path.path, transform, width),
                     });
                 }
             }
@@ -206,6 +318,7 @@ fn walk_group(group: &Group, parent: Matrix, commands: &mut Vec<RenderCommand>) 
                 rect: image.rect,
                 transform: image.transform.then(transform),
                 alpha: image.alpha.clamp(0.0, 1.0),
+                bounds: image_bounds(image, image.transform.then(transform)),
             }),
             Element::Text(text) => commands.push(RenderCommand::DrawText {
                 font: Arc::clone(&text.font),
@@ -214,6 +327,7 @@ fn walk_group(group: &Group, parent: Matrix, commands: &mut Vec<RenderCommand>) 
                 run: Arc::clone(&text.run),
                 fill: text.fill.clone(),
                 stroke: text.stroke.clone(),
+                bounds: text_bounds(text, text.transform.then(transform)),
             }),
             _ => {}
         }

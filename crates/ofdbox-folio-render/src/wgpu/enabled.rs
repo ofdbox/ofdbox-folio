@@ -1623,6 +1623,7 @@ fn collect_paths(
     height: u32,
 ) -> (Vec<[f32; 4]>, Vec<DrawPath>) {
     let scale = dpi / 25.4;
+    let device = Matrix::scale(scale, scale).then(Matrix::translate(-origin_px.0, -origin_px.1));
     let mut edges = Vec::new();
     let mut paths = Vec::new();
     let mut order = 0_u32;
@@ -1688,8 +1689,13 @@ fn collect_paths(
                 transform,
                 paint,
                 rule,
+                bounds,
             } => {
                 if skip_depth > 0 {
+                    order += 1;
+                    continue;
+                }
+                if !crate::prepared::bounds_visible(*bounds, device, width, height) {
                     order += 1;
                     continue;
                 }
@@ -1765,8 +1771,13 @@ fn collect_paths(
                 path,
                 transform,
                 stroke,
+                bounds,
             } => {
                 if skip_depth > 0 {
+                    order += 1;
+                    continue;
+                }
+                if !crate::prepared::bounds_visible(*bounds, device, width, height) {
                     order += 1;
                     continue;
                 }
@@ -1863,6 +1874,7 @@ fn collect_decorations(
         max_y: height as f32 + 1.0,
     };
     let scale = dpi / 25.4;
+    let device = Matrix::scale(scale, scale).then(Matrix::translate(-origin_px.0, -origin_px.1));
     let mut decorations = Vec::new();
     let mut frames = vec![DecorationFrame {
         clip: None,
@@ -1915,6 +1927,7 @@ fn collect_decorations(
                 run,
                 fill,
                 stroke,
+                bounds,
             } => {
                 if skip_depth > 0 {
                     order += 1;
@@ -1944,6 +1957,7 @@ fn collect_decorations(
                 rect,
                 transform,
                 alpha,
+                bounds,
             } => {
                 if skip_depth > 0 {
                     order += 1;

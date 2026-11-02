@@ -511,6 +511,16 @@ impl CpuRenderer {
             f64::from(target.height),
         ));
         for command in &prepared.commands {
+            if let Some(bounds) = command.bounds()
+                && !crate::prepared::bounds_visible(
+                    bounds,
+                    device,
+                    u32::from(target.width),
+                    u32::from(target.height),
+                )
+            {
+                continue;
+            }
             match command {
                 PreparedCommand::PushLayer { clip, opacity } => {
                     context.set_transform(Affine::IDENTITY);
@@ -533,6 +543,7 @@ impl CpuRenderer {
                     transform,
                     paint,
                     rule,
+                    ..
                 } => {
                     let element = PathElement {
                         path: Arc::clone(path),
@@ -547,6 +558,7 @@ impl CpuRenderer {
                     path,
                     transform,
                     stroke,
+                    ..
                 } => {
                     let element = PathElement {
                         path: Arc::clone(path),
@@ -562,6 +574,7 @@ impl CpuRenderer {
                     rect,
                     transform,
                     alpha,
+                    ..
                 } => {
                     let element = ImageElement {
                         image: Arc::clone(image),
@@ -578,6 +591,7 @@ impl CpuRenderer {
                     run,
                     fill,
                     stroke,
+                    ..
                 } => {
                     let element = TextElement {
                         font: Arc::clone(font),

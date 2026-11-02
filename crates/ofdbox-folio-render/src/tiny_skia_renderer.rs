@@ -221,6 +221,11 @@ impl TinySkiaRenderer {
         );
         let mut layers: Vec<(Option<PreparedClip>, f32)> = Vec::new();
         for command in &prepared.commands {
+            if let Some(bounds) = command.bounds()
+                && !crate::prepared::bounds_visible(bounds, device, width, height)
+            {
+                continue;
+            }
             match command {
                 PreparedCommand::PushLayer { clip, opacity } => {
                     frames.push(Pixmap::new(width, height).ok_or(RenderError::InvalidPage)?);
@@ -269,6 +274,7 @@ impl TinySkiaRenderer {
                     transform,
                     paint,
                     rule,
+                    ..
                 } => {
                     let element = PathElement {
                         path: Arc::clone(path),
@@ -288,6 +294,7 @@ impl TinySkiaRenderer {
                     path,
                     transform,
                     stroke,
+                    ..
                 } => {
                     let element = PathElement {
                         path: Arc::clone(path),
@@ -308,6 +315,7 @@ impl TinySkiaRenderer {
                     rect,
                     transform,
                     alpha,
+                    ..
                 } => {
                     let element = ImageElement {
                         image: Arc::clone(image),
@@ -329,6 +337,7 @@ impl TinySkiaRenderer {
                     run,
                     fill,
                     stroke,
+                    ..
                 } => {
                     let element = TextElement {
                         font: Arc::clone(font),
