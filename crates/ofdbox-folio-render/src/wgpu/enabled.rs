@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 #[cfg(all(feature = "wgpu30", not(feature = "wgpu27")))]
@@ -109,6 +110,8 @@ pub struct WgpuOptions {
     pub max_image_cache_bytes: usize,
     /// Maximum number of cached tile geometries before the cache is cleared.
     pub max_tile_cache_entries: usize,
+    /// Maximum number of prepared scenes retained across tiles.
+    pub max_prepared_scenes: usize,
 }
 
 impl Default for WgpuOptions {
@@ -116,6 +119,7 @@ impl Default for WgpuOptions {
         Self {
             max_image_cache_bytes: 64 * 1024 * 1024,
             max_tile_cache_entries: 64,
+            max_prepared_scenes: 8,
         }
     }
 }
@@ -458,6 +462,8 @@ pub struct WgpuBackend {
     font_faces: Mutex<HashMap<(usize, u32), Arc<CachedFace>>>,
     /// Already-flattened scene geometry per scene / dpi / region.
     path_cache: Mutex<HashMap<TileCacheKey, CachedGeometry>>,
+    /// Backend-neutral prepared scenes, shared by all tiles of one page.
+    prepared_cache: Mutex<HashMap<(usize, u64), Arc<PreparedScene>>>,
     atlas: Mutex<GpuAtlas>,
     text_pipeline: TextPipeline,
     image_pipeline: ImagePipeline,
@@ -565,6 +571,7 @@ impl WgpuBackend {
             glyph_cache: Mutex::new(HashMap::new()),
             font_faces: Mutex::new(HashMap::new()),
             path_cache: Mutex::new(HashMap::new()),
+            prepared_cache: Mutex::new(HashMap::new()),
             atlas,
             text_pipeline,
             image_pipeline,
@@ -589,6 +596,10 @@ impl WgpuBackend {
             .unwrap_or_else(|error| error.into_inner())
             .clear();
         self.path_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        self.prepared_cache
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clear();
@@ -657,6 +668,23 @@ impl WgpuBackend {
         self.render_to_target_with_offset(scene, target, origin_px)
     }
 
+    fn prepared_scene(&self, scene: &Scene) -> Arc<PreparedScene> {
+        let key = (scene as *const Scene as usize, scene_fingerprint(scene));
+        let mut cache = self
+            .prepared_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(prepared) = cache.get(&key) {
+            return Arc::clone(prepared);
+        }
+        let prepared = Arc::new(PreparedScene::from_scene(scene));
+        if cache.len() > self.options.max_prepared_scenes {
+            cache.clear();
+        }
+        cache.insert(key, Arc::clone(&prepared));
+        prepared
+    }
+
     fn render_to_target_with_offset(
         &self,
         scene: &Scene,
@@ -690,8 +718,14 @@ impl WgpuBackend {
             }
         };
         let (edges, paths) = cached.as_ref();
-        let decorations =
-            collect_decorations(scene, target.dpi, origin_px, target.width, target.height);
+        let prepared = self.prepared_scene(scene);
+        let decorations = collect_decorations(
+            &prepared,
+            target.dpi,
+            origin_px,
+            target.width,
+            target.height,
+        );
         let mut decor_draws = Vec::with_capacity(decorations.len());
         let mut decor_orders = Vec::with_capacity(decorations.len());
         let mut image_draws = Vec::new();
@@ -1467,14 +1501,92 @@ struct DecorationFrame {
 /// Paths are still collected separately and drawn first; this ordering is used to
 /// preserve the relative stacking of images and text.
 #[allow(clippy::too_many_arguments)]
+fn scene_fingerprint(scene: &Scene) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    scene.size.width.to_bits().hash(&mut hasher);
+    scene.size.height.to_bits().hash(&mut hasher);
+    hash_group(&scene.root, &mut hasher);
+    hasher.finish()
+}
+
+fn hash_group(group: &Group, hasher: &mut impl Hasher) {
+    for value in [
+        group.transform.a,
+        group.transform.b,
+        group.transform.c,
+        group.transform.d,
+        group.transform.e,
+        group.transform.f,
+    ] {
+        value.to_bits().hash(hasher);
+    }
+    group.opacity.to_bits().hash(hasher);
+    group
+        .clip
+        .as_ref()
+        .map(|clip| Arc::as_ptr(&clip.path) as usize)
+        .hash(hasher);
+    group.children.len().hash(hasher);
+    for element in &group.children {
+        match element {
+            Element::Group(child) => {
+                1_u8.hash(hasher);
+                hash_group(child, hasher);
+            }
+            Element::Path(path) => {
+                2_u8.hash(hasher);
+                (Arc::as_ptr(&path.path) as usize).hash(hasher);
+                for value in [
+                    path.transform.a,
+                    path.transform.b,
+                    path.transform.c,
+                    path.transform.d,
+                    path.transform.e,
+                    path.transform.f,
+                ] {
+                    value.to_bits().hash(hasher);
+                }
+            }
+            Element::Text(text) => {
+                3_u8.hash(hasher);
+                (Arc::as_ptr(&text.font) as usize).hash(hasher);
+                (Arc::as_ptr(&text.run) as usize).hash(hasher);
+                text.font_size.to_bits().hash(hasher);
+                for value in [
+                    text.transform.a,
+                    text.transform.b,
+                    text.transform.c,
+                    text.transform.d,
+                    text.transform.e,
+                    text.transform.f,
+                ] {
+                    value.to_bits().hash(hasher);
+                }
+            }
+            Element::Image(image) => {
+                4_u8.hash(hasher);
+                (Arc::as_ptr(&image.image) as usize).hash(hasher);
+                for value in [
+                    image.rect.x,
+                    image.rect.y,
+                    image.rect.width,
+                    image.rect.height,
+                ] {
+                    value.to_bits().hash(hasher);
+                }
+            }
+            _ => 0_u8.hash(hasher),
+        }
+    }
+}
+
 fn collect_decorations(
-    scene: &Scene,
+    prepared: &PreparedScene,
     dpi: f64,
     origin_px: (f64, f64),
     width: u32,
     height: u32,
 ) -> Vec<Decoration> {
-    let prepared = PreparedScene::from_scene(scene);
     let viewport = Viewport {
         min_x: -1.0,
         min_y: -1.0,
