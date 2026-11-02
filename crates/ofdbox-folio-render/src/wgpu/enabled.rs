@@ -1644,7 +1644,6 @@ fn collect_paths(
     height: u32,
 ) -> (Vec<[f32; 4]>, Vec<DrawPath>) {
     let scale = dpi / 25.4;
-    let device = Matrix::scale(scale, scale).then(Matrix::translate(-origin_px.0, -origin_px.1));
     let mut edges = Vec::new();
     let mut paths = Vec::new();
     let mut order = 0_u32;
@@ -1716,13 +1715,9 @@ fn collect_paths(
                 transform,
                 paint,
                 rule,
-                bounds,
+                bounds: _,
             } => {
                 if skip_depth > 0 {
-                    order += 1;
-                    continue;
-                }
-                if !crate::prepared::bounds_visible(*bounds, device, width, height) {
                     order += 1;
                     continue;
                 }
@@ -1798,13 +1793,9 @@ fn collect_paths(
                 path,
                 transform,
                 stroke,
-                bounds,
+                bounds: _,
             } => {
                 if skip_depth > 0 {
-                    order += 1;
-                    continue;
-                }
-                if !crate::prepared::bounds_visible(*bounds, device, width, height) {
                     order += 1;
                     continue;
                 }

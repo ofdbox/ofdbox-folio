@@ -354,16 +354,31 @@ impl PageSnapshotCache {
     }
 }
 
-/// Cached DevicePlan entry.
-type DevicePlanEntry = (usize, u64, u64, u64, u32, u32, Arc<DevicePlan>);
+type DevicePlanKey = (usize, u64, u64, u64, u32, u32);
 
-/// One-entry cache for the current tile's DevicePlan.
-#[derive(Default)]
+/// LRU cache for per-DPI/tile DevicePlans.
 pub struct DevicePlanCache {
-    entry: Option<DevicePlanEntry>,
+    entries: HashMap<DevicePlanKey, Arc<DevicePlan>>,
+    order: VecDeque<DevicePlanKey>,
+    capacity: usize,
+}
+
+impl Default for DevicePlanCache {
+    fn default() -> Self {
+        Self::new(4)
+    }
 }
 
 impl DevicePlanCache {
+    /// Creates a cache holding at most `capacity` device plans.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            capacity,
+        }
+    }
+
     /// Returns the cached device plan or culls and stores a new one.
     pub fn get_or_build(
         &mut self,
@@ -381,27 +396,41 @@ impl DevicePlanCache {
             width,
             height,
         );
-        if let Some((id, dpi_bits, x_bits, y_bits, w, h, cached)) = &self.entry
-            && (*id, *dpi_bits, *x_bits, *y_bits, *w, *h) == key
-        {
-            return Arc::clone(cached);
+        if let Some(device) = self.entries.get(&key) {
+            let device = Arc::clone(device);
+            self.order.retain(|value| *value != key);
+            self.order.push_back(key);
+            return device;
+        }
+        if self.capacity == 0 {
+            return Arc::new(DevicePlan::new(plan, dpi, origin_px, width, height));
         }
         let device = Arc::new(DevicePlan::new(plan, dpi, origin_px, width, height));
-        self.entry = Some((
-            key.0,
-            key.1,
-            key.2,
-            key.3,
-            key.4,
-            key.5,
-            Arc::clone(&device),
-        ));
+        while self.entries.len() >= self.capacity {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+        self.entries.insert(key, Arc::clone(&device));
+        self.order.push_back(key);
         device
     }
 
-    /// Drops the cached plan.
+    /// Drops all cached plans.
     pub fn clear(&mut self) {
-        self.entry = None;
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    /// Number of cached plans.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether no plan is cached.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
@@ -725,6 +754,18 @@ mod tests {
         assert!(cache.get(1).is_some());
         assert_eq!(cache.len(), 1);
         drop(first);
+    }
+
+    #[test]
+    fn device_plan_cache_evicts_lru() {
+        let plan = RenderPlan::from_scene(&scene(vec![path_element(0.0)]));
+        let mut cache = DevicePlanCache::new(1);
+        let first = cache.get_or_build(&plan, 96.0, (0.0, 0.0), 100, 100);
+        let second = cache.get_or_build(&plan, 96.0, (10.0, 10.0), 100, 100);
+        let first_again = cache.get_or_build(&plan, 96.0, (0.0, 0.0), 100, 100);
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &first_again));
+        assert_eq!(cache.len(), 1);
     }
 
     #[test]

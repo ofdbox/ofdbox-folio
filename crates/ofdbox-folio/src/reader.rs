@@ -427,8 +427,12 @@ impl Document {
         if let Some(snapshot) = self.snapshots.get(index) {
             return Ok(snapshot);
         }
-        let page = self.page(index)?;
-        let snapshot = Arc::new(PageSnapshot::from_page_ref(&page));
+        let snapshot = if let Some(page) = self.cache.get(index) {
+            Arc::new(PageSnapshot::from_page_ref(&page))
+        } else {
+            let page = self.source.load_page(index)?;
+            Arc::new(PageSnapshot::from_page(page))
+        };
         self.snapshots.insert(index, Arc::clone(&snapshot));
         Ok(snapshot)
     }
@@ -894,6 +898,7 @@ mod tests {
         let second = document.page_snapshot(0).expect("cached snapshot");
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(loads.load(Ordering::SeqCst), 1);
+        assert_eq!(document.cache_stats().pages, 0);
         assert!(!first.text.items.is_empty());
         document.clear_cache();
         document.page_snapshot(0).expect("rebuilt snapshot");

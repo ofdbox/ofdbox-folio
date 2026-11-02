@@ -41,14 +41,16 @@ current tile before flattening or rasterizing.
 `PageSnapshot::from_page` consumes a `Page` on the parser thread and builds the
 plan there. Only the resulting snapshot crosses to the UI or a render worker.
 This avoids requiring `DocumentSource: Send` or `Page: Send`. The facade exposes
-`Document::page_snapshot()` and caches a small snapshot LRU.
+`Document::page_snapshot()`; it parses directly into a snapshot when the page is
+not already in the page cache, so the snapshot-only path does not keep a second
+Page copy. A small snapshot LRU is kept per document.
 
 ## Planned Layers
 
 - `RenderPlan`: page-space commands and bounds (current); tile culling is implemented.
 - `DevicePlan`: per-DPI/tile command visibility (current; CPU and tiny-skia consume it).
 - `PageSnapshotCache`: LRU for parsed page snapshots (current).
-- `DevicePlanCache`: one-entry cache for the current tile (current).
+- `DevicePlanCache`: multi-slot LRU for per-DPI/tile plans (current).
 - `DevicePlan`: optional per-DPI/tile culling and precomputed device data.
 - Backend caches: glyph outlines, atlases, decoded images and textures.
 

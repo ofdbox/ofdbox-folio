@@ -36,8 +36,9 @@ Non-goals for the first pass:
   one. Fine-grained per-glyph atlas eviction and a shared cross-backend budget
   remain.
 - Render IR: complete for the current scope — `RenderPlan`, `PageSnapshot`,
-  command bounds, `DevicePlan` tile culling, spatial index, `PageSnapshotCache`,
-  `DevicePlanCache` and reader `page_snapshot()` integration exist.
+  command bounds, `DevicePlan` tile culling, spatial index, multi-slot
+  `DevicePlanCache`, `PageSnapshotCache` and reader `page_snapshot()` integration
+  exist.
 - Phase 3: started. Page cache hits are O(1) via a clock-based LRU,
   and search exposes page progress callbacks; damaged pages have a placeholder
   API and prefetch reports progress and can be cancelled; the background worker remains.
