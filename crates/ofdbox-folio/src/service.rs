@@ -971,6 +971,8 @@ pub enum RenderEvent {
         height: u32,
         /// Tile origin in whole-page device pixels.
         origin_px: (f64, f64),
+        /// Render DPI.
+        dpi: f64,
         /// Rendered target.
         target: Arc<ofdbox_folio_render::WgpuTarget>,
     },
@@ -1153,6 +1155,7 @@ impl RenderService {
                 width: request.width,
                 height: request.height,
                 origin_px: request.origin_px,
+                dpi: request.dpi,
                 target,
             }),
             Err(message) => self.events.push_back(RenderEvent::Error {
@@ -1332,6 +1335,7 @@ mod render_thread {
                                             width: request.width,
                                             height: request.height,
                                             origin_px: request.origin_px,
+                                            dpi: request.dpi,
                                             target,
                                         },
                                         Err(message) => RenderEvent::Error {
@@ -1551,6 +1555,8 @@ pub enum PipelineEvent {
         height: u32,
         /// Tile origin in whole-page device pixels.
         origin_px: (f64, f64),
+        /// Render DPI.
+        dpi: f64,
         /// Rendered target.
         target: Arc<ofdbox_folio_render::WgpuTarget>,
     },
@@ -1977,6 +1983,7 @@ impl PipelineService {
                     width,
                     height,
                     origin_px,
+                    dpi,
                     target,
                     ..
                 } => {
@@ -1987,6 +1994,7 @@ impl PipelineService {
                         width,
                         height,
                         origin_px,
+                        dpi,
                         target,
                     });
                 }

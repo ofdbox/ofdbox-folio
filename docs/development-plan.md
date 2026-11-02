@@ -44,7 +44,7 @@ Non-goals for the first pass:
   backend error events, `FontProviderFactory`, priority, generation filtering,
   bounded pending requests, arbitrary `origin_px` tiles, empty-flags wgpu contexts,
   shared wgpu context/service entry points, external/no-readback target output, GPU target copy, fit-to-target previews,
-  fit-to-target output with tile metadata,
+  fit-to-target output with tile metadata and DPI,
   `Started` progress, `cancel()`,
   integration examples and a multi-page benchmark; the reader UI integration
   remains.

@@ -94,8 +94,8 @@ instead of creating a second GPU device. `request_to_target()` renders into a
 caller-provided `WgpuTarget` and emits a target event instead of readback RGBA.
 `request_fit()` scales and centers a whole page into a requested bitmap size;
 `request_fit_to_target()` combines fit scaling with the no-readback target path;
-`PipelineEvent::Target` carries `width`, `height` and `origin_px` so callers do
-not need to reverse-engineer fit padding.
+`PipelineEvent::Target` carries `width`, `height`, `origin_px` and `dpi` so
+callers do not need to reverse-engineer fit padding or scale.
 
 `service::PipelineService` chains page loading and rendering with priority,
 generation filtering and bounded pending requests. `RenderRequest` and
