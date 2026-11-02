@@ -36,7 +36,7 @@ Non-goals for the first pass:
   shared cross-backend budget remain.
 - Phase 3: started. Page cache hits are O(1) via a clock-based LRU,
   and search exposes page progress callbacks; damaged pages have a placeholder
-  API, while the background worker and cancellable prefetch remain.
+  API and prefetch reports progress and can be cancelled; the background worker remains.
 
 ## Phase 0: Feature matrix and contract correctness
 

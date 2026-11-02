@@ -90,6 +90,17 @@ pub struct SearchProgress {
     pub hits: usize,
 }
 
+/// Progress of a prefetch batch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PrefetchProgress {
+    /// Page about to be loaded.
+    pub page: usize,
+    /// Pages loaded so far in this batch.
+    pub loaded: usize,
+    /// Total pages in this batch.
+    pub total: usize,
+}
+
 /// Selection rectangles on one page.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PageSelection {
@@ -565,16 +576,41 @@ impl Document {
 
     /// Prefetches a few pages before and after the given page.
     pub fn prefetch_around(&mut self, index: usize, radius: usize) -> Result<(), Error> {
+        self.prefetch_around_with_progress(index, radius, |_| true)?;
+        Ok(())
+    }
+
+    /// Prefetches pages around `index`, reporting progress and stopping when the callback returns `false`.
+    ///
+    /// Returns the number of pages loaded. Cached pages still report progress but are not loaded again.
+    pub fn prefetch_around_with_progress(
+        &mut self,
+        index: usize,
+        radius: usize,
+        mut visit: impl FnMut(PrefetchProgress) -> bool,
+    ) -> Result<usize, Error> {
         let page_count = self.page_count();
         if page_count == 0 {
-            return Ok(());
+            return Ok(0);
         }
         let start = index.saturating_sub(radius);
         let end = index.saturating_add(radius).min(page_count - 1);
+        let total = end - start + 1;
+        let mut loaded = 0;
         for page in start..=end {
-            self.prefetch(page)?;
+            if !visit(PrefetchProgress {
+                page,
+                loaded,
+                total,
+            }) {
+                break;
+            }
+            if !self.cache.contains(page) {
+                self.prefetch(page)?;
+                loaded += 1;
+            }
         }
-        Ok(())
+        Ok(loaded)
     }
 
     /// Reads the bytes of an attachment.
@@ -857,6 +893,21 @@ mod tests {
         document.page(1).expect("page");
         assert_eq!(loads.load(Ordering::SeqCst), 1);
         assert_eq!(document.cache_stats().hits, 1);
+    }
+
+    #[test]
+    fn prefetch_progress_can_cancel() {
+        let (mut document, loads) = document(5, 1024 * 1024);
+        let mut pages = Vec::new();
+        let loaded = document
+            .prefetch_around_with_progress(2, 2, |progress| {
+                pages.push(progress.page);
+                progress.page < 3
+            })
+            .expect("prefetch");
+        assert_eq!(pages, vec![0, 1, 2, 3]);
+        assert_eq!(loaded, 3);
+        assert_eq!(loads.load(Ordering::SeqCst), 3);
     }
 
     #[test]

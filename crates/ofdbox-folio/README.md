@@ -87,6 +87,7 @@ let mut document = Document::open_path(
 let page = document.page(0)?;      // parsed on first access and written to the cache
 let page_again = document.page(0)?; // cache hit, returns the same Arc<Page>
 document.prefetch(1)?;              // prefetch the next page
+// prefetch_around_with_progress() reports pages and can stop early
 let stats = document.cache_stats();
 ```
 
