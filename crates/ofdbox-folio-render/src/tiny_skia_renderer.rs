@@ -16,7 +16,7 @@ use tiny_skia::{
 use crate::error::RenderError;
 use crate::image::decode_image;
 use crate::options::RenderOptions;
-use crate::prepared::{PreparedClip, PreparedCommand, PreparedScene};
+use crate::prepared::{PreparedClip, PreparedCommand, PreparedScene, scene_fingerprint};
 use crate::renderer::{PixelRect, RasterTarget, RenderRegion};
 
 /// A software renderer that rasterizes Fixed IR with `tiny-skia`.
@@ -27,6 +27,7 @@ pub struct TinySkiaRenderer {
     images: HashMap<u64, Arc<Pixmap>>,
     image_order: VecDeque<u64>,
     image_bytes: usize,
+    prepared: Option<(usize, u64, Arc<PreparedScene>)>,
 }
 
 #[derive(Default)]
@@ -44,6 +45,7 @@ impl TinySkiaRenderer {
             images: HashMap::new(),
             image_order: VecDeque::new(),
             image_bytes: 0,
+            prepared: None,
         }
     }
 
@@ -60,6 +62,7 @@ impl TinySkiaRenderer {
 
     /// Drops cached glyph outlines and decoded images.
     pub fn clear_caches(&mut self) {
+        self.prepared = None;
         self.glyphs.clear();
         self.images.clear();
         self.image_order.clear();
@@ -122,13 +125,26 @@ impl TinySkiaRenderer {
         self.render_scene_with(scene, target, device)
     }
 
+    fn prepared_scene(&mut self, scene: &Scene) -> Arc<PreparedScene> {
+        let key = (scene as *const Scene as usize, scene_fingerprint(scene));
+        if let Some((cached_key, fingerprint, prepared)) = &self.prepared
+            && *cached_key == key.0
+            && *fingerprint == key.1
+        {
+            return Arc::clone(prepared);
+        }
+        let prepared = Arc::new(PreparedScene::from_scene(scene));
+        self.prepared = Some((key.0, key.1, Arc::clone(&prepared)));
+        prepared
+    }
+
     fn render_scene_with(
         &mut self,
         scene: &Scene,
         target: &mut RasterTarget,
         device: Matrix,
     ) -> Result<(), RenderError> {
-        let prepared = PreparedScene::from_scene(scene);
+        let prepared = self.prepared_scene(scene);
         self.render_prepared_with(&prepared, target, device)
     }
 

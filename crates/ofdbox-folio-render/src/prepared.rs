@@ -6,6 +6,7 @@
 //! resources in page space. Rendering backends can consume the same list
 //! instead of walking the semantic scene tree themselves.
 
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
@@ -169,6 +170,85 @@ fn walk_group(group: &Group, parent: Matrix, commands: &mut Vec<PreparedCommand>
     }
     if layered {
         commands.push(PreparedCommand::PopLayer);
+    }
+}
+
+pub(crate) fn scene_fingerprint(scene: &Scene) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    scene.size.width.to_bits().hash(&mut hasher);
+    scene.size.height.to_bits().hash(&mut hasher);
+    hash_group(&scene.root, &mut hasher);
+    hasher.finish()
+}
+
+fn hash_group(group: &Group, hasher: &mut impl Hasher) {
+    for value in [
+        group.transform.a,
+        group.transform.b,
+        group.transform.c,
+        group.transform.d,
+        group.transform.e,
+        group.transform.f,
+    ] {
+        value.to_bits().hash(hasher);
+    }
+    group.opacity.to_bits().hash(hasher);
+    group
+        .clip
+        .as_ref()
+        .map(|clip| Arc::as_ptr(&clip.path) as usize)
+        .hash(hasher);
+    group.children.len().hash(hasher);
+    for element in &group.children {
+        match element {
+            Element::Group(child) => {
+                1_u8.hash(hasher);
+                hash_group(child, hasher);
+            }
+            Element::Path(path) => {
+                2_u8.hash(hasher);
+                (Arc::as_ptr(&path.path) as usize).hash(hasher);
+                for value in [
+                    path.transform.a,
+                    path.transform.b,
+                    path.transform.c,
+                    path.transform.d,
+                    path.transform.e,
+                    path.transform.f,
+                ] {
+                    value.to_bits().hash(hasher);
+                }
+            }
+            Element::Text(text) => {
+                3_u8.hash(hasher);
+                (Arc::as_ptr(&text.font) as usize).hash(hasher);
+                (Arc::as_ptr(&text.run) as usize).hash(hasher);
+                text.font_size.to_bits().hash(hasher);
+                for value in [
+                    text.transform.a,
+                    text.transform.b,
+                    text.transform.c,
+                    text.transform.d,
+                    text.transform.e,
+                    text.transform.f,
+                ] {
+                    value.to_bits().hash(hasher);
+                }
+            }
+            Element::Image(image) => {
+                4_u8.hash(hasher);
+                (Arc::as_ptr(&image.image) as usize).hash(hasher);
+                for value in [
+                    image.rect.x,
+                    image.rect.y,
+                    image.rect.width,
+                    image.rect.height,
+                ] {
+                    value.to_bits().hash(hasher);
+                }
+            }
+            _ => 0_u8.hash(hasher),
+        }
     }
 }
 

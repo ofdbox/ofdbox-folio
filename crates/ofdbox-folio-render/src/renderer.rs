@@ -25,7 +25,7 @@ use vello_cpu::{Glyph, ImageSource, PaintType, PixelMetadata, Pixmap, RenderCont
 use crate::error::RenderError;
 use crate::image::decode_image;
 use crate::options::RenderOptions;
-use crate::prepared::{PreparedCommand, PreparedScene};
+use crate::prepared::{PreparedCommand, PreparedScene, scene_fingerprint};
 
 /// An RGBA8 pixel target.
 #[derive(Clone, Debug)]
@@ -207,6 +207,7 @@ pub struct CpuRenderer {
     fonts: HashMap<u64, FontData>,
     pixmaps: PixmapCache,
     report: Report,
+    prepared: Option<(usize, u64, Arc<PreparedScene>)>,
 }
 
 /// Decoded image cache: evicted against a byte budget; a budget of 0 disables caching entirely.
@@ -272,6 +273,7 @@ impl CpuRenderer {
             fonts: HashMap::new(),
             pixmaps: PixmapCache::new(options.max_image_cache_bytes),
             report: Report::new(),
+            prepared: None,
         }
     }
 
@@ -282,6 +284,7 @@ impl CpuRenderer {
 
     /// Clears the font, image and rendering resource caches.
     pub fn clear_caches(&mut self) {
+        self.prepared = None;
         self.fonts.clear();
         self.pixmaps.clear();
         self.resources = Resources::new();
@@ -383,13 +386,26 @@ impl CpuRenderer {
         self.render_scene_with(scene, target, device)
     }
 
+    fn prepared_scene(&mut self, scene: &Scene) -> Arc<PreparedScene> {
+        let key = (scene as *const Scene as usize, scene_fingerprint(scene));
+        if let Some((cached_key, fingerprint, prepared)) = &self.prepared
+            && *cached_key == key.0
+            && *fingerprint == key.1
+        {
+            return Arc::clone(prepared);
+        }
+        let prepared = Arc::new(PreparedScene::from_scene(scene));
+        self.prepared = Some((key.0, key.1, Arc::clone(&prepared)));
+        prepared
+    }
+
     fn render_scene_with(
         &mut self,
         scene: &Scene,
         target: &mut RasterTarget,
         device: Matrix,
     ) -> Result<(), RenderError> {
-        let prepared = PreparedScene::from_scene(scene);
+        let prepared = self.prepared_scene(scene);
         self.render_prepared_with(&prepared, target, device)
     }
 
