@@ -26,6 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 width: size,
                 height: size,
                 dpi,
+                origin_px: (0.0, 0.0),
             },
             PipelineOptions {
                 priority: PipelinePriority::High,

@@ -90,9 +90,10 @@ accepts `RenderRequest`, emits `Started` / `Frame` / `Error`, and supports
 `cancel()`. The same API renders inline when the feature is off.
 
 `service::PipelineService` chains page loading and rendering with priority,
-generation filtering and bounded pending requests. `FontProviderFactory` lets a
-worker construct a custom provider. See `examples/pipeline.rs` and
-`examples/pipeline_bench.rs`.
+generation filtering and bounded pending requests. `RenderRequest` and
+`PipelineRequest` carry `origin_px`, so the service renders any whole-page tile,
+not just the page origin. `FontProviderFactory` lets a worker construct a custom
+provider. See `examples/pipeline.rs` and `examples/pipeline_bench.rs`.
 
 ## Reader Cache
 

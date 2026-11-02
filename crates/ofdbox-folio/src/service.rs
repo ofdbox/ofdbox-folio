@@ -295,6 +295,7 @@ mod tests {
             width: 4,
             height: 4,
             dpi: 96.0,
+            origin_px: (0.0, 0.0),
         });
         let mut message = None;
         for _ in 0..200 {
@@ -316,6 +317,114 @@ mod tests {
         assert!(message.expect("worker error").contains("intentional"));
     }
 
+    #[test]
+    fn render_service_reports_tile_origin() {
+        let scene = Scene {
+            size: Size::new(20.0, 20.0),
+            ..Scene::default()
+        };
+        let snapshot = Arc::new(PageSnapshot::from_page(Page::new(
+            PageInfo::default(),
+            scene,
+        )));
+        let mut service = RenderService::new();
+        let id = service.request(RenderRequest {
+            snapshot,
+            width: 8,
+            height: 8,
+            dpi: 96.0,
+            origin_px: (8.0, 4.0),
+        });
+        let mut origin = None;
+        for _ in 0..200 {
+            while let Some(event) = service.try_recv() {
+                if let RenderEvent::Frame {
+                    request, origin_px, ..
+                } = event
+                {
+                    assert_eq!(request, id);
+                    origin = Some(origin_px);
+                }
+            }
+            if origin.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(origin, Some((8.0, 4.0)));
+    }
+
+    #[test]
+    fn tile_origin_changes_rendered_content() {
+        use ofdbox_folio_ir::{
+            Element, FillRule, Group, Matrix, Paint, Path as IrPath, PathElement, Point, Rgba,
+        };
+
+        let mut path = IrPath::default();
+        path.move_to(Point::new(0.0, 0.0));
+        path.line_to(Point::new(2.0, 0.0));
+        path.line_to(Point::new(2.0, 2.0));
+        path.line_to(Point::new(0.0, 2.0));
+        path.close();
+        let mut root = Group::default();
+        root.children.push(Element::Path(PathElement {
+            path: Arc::new(path),
+            transform: Matrix::IDENTITY,
+            fill: Some(Paint::Color(Rgba::new(255, 0, 0, 255))),
+            stroke: None,
+            rule: FillRule::NonZero,
+        }));
+        let scene = Scene {
+            size: Size::new(20.0, 20.0),
+            root,
+            diagnostics: Vec::new(),
+        };
+        let snapshot = Arc::new(PageSnapshot::from_page(Page::new(
+            PageInfo::default(),
+            scene,
+        )));
+        let mut service = RenderService::new();
+        service.request(RenderRequest {
+            snapshot: Arc::clone(&snapshot),
+            width: 8,
+            height: 8,
+            dpi: 96.0,
+            origin_px: (0.0, 0.0),
+        });
+        service.request(RenderRequest {
+            snapshot: Arc::clone(&snapshot),
+            width: 8,
+            height: 8,
+            dpi: 96.0,
+            origin_px: (8.0, 0.0),
+        });
+
+        let mut first = None;
+        let mut second = None;
+        for _ in 0..200 {
+            while let Some(event) = service.try_recv() {
+                if let RenderEvent::Frame {
+                    origin_px, rgba, ..
+                } = event
+                {
+                    if origin_px == (0.0, 0.0) {
+                        first = Some(rgba);
+                    } else {
+                        second = Some(rgba);
+                    }
+                }
+            }
+            if first.is_some() && second.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let first = first.expect("origin tile");
+        let second = second.expect("offset tile");
+        assert!(first.as_chunks::<4>().0.iter().any(|pixel| pixel[3] > 0));
+        assert_ne!(first, second);
+    }
+
     #[cfg(any(feature = "gpu27", feature = "gpu30"))]
     #[test]
     fn render_service_wgpu_produces_a_tile() {
@@ -335,6 +444,7 @@ mod tests {
             width: 8,
             height: 8,
             dpi: 96.0,
+            origin_px: (0.0, 0.0),
         });
         let mut frame = None;
         for _ in 0..1000 {
@@ -343,6 +453,7 @@ mod tests {
                     request,
                     width,
                     height,
+                    origin_px: _,
                     rgba,
                 } = event
                 {
@@ -376,6 +487,7 @@ mod tests {
             width: 4,
             height: 4,
             dpi: 96.0,
+            origin_px: (0.0, 0.0),
         });
         service.cancel(id);
         assert!(service.try_recv().is_none());
@@ -414,6 +526,7 @@ mod tests {
                     width: 8,
                     height: 8,
                     dpi: 96.0,
+                    origin_px: (0.0, 0.0),
                 },
                 PipelineOptions {
                     priority: PipelinePriority::Low,
@@ -457,6 +570,7 @@ mod tests {
                 width: 16,
                 height: 16,
                 dpi: 96.0,
+                origin_px: (0.0, 0.0),
             })
             .expect("request");
         let mut frame = None;
@@ -498,6 +612,7 @@ mod tests {
             width: 8,
             height: 8,
             dpi: 96.0,
+            origin_px: (0.0, 0.0),
         });
         let mut frame = None;
         for _ in 0..200 {
@@ -506,6 +621,7 @@ mod tests {
                     request: id,
                     width,
                     height,
+                    origin_px: _,
                     rgba,
                 } = event
                 {
@@ -534,6 +650,8 @@ pub struct RenderRequest {
     pub height: u32,
     /// Render DPI.
     pub dpi: f64,
+    /// Tile origin in whole-page device pixels.
+    pub origin_px: (f64, f64),
 }
 
 /// One event produced by a [`RenderService`].
@@ -552,6 +670,8 @@ pub enum RenderEvent {
         width: u32,
         /// Tile height.
         height: u32,
+        /// Tile origin in whole-page device pixels.
+        origin_px: (f64, f64),
         /// Straight-alpha RGBA pixels.
         rgba: Vec<u8>,
     },
@@ -614,7 +734,7 @@ impl Renderer {
                     .render_plan_region(
                         &request.snapshot.plan,
                         &mut target,
-                        ofdbox_folio_render::RenderRegion::new((0.0, 0.0), request.dpi),
+                        ofdbox_folio_render::RenderRegion::new(request.origin_px, request.dpi),
                     )
                     .map_err(|error| error.to_string())?;
                 Ok(target.data().to_vec())
@@ -629,7 +749,11 @@ impl Renderer {
                 )
                 .map_err(|error| error.to_string())?;
                 backend
-                    .render_plan_region(Arc::clone(&request.snapshot.plan), &target, (0.0, 0.0))
+                    .render_plan_region(
+                        Arc::clone(&request.snapshot.plan),
+                        &target,
+                        request.origin_px,
+                    )
                     .map_err(|error| error.to_string())?;
                 target
                     .read_rgba(backend.context())
@@ -675,6 +799,7 @@ impl RenderService {
                 request: id,
                 width: request.width,
                 height: request.height,
+                origin_px: request.origin_px,
                 rgba,
             }),
             Err(message) => self.events.push_back(RenderEvent::Error {
@@ -785,6 +910,7 @@ mod render_thread {
                                         request: id,
                                         width: request.width,
                                         height: request.height,
+                                        origin_px: request.origin_px,
                                         rgba,
                                     },
                                     Err(message) => RenderEvent::Error {
@@ -874,6 +1000,8 @@ pub struct PipelineRequest {
     pub height: u32,
     /// Render DPI.
     pub dpi: f64,
+    /// Tile origin in whole-page device pixels.
+    pub origin_px: (f64, f64),
 }
 
 /// Priority for a pipeline request.
@@ -936,6 +1064,8 @@ pub enum PipelineEvent {
         width: u32,
         /// Tile height in pixels.
         height: u32,
+        /// Tile origin in whole-page device pixels.
+        origin_px: (f64, f64),
         /// Straight-alpha RGBA pixels.
         rgba: Vec<u8>,
     },
@@ -1119,6 +1249,7 @@ impl PipelineService {
                         width: pending.request.width,
                         height: pending.request.height,
                         dpi: pending.request.dpi,
+                        origin_px: pending.request.origin_px,
                     });
                     self.by_render.insert(render_id, pipeline);
                     pending.render_id = Some(render_id);
@@ -1153,10 +1284,10 @@ impl PipelineService {
             let Some(pipeline) = pipeline else {
                 continue;
             };
-            let Some(generation) = self
+            let Some((generation, _request_origin)) = self
                 .pending
                 .get(&pipeline)
-                .map(|pending| pending.options.generation)
+                .map(|pending| (pending.options.generation, pending.request.origin_px))
             else {
                 continue;
             };
@@ -1170,6 +1301,7 @@ impl PipelineService {
                 RenderEvent::Frame {
                     width,
                     height,
+                    origin_px,
                     rgba,
                     ..
                 } => {
@@ -1179,6 +1311,7 @@ impl PipelineService {
                         generation,
                         width,
                         height,
+                        origin_px,
                         rgba,
                     });
                 }
