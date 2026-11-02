@@ -444,7 +444,7 @@ mod tests {
             width: 8,
             height: 8,
             dpi: 96.0,
-            origin_px: (0.0, 0.0),
+            origin_px: (8.0, 0.0),
         });
         let mut frame = None;
         for _ in 0..1000 {
@@ -453,12 +453,13 @@ mod tests {
                     request,
                     width,
                     height,
-                    origin_px: _,
+                    origin_px,
                     rgba,
                 } = event
                 {
                     assert_eq!(request, id);
                     assert_eq!((width, height), (8, 8));
+                    assert_eq!(origin_px, (8.0, 0.0));
                     frame = Some(rgba);
                 }
             }
