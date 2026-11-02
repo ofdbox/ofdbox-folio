@@ -35,6 +35,7 @@ gpu30 = ["dep:ofdbox-folio-render", "ofdbox-folio-render/wgpu30"]
 gpu27 = ["dep:ofdbox-folio-render", "ofdbox-folio-render/wgpu27"]
 tiny-skia = ["dep:ofdbox-folio-render", "ofdbox-folio-render/tiny-skia"]
 threaded = []
+threaded-render = ["threaded"]
 
 [dev-dependencies]
 png.workspace = true
