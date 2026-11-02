@@ -8,9 +8,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
-    Diagnostic, DiagnosticCode, Element, FillRule, FontAsset, GradientExtend, GradientStop, Group,
-    ImageElement, LineCap, LineJoin, Matrix, Page, Paint, Path, PathElement, PathSegment,
-    RadialGradient, Report, Rgba, Scene, Size, StrokeStyle, TextElement,
+    Diagnostic, DiagnosticCode, FillRule, FontAsset, GradientExtend, GradientStop, ImageElement,
+    LineCap, LineJoin, Matrix, Page, Paint, Path, PathElement, PathSegment, RadialGradient, Report,
+    Rgba, Scene, Size, StrokeStyle, TextElement,
 };
 use vello_cpu::kurbo::{
     Affine, Arc as KurboArc, BezPath, Point, Rect as KurboRect, Stroke, SvgArc, Vec2,
@@ -25,6 +25,7 @@ use vello_cpu::{Glyph, ImageSource, PaintType, PixelMetadata, Pixmap, RenderCont
 use crate::error::RenderError;
 use crate::image::decode_image;
 use crate::options::RenderOptions;
+use crate::prepared::{PreparedCommand, PreparedScene};
 
 /// An RGBA8 pixel target.
 #[derive(Clone, Debug)]
@@ -388,6 +389,44 @@ impl CpuRenderer {
         target: &mut RasterTarget,
         device: Matrix,
     ) -> Result<(), RenderError> {
+        let prepared = PreparedScene::from_scene(scene);
+        self.render_prepared_with(&prepared, target, device)
+    }
+
+    /// Renders an already prepared scene into a raster target.
+    pub fn render_prepared(
+        &mut self,
+        prepared: &PreparedScene,
+        target: &mut RasterTarget,
+    ) -> Result<(), RenderError> {
+        let scale = target.dpi / 25.4;
+        self.render_prepared_with(prepared, target, Matrix::scale(scale, scale))
+    }
+
+    /// Renders a region of an already prepared scene into the target.
+    pub fn render_prepared_region(
+        &mut self,
+        prepared: &PreparedScene,
+        target: &mut RasterTarget,
+        region: RenderRegion,
+    ) -> Result<(), RenderError> {
+        if !(region.dpi.is_finite() && region.dpi > 0.0)
+            || !(region.origin_px.0.is_finite() && region.origin_px.1.is_finite())
+        {
+            return Err(RenderError::InvalidPage);
+        }
+        let k = region.dpi / 25.4;
+        let device =
+            Matrix::scale(k, k).then(Matrix::translate(-region.origin_px.0, -region.origin_px.1));
+        self.render_prepared_with(prepared, target, device)
+    }
+
+    fn render_prepared_with(
+        &mut self,
+        prepared: &PreparedScene,
+        target: &mut RasterTarget,
+        device: Matrix,
+    ) -> Result<(), RenderError> {
         let mut context = RenderContext::new(target.width, target.height);
         context.set_transform(Affine::IDENTITY);
         context.set_paint(color(self.options.background));
@@ -397,7 +436,87 @@ impl CpuRenderer {
             f64::from(target.width),
             f64::from(target.height),
         ));
-        self.draw_group(&mut context, &scene.root, device)?;
+        for command in &prepared.commands {
+            match command {
+                PreparedCommand::PushLayer { clip, opacity } => {
+                    context.set_transform(Affine::IDENTITY);
+                    let clip_path = clip.as_ref().map(|clip| {
+                        let mut path = to_bez_path(&clip.path);
+                        path.apply_affine(affine(clip.transform.then(device)));
+                        path
+                    });
+                    context.push_layer(
+                        clip_path.as_ref(),
+                        None,
+                        (*opacity < 1.0).then_some(*opacity),
+                        None,
+                        None,
+                    );
+                }
+                PreparedCommand::PopLayer => context.pop_layer(),
+                PreparedCommand::FillPath {
+                    path,
+                    transform,
+                    paint,
+                    rule,
+                } => {
+                    let element = PathElement {
+                        path: Arc::clone(path),
+                        transform: (*transform).then(device),
+                        fill: Some(paint.clone()),
+                        stroke: None,
+                        rule: *rule,
+                    };
+                    self.draw_path(&mut context, &element, Matrix::IDENTITY)?;
+                }
+                PreparedCommand::StrokePath {
+                    path,
+                    transform,
+                    stroke,
+                } => {
+                    let element = PathElement {
+                        path: Arc::clone(path),
+                        transform: (*transform).then(device),
+                        fill: None,
+                        stroke: Some(stroke.clone()),
+                        rule: FillRule::NonZero,
+                    };
+                    self.draw_path(&mut context, &element, Matrix::IDENTITY)?;
+                }
+                PreparedCommand::DrawImage {
+                    image,
+                    rect,
+                    transform,
+                    alpha,
+                } => {
+                    let element = ImageElement {
+                        image: Arc::clone(image),
+                        rect: *rect,
+                        transform: (*transform).then(device),
+                        alpha: *alpha,
+                    };
+                    self.draw_image(&mut context, &element, Matrix::IDENTITY)?;
+                }
+                PreparedCommand::DrawText {
+                    font,
+                    font_size,
+                    transform,
+                    run,
+                    fill,
+                    stroke,
+                } => {
+                    let element = TextElement {
+                        font: Arc::clone(font),
+                        font_size: *font_size,
+                        transform: (*transform).then(device),
+                        run: Arc::clone(run),
+                        fill: fill.clone(),
+                        stroke: stroke.clone(),
+                    };
+                    self.draw_text(&mut context, &element, Matrix::IDENTITY)?;
+                }
+            }
+        }
         context.flush();
         let mut pixmap = Pixmap::new(target.width, target.height);
         context.render(&mut pixmap, &mut self.resources);
@@ -423,40 +542,6 @@ impl CpuRenderer {
                     alpha,
                 ]);
             }
-        }
-        Ok(())
-    }
-
-    fn draw_group(
-        &mut self,
-        context: &mut RenderContext,
-        group: &Group,
-        parent: Matrix,
-    ) -> Result<(), RenderError> {
-        let transform = group.transform.then(parent);
-        context.set_transform(affine(transform));
-        let layered = group.clip.is_some() || group.opacity < 1.0;
-        if layered {
-            let clip = group.clip.as_ref().map(|clip| to_bez_path(&clip.path));
-            context.push_layer(
-                clip.as_ref(),
-                None,
-                (group.opacity < 1.0).then_some(group.opacity),
-                None,
-                None,
-            );
-        }
-        for element in &group.children {
-            match element {
-                Element::Group(child) => self.draw_group(context, child, transform)?,
-                Element::Path(path) => self.draw_path(context, path, transform)?,
-                Element::Text(text) => self.draw_text(context, text, transform)?,
-                Element::Image(image) => self.draw_image(context, image, transform)?,
-                _ => {}
-            }
-        }
-        if layered {
-            context.pop_layer();
         }
         Ok(())
     }

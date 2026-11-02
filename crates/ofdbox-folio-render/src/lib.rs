@@ -15,6 +15,7 @@ compile_error!("enable exactly one of the `wgpu27` and `wgpu30` features");
 mod error;
 mod image;
 mod options;
+mod prepared;
 mod renderer;
 #[cfg(feature = "tiny-skia")]
 mod tiny_skia_renderer;
@@ -23,6 +24,7 @@ mod wgpu;
 pub use error::RenderError;
 pub use image::{DecodedImage, decode_image, detect_format};
 pub use options::RenderOptions;
+pub use prepared::{PreparedClip, PreparedCommand, PreparedScene};
 pub use renderer::{CpuRenderer, PixelRect, RasterTarget, RenderRegion};
 #[cfg(feature = "tiny-skia")]
 pub use tiny_skia_renderer::TinySkiaRenderer;

@@ -21,6 +21,12 @@ Non-goals for the first pass:
 - replacing vello_cpu, tiny-skia or wgpu;
 - changing format-adapter public APIs.
 
+## Status
+
+- Phase 0: complete.
+- Phase 1: in progress. `PreparedScene` and the CPU renderer consumer exist;
+  tiny-skia, wgpu and the prepared-scene cache still need to migrate.
+
 ## Phase 0: Feature matrix and contract correctness
 
 Deliverables:
