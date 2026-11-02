@@ -19,7 +19,8 @@ pub use error::Error;
 pub use ofdbox_folio_ir::{SearchHit, SearchQuery, Selection, TextPosition, TextRange};
 /// Reader and cache types.
 pub use reader::{
-    CacheOptions, CacheStats, Document, OpenOptions, PageSelection, ReaderOptions, SearchProgress,
+    CacheOptions, CacheStats, Document, OpenOptions, PageLoad, PageSelection, ReaderOptions,
+    SearchProgress,
 };
 
 /// Flow IR, Fixed IR and reader contracts.

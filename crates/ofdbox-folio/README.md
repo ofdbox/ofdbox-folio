@@ -123,7 +123,7 @@ Search loads pages on demand and puts them into the cache; `search_with_progress
 
 ## Error Isolation
 
-- **Page-local failure**: a damaged page does not abort document loading; that page shows a placeholder and the document keeps working.
+- **Page-local failure**: a damaged page does not abort document loading; page_or_placeholder() returns a blank page with a CorruptPage diagnostic plus the original error, and the document keeps working.
 - **Diagnostics are kept**: the reason for the failure stays available, so the caller can show the rest of the document and report the damaged page.
 - **No collateral damage**: one bad page does not invalidate the cache or force other pages to be re-parsed.
 - **Bounded by contract**: page-level failures return errors rather than panicking, and the limits on page count, decompression, image pixels and recursion depth still apply.

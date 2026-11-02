@@ -10,9 +10,10 @@ use std::sync::Arc;
 use ofdbox_folio_ir::{FontError, FontRequest};
 
 use ofdbox_folio_ir::{
-    AttachmentId, AttachmentInfo, DocumentError, DocumentInfo, DocumentSource, FixedDocument,
-    FixedDocumentSource, FlowDocument, FontProvider, Metadata, OutlineItem, Page, PageInfo, Point,
-    SearchHit, SearchQuery, Selection, SourceFormat, TextPosition, TextRange,
+    AttachmentId, AttachmentInfo, Diagnostic, DiagnosticCode, DocumentError, DocumentInfo,
+    DocumentSource, FixedDocument, FixedDocumentSource, FlowDocument, FontProvider, Group,
+    Metadata, OutlineItem, Page, PageInfo, Point, Scene, SearchHit, SearchQuery, Selection,
+    Severity, Size, SourceFormat, TextPosition, TextRange,
 };
 
 use crate::error::Error;
@@ -67,6 +68,15 @@ pub struct CacheStats {
     pub misses: u64,
     /// Number of evictions.
     pub evictions: u64,
+}
+
+/// A loaded page, or a placeholder when the real page failed.
+#[derive(Debug)]
+pub struct PageLoad {
+    /// The real page or a blank placeholder.
+    pub page: Arc<Page>,
+    /// The load error when `page` is a placeholder.
+    pub error: Option<Error>,
 }
 
 /// Progress of a cross-page search.
@@ -366,6 +376,38 @@ impl Document {
         Ok(page)
     }
 
+    /// Loads a page, returning a blank placeholder instead of failing when the page is damaged.
+    ///
+    /// The placeholder has the page's nominal size and a `CorruptPage` diagnostic; the
+    /// original error is returned alongside it so the caller can report the damage.
+    pub fn page_or_placeholder(&mut self, index: usize) -> Result<PageLoad, Error> {
+        match self.page(index) {
+            Ok(page) => Ok(PageLoad { page, error: None }),
+            Err(error) => {
+                let info = self.source.page_info(index).unwrap_or_default();
+                let size = info.display_size();
+                let size = if size.is_valid() && !size.is_empty() {
+                    size
+                } else {
+                    Size::new(100.0, 100.0)
+                };
+                let scene = Scene {
+                    size,
+                    root: Group::default(),
+                    diagnostics: vec![Diagnostic::new(
+                        Severity::Error,
+                        DiagnosticCode::CorruptPage,
+                        error.to_string(),
+                    )],
+                };
+                Ok(PageLoad {
+                    page: Arc::new(Page::new(info, scene)),
+                    error: Some(error),
+                })
+            }
+        }
+    }
+
     /// Prefetches a page into the cache; does nothing when it is already cached.
     pub fn prefetch(&mut self, index: usize) -> Result<(), Error> {
         if self.cache.max_bytes == 0 || self.cache.contains(index) {
@@ -620,6 +662,7 @@ mod tests {
         info: DocumentInfo,
         pages: Vec<Page>,
         loads: Arc<AtomicUsize>,
+        fail_at: Option<usize>,
     }
 
     impl MockSource {
@@ -635,6 +678,7 @@ mod tests {
                     info,
                     pages,
                     loads: Arc::clone(&loads),
+                    fail_at: None,
                 },
                 loads,
             )
@@ -655,6 +699,9 @@ mod tests {
 
         fn load_page(&mut self, index: usize) -> Result<Page, PageError> {
             self.loads.fetch_add(1, Ordering::SeqCst);
+            if self.fail_at == Some(index) {
+                return Err(PageError::Decode("damaged page".to_owned()));
+            }
             self.pages
                 .get(index)
                 .cloned()
@@ -749,6 +796,23 @@ mod tests {
             .expect("search");
         assert_eq!(hits, 2);
         assert_eq!(pages, vec![0, 1]);
+    }
+
+    #[test]
+    fn page_or_placeholder_returns_blank_page() {
+        let (mut source, _) = MockSource::new(2);
+        source.fail_at = Some(1);
+        let mut document = Document::from_source(
+            Box::new(source),
+            ReaderOptions {
+                cache: CacheOptions::default(),
+            },
+        );
+        let loaded = document.page_or_placeholder(1).expect("placeholder");
+        assert!(loaded.error.is_some());
+        assert_eq!(loaded.page.text.items.len(), 0);
+        assert!(!loaded.page.content.diagnostics.is_empty());
+        assert!(loaded.page.content.size.is_valid());
     }
 
     #[test]
