@@ -421,6 +421,11 @@ impl GpuAtlas {
         self.full
     }
 
+    /// Fraction of the atlas height already used by the packer.
+    pub(crate) fn occupancy(&self) -> f32 {
+        self.packer.next_y as f32 / self.packer.size as f32
+    }
+
     /// Rasterize, pack and upload a glyph if it is not already cached.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn glyph(

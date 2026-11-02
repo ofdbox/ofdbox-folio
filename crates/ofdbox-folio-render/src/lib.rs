@@ -30,4 +30,4 @@ pub use renderer::{CpuRenderer, PixelRect, RasterTarget, RenderRegion};
 pub use tiny_skia_renderer::TinySkiaRenderer;
 pub use wgpu::WgpuBackend;
 #[cfg(any(feature = "wgpu27", feature = "wgpu30"))]
-pub use wgpu::{WgpuCapabilities, WgpuContext, WgpuOptions, WgpuTarget};
+pub use wgpu::{WgpuCacheStats, WgpuCapabilities, WgpuContext, WgpuOptions, WgpuTarget};

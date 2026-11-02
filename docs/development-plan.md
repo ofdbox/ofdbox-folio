@@ -26,10 +26,10 @@ Non-goals for the first pass:
 - Phase 0: complete.
 - Phase 1: complete. All three renderers consume `PreparedScene` (paths,
   text and images) and cache the current page's prepared scene across tiles.
-- Phase 2: started. The wgpu image texture cache has a configurable byte budget
-  and the glyph outline cache has an entry budget; the atlas size is
-  configurable and a full atlas is reset before the next frame. Fine-grained
-  per-entry atlas eviction remains.
+- Phase 2: in progress. The wgpu image texture cache has a configurable byte
+  budget, the glyph outline cache is an entry-bounded LRU, the atlas size is
+  configurable and a full atlas is reset before the next frame, and detailed
+  cache statistics are exposed. Fine-grained per-entry atlas eviction remains.
 
 ## Phase 0: Feature matrix and contract correctness
 

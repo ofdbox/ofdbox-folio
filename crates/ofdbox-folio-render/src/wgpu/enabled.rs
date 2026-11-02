@@ -116,6 +116,23 @@ pub struct WgpuOptions {
     pub atlas_size: u32,
 }
 
+/// Detailed cache occupancy for a wgpu backend.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WgpuCacheStats {
+    /// Cached glyph outlines.
+    pub glyphs: usize,
+    /// Cached flattened tile geometries.
+    pub tiles: usize,
+    /// Cached prepared scenes.
+    pub prepared_scenes: usize,
+    /// Cached image textures.
+    pub images: usize,
+    /// Image texture bytes.
+    pub image_bytes: usize,
+    /// Fraction of the glyph atlas height currently packed.
+    pub atlas_occupancy: f32,
+}
+
 impl Default for WgpuOptions {
     fn default() -> Self {
         Self {
@@ -332,6 +349,59 @@ struct CachedGlyph {
     path: Arc<Path>,
 }
 
+/// Bounded LRU cache of parsed glyph outlines.
+struct GlyphCache {
+    entries: HashMap<(usize, u16), CachedGlyph>,
+    order: VecDeque<(usize, u16)>,
+    max_entries: usize,
+}
+
+impl GlyphCache {
+    fn new(max_entries: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            max_entries,
+        }
+    }
+
+    fn get(&mut self, key: (usize, u16)) -> Option<Arc<Path>> {
+        let path = Arc::clone(&self.entries.get(&key)?.path);
+        self.order.retain(|value| *value != key);
+        self.order.push_back(key);
+        Some(path)
+    }
+
+    fn insert(&mut self, key: (usize, u16), glyph: CachedGlyph) {
+        if let Some(existing) = self.entries.get_mut(&key) {
+            *existing = glyph;
+            self.order.retain(|value| *value != key);
+            self.order.push_back(key);
+            return;
+        }
+        if self.max_entries == 0 {
+            return;
+        }
+        while self.entries.len() >= self.max_entries {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+        self.entries.insert(key, glyph);
+        self.order.push_back(key);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 /// A decoded image uploaded to a GPU texture.
 struct CachedImage {
     _image: Arc<ImageAsset>,
@@ -387,6 +457,14 @@ impl ImageCache {
         self.entries.clear();
         self.order.clear();
         self.bytes = 0;
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn bytes(&self) -> usize {
+        self.bytes
     }
 }
 
@@ -461,7 +539,7 @@ pub struct WgpuBackend {
     pipeline: wgpu_lib::ComputePipeline,
     layout: wgpu_lib::BindGroupLayout,
     /// Font outlines keyed by `(font asset pointer, glyph id)`.
-    glyph_cache: Mutex<HashMap<(usize, u16), CachedGlyph>>,
+    glyph_cache: Mutex<GlyphCache>,
     /// Parsed font faces keyed by `(font asset pointer, face index)`.
     font_faces: Mutex<HashMap<(usize, u32), Arc<CachedFace>>>,
     /// Already-flattened scene geometry per scene / dpi / region.
@@ -572,7 +650,7 @@ impl WgpuBackend {
             context,
             pipeline,
             layout,
-            glyph_cache: Mutex::new(HashMap::new()),
+            glyph_cache: Mutex::new(GlyphCache::new(options.max_glyph_cache_entries)),
             font_faces: Mutex::new(HashMap::new()),
             path_cache: Mutex::new(HashMap::new()),
             prepared_cache: Mutex::new(HashMap::new()),
@@ -615,6 +693,42 @@ impl WgpuBackend {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clear();
+    }
+
+    /// Detailed cache occupancy.
+    pub fn cache_stats_detailed(&self) -> WgpuCacheStats {
+        let glyphs = self
+            .glyph_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len();
+        let tiles = self
+            .path_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len();
+        let prepared_scenes = self
+            .prepared_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len();
+        let image_cache = self
+            .image_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let atlas_occupancy = self
+            .atlas
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .occupancy();
+        WgpuCacheStats {
+            glyphs,
+            tiles,
+            prepared_scenes,
+            images: image_cache.len(),
+            image_bytes: image_cache.bytes(),
+            atlas_occupancy,
+        }
     }
 
     /// Number of cached glyph outlines and flattened tile geometries.
@@ -785,7 +899,6 @@ impl WgpuBackend {
                                 max_y: target.height as f32 + 1.0,
                             },
                             &self.glyph_cache,
-                            self.options.max_glyph_cache_entries,
                             &self.font_faces,
                             &mut atlas,
                             &self.context.queue,
@@ -1859,8 +1972,7 @@ fn emit_text_instances(
     scale: f64,
     origin_px: (f64, f64),
     viewport: Viewport,
-    glyph_cache: &Mutex<HashMap<(usize, u16), CachedGlyph>>,
-    max_glyph_cache_entries: usize,
+    glyph_cache: &Mutex<GlyphCache>,
     font_faces: &Mutex<HashMap<(usize, u32), Arc<CachedFace>>>,
     atlas: &mut GpuAtlas,
     queue: &wgpu_lib::Queue,
@@ -1993,8 +2105,8 @@ fn emit_text_instances(
             let mut cache = glyph_cache
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            if let Some(glyph) = cache.get(&key) {
-                Arc::clone(&glyph.path)
+            if let Some(path) = cache.get(key) {
+                path
             } else {
                 let mut builder = GlyphPathBuilder::default();
                 if face
@@ -2012,9 +2124,6 @@ fn emit_text_instances(
                         path: Arc::clone(&path),
                     },
                 );
-                if cache.len() > max_glyph_cache_entries {
-                    cache.clear();
-                }
                 path
             }
         };
@@ -2470,7 +2579,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
 #[cfg(test)]
 mod tests {
-    use super::{WgpuBackend, WgpuContext, WgpuTarget, collect_paths};
+    use super::{CachedGlyph, GlyphCache, WgpuBackend, WgpuContext, WgpuTarget, collect_paths};
     use crate::prepared::PreparedScene;
     use ofdbox_folio_ir::{
         Element, FillRule, Group, Matrix, Paint, Path, PathElement, Point, Rgba, Scene, Size,
@@ -2863,6 +2972,29 @@ mod tests {
         let pixels = target.read_rgba(backend.context()).expect("read");
         let dark = pixels.chunks(4).filter(|pixel| pixel[0] < 64).count();
         assert!(dark > 5, "the later text must be visible over the path");
+    }
+
+    #[test]
+    fn glyph_cache_evicts_least_recently_used() {
+        let font = std::sync::Arc::new(ofdbox_folio_ir::FontAsset::new(
+            std::sync::Arc::from(&b""[..]),
+            0,
+        ));
+        let glyph = |font: &std::sync::Arc<ofdbox_folio_ir::FontAsset>| CachedGlyph {
+            _font: std::sync::Arc::clone(font),
+            path: std::sync::Arc::new(Path::new()),
+        };
+        let mut cache = GlyphCache::new(2);
+        cache.insert((1, 1), glyph(&font));
+        cache.insert((2, 2), glyph(&font));
+        assert!(cache.get((1, 1)).is_some());
+        cache.insert((3, 3), glyph(&font));
+        assert!(
+            cache.get((2, 2)).is_none(),
+            "least recently used entry should be evicted"
+        );
+        assert!(cache.get((1, 1)).is_some());
+        assert!(cache.get((3, 3)).is_some());
     }
 
     #[test]
