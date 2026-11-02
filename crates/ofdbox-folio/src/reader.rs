@@ -1,6 +1,6 @@
 //! Reader facade: format probing, page caching and on-demand loading.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::Cursor;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
@@ -69,6 +69,17 @@ pub struct CacheStats {
     pub evictions: u64,
 }
 
+/// Progress of a cross-page search.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SearchProgress {
+    /// Page currently being searched.
+    pub page: usize,
+    /// Total page count.
+    pub page_count: usize,
+    /// Hits found so far.
+    pub hits: usize,
+}
+
 /// Selection rectangles on one page.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PageSelection {
@@ -81,13 +92,14 @@ pub struct PageSelection {
 struct CachedPage {
     page: Arc<Page>,
     cost: usize,
+    last_used: u64,
 }
 
 struct PageCache {
     max_bytes: usize,
     bytes: usize,
     entries: HashMap<usize, CachedPage>,
-    order: VecDeque<usize>,
+    clock: u64,
     hits: u64,
     misses: u64,
     evictions: u64,
@@ -99,7 +111,7 @@ impl PageCache {
             max_bytes,
             bytes: 0,
             entries: HashMap::new(),
-            order: VecDeque::new(),
+            clock: 0,
             hits: 0,
             misses: 0,
             evictions: 0,
@@ -107,14 +119,15 @@ impl PageCache {
     }
 
     fn get(&mut self, index: usize) -> Option<Arc<Page>> {
-        let Some(entry) = self.entries.get(&index) else {
+        self.clock = self.clock.wrapping_add(1);
+        let clock = self.clock;
+        let Some(entry) = self.entries.get_mut(&index) else {
             self.misses += 1;
             return None;
         };
-        let page = Arc::clone(&entry.page);
+        entry.last_used = clock;
         self.hits += 1;
-        self.touch(index);
-        Some(page)
+        Some(Arc::clone(&entry.page))
     }
 
     fn contains(&self, index: usize) -> bool {
@@ -128,30 +141,36 @@ impl PageCache {
         }
         if let Some(previous) = self.entries.remove(&index) {
             self.bytes = self.bytes.saturating_sub(previous.cost);
-            self.order.retain(|value| *value != index);
         }
+        self.clock = self.clock.wrapping_add(1);
         while self.bytes.saturating_add(cost) > self.max_bytes {
-            let Some(front) = self.order.pop_front() else {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(index, _)| *index)
+            else {
                 break;
             };
-            if let Some(entry) = self.entries.remove(&front) {
+            if let Some(entry) = self.entries.remove(&oldest) {
                 self.bytes = self.bytes.saturating_sub(entry.cost);
                 self.evictions += 1;
             }
         }
         self.bytes += cost;
-        self.entries.insert(index, CachedPage { page, cost });
-        self.order.push_back(index);
-    }
-
-    fn touch(&mut self, index: usize) {
-        self.order.retain(|value| *value != index);
-        self.order.push_back(index);
+        self.entries.insert(
+            index,
+            CachedPage {
+                page,
+                cost,
+                last_used: self.clock,
+            },
+        );
     }
 
     fn clear(&mut self) {
         self.entries.clear();
-        self.order.clear();
+        self.clock = 0;
         self.bytes = 0;
         self.hits = 0;
         self.misses = 0;
@@ -386,10 +405,26 @@ impl Document {
     pub fn search(
         &mut self,
         query: &SearchQuery,
-        mut visit: impl FnMut(&SearchHit) -> bool,
+        visit: impl FnMut(&SearchHit) -> bool,
     ) -> Result<usize, Error> {
+        self.search_with_progress(query, visit, |_| {})
+    }
+
+    /// Searches across pages and reports the current page before it is loaded.
+    pub fn search_with_progress(
+        &mut self,
+        query: &SearchQuery,
+        mut visit: impl FnMut(&SearchHit) -> bool,
+        mut progress: impl FnMut(SearchProgress),
+    ) -> Result<usize, Error> {
+        let page_count = self.page_count();
         let mut count = 0;
-        for index in 0..self.page_count() {
+        for index in 0..page_count {
+            progress(SearchProgress {
+                page: index,
+                page_count,
+                hits: count,
+            });
             let page = self.page(index)?;
             for hit in ofdbox_folio_ir::search(&page.text, query) {
                 count += 1;
@@ -403,11 +438,24 @@ impl Document {
 
     /// Searches across pages and collects all hits.
     pub fn search_all(&mut self, query: &SearchQuery) -> Result<Vec<SearchHit>, Error> {
+        self.search_all_with_progress(query, |_| {})
+    }
+
+    /// Searches across pages, reports progress and collects all hits.
+    pub fn search_all_with_progress(
+        &mut self,
+        query: &SearchQuery,
+        mut progress: impl FnMut(SearchProgress),
+    ) -> Result<Vec<SearchHit>, Error> {
         let mut hits = Vec::new();
-        self.search(query, |hit| {
-            hits.push(hit.clone());
-            true
-        })?;
+        self.search_with_progress(
+            query,
+            |hit| {
+                hits.push(hit.clone());
+                true
+            },
+            &mut progress,
+        )?;
         Ok(hits)
     }
 
@@ -685,6 +733,22 @@ mod tests {
             ),
             loads,
         )
+    }
+
+    #[test]
+    fn search_reports_page_progress() {
+        let (mut document, _) = document(2, 1024 * 1024);
+        let query = SearchQuery {
+            text: "Hello".to_owned(),
+            case_sensitive: false,
+            whole_word: false,
+        };
+        let mut pages = Vec::new();
+        let hits = document
+            .search_with_progress(&query, |_| true, |progress| pages.push(progress.page))
+            .expect("search");
+        assert_eq!(hits, 2);
+        assert_eq!(pages, vec![0, 1]);
     }
 
     #[test]

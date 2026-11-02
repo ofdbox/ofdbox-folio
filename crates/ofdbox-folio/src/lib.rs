@@ -18,7 +18,9 @@ pub use error::Error;
 /// Common types for cross-page selection and search.
 pub use ofdbox_folio_ir::{SearchHit, SearchQuery, Selection, TextPosition, TextRange};
 /// Reader and cache types.
-pub use reader::{CacheOptions, CacheStats, Document, OpenOptions, PageSelection, ReaderOptions};
+pub use reader::{
+    CacheOptions, CacheStats, Document, OpenOptions, PageSelection, ReaderOptions, SearchProgress,
+};
 
 /// Flow IR, Fixed IR and reader contracts.
 pub use ofdbox_folio_ir as ir;

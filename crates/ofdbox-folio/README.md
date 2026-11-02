@@ -119,7 +119,7 @@ let rects = document.selection_rects(&selection)?;
 let position = document.hit_test(0, Point::new(12.0, 18.0))?; // page coordinates, in millimetres
 ```
 
-Search loads pages on demand and puts them into the cache; when a selection spans pages, the text is joined with newlines and pages are not re-parsed in between. Hit rectangles and selection rectangles are both in page space, so the caller only has to map them to its viewport.
+Search loads pages on demand and puts them into the cache; `search_with_progress` reports the page being searched so a caller can show progress or cancel through the hit callback. When a selection spans pages, the text is joined with newlines and pages are not re-parsed in between. Hit rectangles and selection rectangles are both in page space, so the caller only has to map them to its viewport.
 
 ## Error Isolation
 

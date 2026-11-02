@@ -30,6 +30,8 @@ Non-goals for the first pass:
   budget, the glyph outline cache is an entry-bounded LRU, the atlas size is
   configurable and a full atlas is reset before the next frame, and detailed
   cache statistics are exposed. Fine-grained per-entry atlas eviction remains.
+- Phase 3: started. Page cache hits are O(1) via a clock-based LRU,
+  and search exposes page progress callbacks; the worker and placeholder API remain.
 
 ## Phase 0: Feature matrix and contract correctness
 
