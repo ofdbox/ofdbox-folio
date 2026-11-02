@@ -24,7 +24,10 @@ mod wgpu;
 pub use error::RenderError;
 pub use image::{DecodedImage, decode_image, detect_format};
 pub use options::RenderOptions;
-pub use prepared::{PreparedClip, PreparedCommand, PreparedScene};
+pub use prepared::{
+    PageSnapshot, PreparedClip, PreparedCommand, PreparedScene, RenderClip, RenderCommand,
+    RenderPlan,
+};
 pub use renderer::{CpuRenderer, PixelRect, RasterTarget, RenderCacheStats, RenderRegion};
 #[cfg(feature = "tiny-skia")]
 pub use tiny_skia_renderer::TinySkiaRenderer;

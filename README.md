@@ -134,7 +134,7 @@ Acceptance highlights: generated OFD is strictly readable and byte-identical aft
 
 ## Docs & License
 
-- [Architecture](docs/architecture.md) · [Development plan](docs/development-plan.md) · [Facade & Reader](crates/ofdbox-folio/README.md) · [IR](crates/ofdbox-folio-ir/README.md) · [Layout](crates/ofdbox-folio-layout/README.md) · [OFD](crates/ofdbox-folio-ofd/README.md) · [PDF](crates/ofdbox-folio-pdf/README.md) · [DOCX](crates/ofdbox-folio-docx/README.md) · [Render](crates/ofdbox-folio-render/README.md)
+- [Architecture](docs/architecture.md) · [Render IR](docs/render-ir.md) · [Development plan](docs/development-plan.md) · [Facade & Reader](crates/ofdbox-folio/README.md) · [IR](crates/ofdbox-folio-ir/README.md) · [Layout](crates/ofdbox-folio-layout/README.md) · [OFD](crates/ofdbox-folio-ofd/README.md) · [PDF](crates/ofdbox-folio-pdf/README.md) · [DOCX](crates/ofdbox-folio-docx/README.md) · [Render](crates/ofdbox-folio-render/README.md)
 - 中文文档：[架构](docs/architecture.zh-CN.md) · [门面 & Reader](crates/ofdbox-folio/README.zh-CN.md) · [IR](crates/ofdbox-folio-ir/README.zh-CN.md) · [排版](crates/ofdbox-folio-layout/README.zh-CN.md) · [OFD](crates/ofdbox-folio-ofd/README.zh-CN.md) · [PDF](crates/ofdbox-folio-pdf/README.zh-CN.md) · [DOCX](crates/ofdbox-folio-docx/README.zh-CN.md) · [渲染](crates/ofdbox-folio-render/README.zh-CN.md)
 - [中文 README](README.zh-CN.md)
 

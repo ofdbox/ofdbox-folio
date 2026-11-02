@@ -159,6 +159,25 @@ impl TinySkiaRenderer {
         self.render_prepared_with(&prepared, target, device)
     }
 
+    /// Renders a RenderPlan into a raster target.
+    pub fn render_plan(
+        &mut self,
+        plan: &crate::prepared::RenderPlan,
+        target: &mut RasterTarget,
+    ) -> Result<(), RenderError> {
+        self.render_prepared(plan, target)
+    }
+
+    /// Renders a region of a RenderPlan.
+    pub fn render_plan_region(
+        &mut self,
+        plan: &crate::prepared::RenderPlan,
+        target: &mut RasterTarget,
+        region: RenderRegion,
+    ) -> Result<(), RenderError> {
+        self.render_prepared_region(plan, target, region)
+    }
+
     /// Renders an already prepared scene into a raster target.
     pub fn render_prepared(
         &mut self,

@@ -1,6 +1,6 @@
 //! Backend-neutral prepared scene.
 //!
-//! A [`PreparedScene`] is a flat command list derived from a Fixed IR
+//! A [`RenderPlan`] is a flat command list derived from a Fixed IR
 //! [`Scene`](ofdbox_folio_ir::Scene). It resolves group transforms, emits an
 //! explicit layer stack for clips and group opacity, and keeps paints and
 //! resources in page space. Rendering backends can consume the same list
@@ -10,13 +10,13 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
-    Element, FillRule, FontAsset, GlyphRun, Group, ImageAsset, Matrix, Paint, Path, Rect, Scene,
-    Size, StrokePaint,
+    Diagnostic, Element, FillRule, FontAsset, GlyphRun, Group, ImageAsset, LinkArea, Matrix, Page,
+    PageInfo, Paint, Path, Rect, Scene, Size, StrokePaint, TextLayer,
 };
 
 /// A clip path resolved into page space.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PreparedClip {
+pub struct RenderClip {
     /// Clipping path in page space.
     pub path: Arc<Path>,
     /// Fill rule for the clip path.
@@ -28,11 +28,11 @@ pub struct PreparedClip {
 /// One command in a prepared scene.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
-pub enum PreparedCommand {
+pub enum RenderCommand {
     /// Begin an isolated layer with an optional clip and opacity.
     PushLayer {
         /// Clip path in page space, if the group was clipped.
-        clip: Option<PreparedClip>,
+        clip: Option<RenderClip>,
         /// Layer opacity in `0.0..=1.0`.
         opacity: f32,
     },
@@ -88,21 +88,30 @@ pub enum PreparedCommand {
 
 /// A page-sized, backend-neutral command list.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PreparedScene {
+pub struct RenderPlan {
     /// Page display size, in millimetres.
     pub size: Size,
     /// Flattened commands in painting order.
-    pub commands: Vec<PreparedCommand>,
+    pub commands: Vec<RenderCommand>,
+    /// Conservative page-space bounds of the whole plan.
+    pub bounds: Option<Rect>,
 }
 
-impl PreparedScene {
+impl RenderPlan {
     /// Resolves a Fixed IR scene into a prepared command list.
     pub fn from_scene(scene: &Scene) -> Self {
         let mut commands = Vec::new();
         walk_group(&scene.root, Matrix::IDENTITY, &mut commands);
+        let bounds = (scene.size.is_valid() && !scene.size.is_empty()).then_some(Rect::new(
+            0.0,
+            0.0,
+            scene.size.width,
+            scene.size.height,
+        ));
         Self {
             size: scene.size,
             commands,
+            bounds,
         }
     }
 
@@ -117,12 +126,53 @@ impl PreparedScene {
     }
 }
 
-fn walk_group(group: &Group, parent: Matrix, commands: &mut Vec<PreparedCommand>) {
+/// Alias kept for the previous display-list name.
+pub type PreparedScene = RenderPlan;
+/// Alias kept for the previous command name.
+pub type PreparedCommand = RenderCommand;
+/// Alias kept for the previous clip name.
+pub type PreparedClip = RenderClip;
+
+/// Immutable page data crossing the parse/render boundary.
+#[derive(Clone, Debug)]
+pub struct PageSnapshot {
+    /// Page information.
+    pub info: PageInfo,
+    /// Backend-neutral render plan.
+    pub plan: Arc<RenderPlan>,
+    /// Text layer for selection, search and hit testing.
+    pub text: Arc<TextLayer>,
+    /// Link areas.
+    pub links: Arc<[LinkArea]>,
+    /// Page diagnostics.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl PageSnapshot {
+    /// Builds a snapshot, consuming the page so parser-owned state cannot cross threads.
+    pub fn from_page(page: Page) -> Self {
+        let plan = Arc::new(RenderPlan::from_scene(&page.content));
+        Self {
+            info: page.info,
+            plan,
+            text: Arc::new(page.text),
+            links: page.links.into(),
+            diagnostics: page.content.diagnostics,
+        }
+    }
+
+    /// The render plan.
+    pub fn plan(&self) -> &RenderPlan {
+        &self.plan
+    }
+}
+
+fn walk_group(group: &Group, parent: Matrix, commands: &mut Vec<RenderCommand>) {
     let transform = group.transform.then(parent);
     let layered = group.clip.is_some() || group.opacity < 1.0;
     if layered {
-        commands.push(PreparedCommand::PushLayer {
-            clip: group.clip.as_ref().map(|clip| PreparedClip {
+        commands.push(RenderCommand::PushLayer {
+            clip: group.clip.as_ref().map(|clip| RenderClip {
                 path: Arc::clone(&clip.path),
                 rule: clip.rule,
                 transform,
@@ -136,7 +186,7 @@ fn walk_group(group: &Group, parent: Matrix, commands: &mut Vec<PreparedCommand>
             Element::Path(path) => {
                 let transform = path.transform.then(transform);
                 if let Some(paint) = &path.fill {
-                    commands.push(PreparedCommand::FillPath {
+                    commands.push(RenderCommand::FillPath {
                         path: Arc::clone(&path.path),
                         transform,
                         paint: paint.clone(),
@@ -144,20 +194,20 @@ fn walk_group(group: &Group, parent: Matrix, commands: &mut Vec<PreparedCommand>
                     });
                 }
                 if let Some(stroke) = &path.stroke {
-                    commands.push(PreparedCommand::StrokePath {
+                    commands.push(RenderCommand::StrokePath {
                         path: Arc::clone(&path.path),
                         transform,
                         stroke: stroke.clone(),
                     });
                 }
             }
-            Element::Image(image) => commands.push(PreparedCommand::DrawImage {
+            Element::Image(image) => commands.push(RenderCommand::DrawImage {
                 image: Arc::clone(&image.image),
                 rect: image.rect,
                 transform: image.transform.then(transform),
                 alpha: image.alpha.clamp(0.0, 1.0),
             }),
-            Element::Text(text) => commands.push(PreparedCommand::DrawText {
+            Element::Text(text) => commands.push(RenderCommand::DrawText {
                 font: Arc::clone(&text.font),
                 font_size: text.font_size,
                 transform: text.transform.then(transform),
@@ -169,7 +219,7 @@ fn walk_group(group: &Group, parent: Matrix, commands: &mut Vec<PreparedCommand>
         }
     }
     if layered {
-        commands.push(PreparedCommand::PopLayer);
+        commands.push(RenderCommand::PopLayer);
     }
 }
 
@@ -282,14 +332,29 @@ mod tests {
     }
 
     #[test]
+    fn page_snapshot_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<PageSnapshot>();
+    }
+
+    #[test]
+    fn page_snapshot_owns_the_plan_and_text_layer() {
+        let page = Page::new(PageInfo::default(), scene(vec![path_element(0.0)]));
+        let snapshot = PageSnapshot::from_page(page);
+        assert_eq!(snapshot.plan.commands.len(), 1);
+        assert!(snapshot.plan.bounds.is_some());
+        assert!(snapshot.text.items.is_empty());
+    }
+
+    #[test]
     fn resolves_nested_transforms() {
         let group = Group {
             transform: Matrix::translate(3.0, 4.0),
             children: vec![path_element(0.0)],
             ..Group::default()
         };
-        let prepared = PreparedScene::from_scene(&scene(vec![Element::Group(group)]));
-        let PreparedCommand::FillPath { transform, .. } = &prepared.commands[0] else {
+        let prepared = RenderPlan::from_scene(&scene(vec![Element::Group(group)]));
+        let RenderCommand::FillPath { transform, .. } = &prepared.commands[0] else {
             panic!("expected a fill command");
         };
         let point = transform.apply(ofdbox_folio_ir::Point::new(0.0, 0.0));
@@ -313,21 +378,21 @@ mod tests {
             children: vec![path_element(2.0)],
             ..Group::default()
         };
-        let prepared = PreparedScene::from_scene(&scene(vec![
+        let prepared = RenderPlan::from_scene(&scene(vec![
             Element::Group(clipped),
             Element::Group(translucent),
         ]));
         assert_eq!(prepared.len(), 6);
         assert!(matches!(
             prepared.commands[0],
-            PreparedCommand::PushLayer { clip: Some(_), .. }
+            RenderCommand::PushLayer { clip: Some(_), .. }
         ));
-        assert!(matches!(prepared.commands[2], PreparedCommand::PopLayer));
+        assert!(matches!(prepared.commands[2], RenderCommand::PopLayer));
         assert!(matches!(
             prepared.commands[3],
-            PreparedCommand::PushLayer { clip: None, opacity } if (opacity - 0.5).abs() < 1e-6
+            RenderCommand::PushLayer { clip: None, opacity } if (opacity - 0.5).abs() < 1e-6
         ));
-        assert!(matches!(prepared.commands[5], PreparedCommand::PopLayer));
+        assert!(matches!(prepared.commands[5], RenderCommand::PopLayer));
     }
 
     #[test]
@@ -345,14 +410,14 @@ mod tests {
             }),
             rule: FillRule::NonZero,
         });
-        let prepared = PreparedScene::from_scene(&scene(vec![element]));
+        let prepared = RenderPlan::from_scene(&scene(vec![element]));
         assert!(matches!(
             prepared.commands[0],
-            PreparedCommand::FillPath { .. }
+            RenderCommand::FillPath { .. }
         ));
         assert!(matches!(
             prepared.commands[1],
-            PreparedCommand::StrokePath { .. }
+            RenderCommand::StrokePath { .. }
         ));
     }
 }
