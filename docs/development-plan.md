@@ -24,8 +24,8 @@ Non-goals for the first pass:
 ## Status
 
 - Phase 0: complete.
-- Phase 1: in progress. `PreparedScene` and the CPU renderer consumer exist;
-  tiny-skia, wgpu and the prepared-scene cache still need to migrate.
+- Phase 1: in progress. `PreparedScene` is consumed by the CPU and tiny-skia
+  renderers; wgpu and the prepared-scene cache still need to migrate.
 
 ## Phase 0: Feature matrix and contract correctness
 

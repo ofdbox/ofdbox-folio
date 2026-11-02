@@ -4,9 +4,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
-    Diagnostic, DiagnosticCode, Element, FillRule, FontAsset, GradientExtend, Group, ImageAsset,
-    ImageElement, LineCap, LineJoin, Matrix, Page, Paint, Path, PathElement, PathSegment, Point,
-    Rgba, Scene, StrokeStyle, TextElement,
+    Diagnostic, DiagnosticCode, FillRule, FontAsset, GradientExtend, ImageAsset, ImageElement,
+    LineCap, LineJoin, Matrix, Page, Paint, Path, PathElement, PathSegment, Point, Rgba, Scene,
+    StrokeStyle, TextElement,
 };
 use tiny_skia::{
     Color, FillRule as SkFillRule, IntSize, LinearGradient, Mask, Paint as SkPaint, PathBuilder,
@@ -16,6 +16,7 @@ use tiny_skia::{
 use crate::error::RenderError;
 use crate::image::decode_image;
 use crate::options::RenderOptions;
+use crate::prepared::{PreparedClip, PreparedCommand, PreparedScene};
 use crate::renderer::{PixelRect, RasterTarget, RenderRegion};
 
 /// A software renderer that rasterizes Fixed IR with `tiny-skia`.
@@ -127,12 +128,180 @@ impl TinySkiaRenderer {
         target: &mut RasterTarget,
         device: Matrix,
     ) -> Result<(), RenderError> {
+        let prepared = PreparedScene::from_scene(scene);
+        self.render_prepared_with(&prepared, target, device)
+    }
+
+    /// Renders an already prepared scene into a raster target.
+    pub fn render_prepared(
+        &mut self,
+        prepared: &PreparedScene,
+        target: &mut RasterTarget,
+    ) -> Result<(), RenderError> {
+        let scale = target.dpi() / 25.4;
+        self.render_prepared_with(prepared, target, Matrix::scale(scale, scale))
+    }
+
+    /// Renders a region of an already prepared scene into the target.
+    pub fn render_prepared_region(
+        &mut self,
+        prepared: &PreparedScene,
+        target: &mut RasterTarget,
+        region: RenderRegion,
+    ) -> Result<(), RenderError> {
+        if !(region.dpi.is_finite() && region.dpi > 0.0)
+            || !(region.origin_px.0.is_finite() && region.origin_px.1.is_finite())
+        {
+            return Err(RenderError::InvalidPage);
+        }
+        let k = region.dpi / 25.4;
+        let device =
+            Matrix::scale(k, k).then(Matrix::translate(-region.origin_px.0, -region.origin_px.1));
+        self.render_prepared_with(prepared, target, device)
+    }
+
+    fn render_prepared_with(
+        &mut self,
+        prepared: &PreparedScene,
+        target: &mut RasterTarget,
+        device: Matrix,
+    ) -> Result<(), RenderError> {
         let width = u32::from(target.width());
         let height = u32::from(target.height());
-        let mut pixmap = Pixmap::new(width, height).ok_or(RenderError::InvalidPage)?;
-        fill_background(&mut pixmap, self.options.background);
-        self.draw_group(&mut pixmap, &scene.root, device, None);
-        let data = pixmap.data();
+        let mut frames = vec![Pixmap::new(width, height).ok_or(RenderError::InvalidPage)?];
+        fill_background(
+            frames.last_mut().expect("base frame"),
+            self.options.background,
+        );
+        let mut layers: Vec<(Option<PreparedClip>, f32)> = Vec::new();
+        for command in &prepared.commands {
+            match command {
+                PreparedCommand::PushLayer { clip, opacity } => {
+                    frames.push(Pixmap::new(width, height).ok_or(RenderError::InvalidPage)?);
+                    layers.push((clip.clone(), *opacity));
+                }
+                PreparedCommand::PopLayer => {
+                    let Some(layer) = frames.pop() else {
+                        continue;
+                    };
+                    let Some((clip, opacity)) = layers.pop() else {
+                        continue;
+                    };
+                    let Some(parent) = frames.last_mut() else {
+                        continue;
+                    };
+                    let mask = clip.as_ref().map(|clip| {
+                        let mut mask = Mask::new(width, height)
+                            .expect("mask dimensions are checked by the target");
+                        if let Some(path) = to_skia_path(&clip.path) {
+                            mask.fill_path(
+                                &path,
+                                match clip.rule {
+                                    FillRule::NonZero => SkFillRule::Winding,
+                                    FillRule::EvenOdd => SkFillRule::EvenOdd,
+                                },
+                                true,
+                                to_skia_transform(clip.transform.then(device)),
+                            );
+                        }
+                        mask
+                    });
+                    parent.draw_pixmap(
+                        0,
+                        0,
+                        layer.as_ref(),
+                        &PixmapPaint {
+                            opacity,
+                            ..PixmapPaint::default()
+                        },
+                        Transform::identity(),
+                        mask.as_ref(),
+                    );
+                }
+                PreparedCommand::FillPath {
+                    path,
+                    transform,
+                    paint,
+                    rule,
+                } => {
+                    let element = PathElement {
+                        path: Arc::clone(path),
+                        transform: (*transform).then(device),
+                        fill: Some(paint.clone()),
+                        stroke: None,
+                        rule: *rule,
+                    };
+                    self.draw_path(
+                        frames.last_mut().expect("current frame"),
+                        &element,
+                        Matrix::IDENTITY,
+                        None,
+                    );
+                }
+                PreparedCommand::StrokePath {
+                    path,
+                    transform,
+                    stroke,
+                } => {
+                    let element = PathElement {
+                        path: Arc::clone(path),
+                        transform: (*transform).then(device),
+                        fill: None,
+                        stroke: Some(stroke.clone()),
+                        rule: FillRule::NonZero,
+                    };
+                    self.draw_path(
+                        frames.last_mut().expect("current frame"),
+                        &element,
+                        Matrix::IDENTITY,
+                        None,
+                    );
+                }
+                PreparedCommand::DrawImage {
+                    image,
+                    rect,
+                    transform,
+                    alpha,
+                } => {
+                    let element = ImageElement {
+                        image: Arc::clone(image),
+                        rect: *rect,
+                        transform: (*transform).then(device),
+                        alpha: *alpha,
+                    };
+                    self.draw_image(
+                        frames.last_mut().expect("current frame"),
+                        &element,
+                        Matrix::IDENTITY,
+                        None,
+                    );
+                }
+                PreparedCommand::DrawText {
+                    font,
+                    font_size,
+                    transform,
+                    run,
+                    fill,
+                    stroke,
+                } => {
+                    let element = TextElement {
+                        font: Arc::clone(font),
+                        font_size: *font_size,
+                        transform: (*transform).then(device),
+                        run: Arc::clone(run),
+                        fill: fill.clone(),
+                        stroke: stroke.clone(),
+                    };
+                    self.draw_text(
+                        frames.last_mut().expect("current frame"),
+                        &element,
+                        Matrix::IDENTITY,
+                        None,
+                    );
+                }
+            }
+        }
+        let data = frames[0].data();
         let out = target.data_mut();
         for (target_pixel, source) in out
             .as_chunks_mut::<4>()
@@ -159,78 +328,6 @@ impl TinySkiaRenderer {
             }
         }
         Ok(())
-    }
-
-    fn draw_group(
-        &mut self,
-        pixmap: &mut Pixmap,
-        group: &Group,
-        parent: Matrix,
-        mask: Option<&Mask>,
-    ) {
-        let opacity = group.opacity.clamp(0.0, 1.0);
-        if opacity <= 0.0 {
-            return;
-        }
-        let transform = group.transform.then(parent);
-        let clip_mask = group.clip.as_ref().map(|clip| {
-            let mut clip_mask = Mask::new(pixmap.width(), pixmap.height())
-                .expect("mask dimensions are checked by the target");
-            if let Some(parent) = mask_from_parent(mask_data(mask), pixmap.width(), pixmap.height())
-            {
-                clip_mask = parent;
-            }
-            if let Some(path) = to_skia_path(&clip.path) {
-                clip_mask.fill_path(
-                    &path,
-                    match clip.rule {
-                        FillRule::NonZero => SkFillRule::Winding,
-                        FillRule::EvenOdd => SkFillRule::EvenOdd,
-                    },
-                    true,
-                    to_skia_transform(transform),
-                );
-            }
-            clip_mask
-        });
-        let combined = clip_mask.as_ref().or(mask);
-        if opacity < 1.0 {
-            let mut layer = Pixmap::new(pixmap.width(), pixmap.height()).expect("layer");
-            for element in &group.children {
-                self.draw_element(&mut layer, element, transform, None);
-            }
-            pixmap.draw_pixmap(
-                0,
-                0,
-                layer.as_ref(),
-                &PixmapPaint {
-                    opacity,
-                    ..PixmapPaint::default()
-                },
-                Transform::identity(),
-                combined,
-            );
-        } else {
-            for element in &group.children {
-                self.draw_element(pixmap, element, transform, combined);
-            }
-        }
-    }
-
-    fn draw_element(
-        &mut self,
-        pixmap: &mut Pixmap,
-        element: &Element,
-        parent: Matrix,
-        mask: Option<&Mask>,
-    ) {
-        match element {
-            Element::Group(group) => self.draw_group(pixmap, group, parent, mask),
-            Element::Path(path) => self.draw_path(pixmap, path, parent, mask),
-            Element::Text(text) => self.draw_text(pixmap, text, parent, mask),
-            Element::Image(image) => self.draw_image(pixmap, image, parent, mask),
-            _ => {}
-        }
     }
 
     fn draw_path(
@@ -582,19 +679,6 @@ fn to_skia_path(path: &Path) -> Option<tiny_skia::Path> {
     builder.finish()
 }
 
-fn mask_from_parent(data: Option<(Vec<u8>, u32, u32)>, width: u32, height: u32) -> Option<Mask> {
-    let (data, w, h) = data?;
-    if w != width || h != height {
-        return None;
-    }
-    let size = IntSize::from_wh(width, height)?;
-    Mask::from_vec(data, size)
-}
-
-fn mask_data(mask: Option<&Mask>) -> Option<(Vec<u8>, u32, u32)> {
-    mask.map(|mask| (mask.data().to_vec(), mask.width(), mask.height()))
-}
-
 #[derive(Default)]
 struct GlyphBuilder {
     builder: PathBuilder,
@@ -621,6 +705,7 @@ impl ttf_parser::OutlineBuilder for GlyphBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ofdbox_folio_ir::{Element, Group};
     use ofdbox_folio_ir::{PathElement, Size};
 
     fn rect_element(x: f64, y: f64, width: f64, height: f64) -> Element {

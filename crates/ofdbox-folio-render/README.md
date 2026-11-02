@@ -6,7 +6,7 @@ Bitmap rendering for [`ofdbox-folio`](../../README.md): it rasterizes Fixed IR p
 
 ## Public Entry Points
 
-- `PreparedScene::from_scene()` resolves a Fixed IR scene into a backend-neutral command list with explicit layer/clip commands; `CpuRenderer::render_prepared()` and `render_prepared_region()` consume it directly.
+- `PreparedScene::from_scene()` resolves a Fixed IR scene into a backend-neutral command list with explicit layer/clip commands; `CpuRenderer` and `TinySkiaRenderer` expose `render_prepared()` and `render_prepared_region()` and consume it directly.
 - `CpuRenderer` (`new()` / `with_defaults()`) draws a `Page` or `Scene` with `render_page()` / `render_scene()` into an `RasterTarget`; `render_scene_region()` refreshes one tile using `RenderRegion`. `clear_caches()`, `report()` and `take_report()` expose cache control and per-image diagnostics.
 - `RenderOptions` sets the page background, the maximum decoded image pixels and the decoded-image cache byte budget.
 - `decode_image()` and `detect_format()` handle PNG, JPEG, BMP, JBIG2 and TIFF bytes; `DecodedImage` can apply a grayscale mask.
