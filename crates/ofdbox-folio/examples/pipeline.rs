@@ -24,18 +24,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         width: size,
         height: size,
         dpi,
-    });
+    })?;
 
     loop {
         match pipeline.try_recv() {
-            Some(PipelineEvent::Page { request, snapshot }) => {
+            Some(PipelineEvent::Page {
+                request, snapshot, ..
+            }) => {
                 println!(
                     "request {request}: page {} snapshot with {} commands",
                     page,
                     snapshot.plan.commands.len()
                 );
             }
-            Some(PipelineEvent::Started { request }) => {
+            Some(PipelineEvent::Started { request, .. }) => {
                 println!("request {request}: rendering");
             }
             Some(PipelineEvent::Frame {
@@ -43,6 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 width,
                 height,
                 rgba,
+                ..
             }) => {
                 println!("request {request}: frame {width}x{height}");
                 let file = File::create(&out)?;
@@ -52,7 +55,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 encoder.write_header()?.write_image_data(&rgba)?;
                 break;
             }
-            Some(PipelineEvent::Error { request, message }) => {
+            Some(PipelineEvent::Error {
+                request, message, ..
+            }) => {
                 return Err(format!("request {request}: {message}").into());
             }
             None => std::thread::sleep(std::time::Duration::from_millis(10)),

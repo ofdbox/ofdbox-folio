@@ -41,8 +41,9 @@ Non-goals for the first pass:
   exist.
 - Page/render service: `SnapshotService`, `RenderService` (CPU and wgpu) and
   `PipelineService` exist with compile-time inline and `threaded` implementations,
-  `FontProviderFactory`, `Started` progress, `cancel()` and an integration example;
-  the reader UI integration remains.
+  backend error events, `FontProviderFactory`, priority, generation filtering,
+  bounded pending requests, `Started` progress, `cancel()`, integration examples
+  and a multi-page benchmark; the reader UI integration remains.
 - Phase 3: started. Page cache hits are O(1) via a clock-based LRU,
   and search exposes page progress callbacks; damaged pages have a placeholder
   API and prefetch reports progress and can be cancelled; the background worker remains.

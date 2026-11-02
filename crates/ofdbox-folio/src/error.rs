@@ -36,6 +36,9 @@ pub enum Error {
     #[cfg(any(feature = "cpu", feature = "gpu"))]
     #[error(transparent)]
     Render(#[from] ofdbox_folio_render::RenderError),
+    /// Service-level failure, such as a render backend that cannot initialize.
+    #[error("service error: {0}")]
+    Service(String),
     /// A format that is not wired up yet.
     #[error("format not implemented yet: {0}")]
     UnsupportedFormat(String),

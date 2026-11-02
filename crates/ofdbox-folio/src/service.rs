@@ -255,8 +255,10 @@ pub use threaded::SnapshotService;
 #[cfg(test)]
 mod tests {
     #[cfg(all(feature = "threaded", feature = "ofd"))]
-    use super::{PipelineEvent, PipelineRequest, PipelineService};
-    use super::{RenderEvent, RenderRequest, RenderService, SnapshotService};
+    use super::PipelineEvent;
+    #[cfg(feature = "ofd")]
+    use super::{PipelineRequest, PipelineService};
+    use super::{RenderBackend, RenderEvent, RenderRequest, RenderService, SnapshotService};
     use ofdbox_folio_ir::{Page, PageInfo, Scene, Size};
     use ofdbox_folio_render::PageSnapshot;
     use std::sync::Arc;
@@ -266,6 +268,52 @@ mod tests {
     fn missing_path_fails_to_open() {
         let result = SnapshotService::open_path("Z:/definitely-missing-document.ofd");
         assert!(result.is_err());
+    }
+
+    #[cfg(not(feature = "threaded-render"))]
+    #[test]
+    fn backend_init_failure_is_an_error() {
+        let result = RenderService::new_with_backend(RenderBackend::Failing);
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "threaded-render")]
+    #[test]
+    fn backend_init_failure_is_reported_from_worker() {
+        let scene = Scene {
+            size: Size::new(10.0, 10.0),
+            ..Scene::default()
+        };
+        let snapshot = Arc::new(PageSnapshot::from_page(Page::new(
+            PageInfo::default(),
+            scene,
+        )));
+        let mut service =
+            RenderService::new_with_backend(RenderBackend::Failing).expect("worker starts");
+        let id = service.request(RenderRequest {
+            snapshot,
+            width: 4,
+            height: 4,
+            dpi: 96.0,
+        });
+        let mut message = None;
+        for _ in 0..200 {
+            while let Some(event) = service.try_recv() {
+                if let RenderEvent::Error {
+                    request,
+                    message: text,
+                } = event
+                {
+                    assert_eq!(request, id);
+                    message = Some(text);
+                }
+            }
+            if message.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(message.expect("worker error").contains("intentional"));
     }
 
     #[cfg(any(feature = "gpu27", feature = "gpu30"))]
@@ -280,7 +328,8 @@ mod tests {
             PageInfo::default(),
             scene,
         )));
-        let mut service = RenderService::new_with_backend(RenderBackend::Wgpu);
+        let mut service =
+            RenderService::new_with_backend(RenderBackend::Wgpu).expect("wgpu render service");
         let id = service.request(RenderRequest {
             snapshot,
             width: 8,
@@ -332,6 +381,51 @@ mod tests {
         assert!(service.try_recv().is_none());
     }
 
+    #[cfg(feature = "ofd")]
+    #[test]
+    fn cancel_before_drops_older_generation() {
+        use super::{PipelineOptions, PipelinePriority};
+        use ofdbox_folio_ir::{FixedDocument, Page, PageInfo, Scene, Size};
+        use ofdbox_folio_ofd::{OfdWriteOptions, write_fixed};
+
+        let mut fixed = FixedDocument::default();
+        fixed.pages.push(Page::new(
+            PageInfo::default(),
+            Scene {
+                size: Size::new(10.0, 10.0),
+                ..Scene::default()
+            },
+        ));
+        let bytes = write_fixed(&fixed, &OfdWriteOptions::default()).expect("write ofd");
+        let path = std::env::temp_dir().join(format!(
+            "ofdbox-cancel-{}-{}.ofd",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::write(&path, bytes).expect("write temp");
+        let mut pipeline = PipelineService::open_path(&path).expect("pipeline");
+        pipeline
+            .request_with_options(
+                PipelineRequest {
+                    page: 0,
+                    width: 8,
+                    height: 8,
+                    dpi: 96.0,
+                },
+                PipelineOptions {
+                    priority: PipelinePriority::Low,
+                    generation: 1,
+                },
+            )
+            .expect("request");
+        pipeline.cancel_before(2);
+        assert!(pipeline.try_recv().is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[cfg(all(feature = "threaded", feature = "ofd"))]
     #[test]
     fn threaded_pipeline_renders_generated_ofd() {
@@ -357,12 +451,14 @@ mod tests {
         ));
         std::fs::write(&path, bytes).expect("write temp");
         let mut pipeline = PipelineService::open_path(&path).expect("open pipeline");
-        pipeline.request(PipelineRequest {
-            page: 0,
-            width: 16,
-            height: 16,
-            dpi: 96.0,
-        });
+        pipeline
+            .request(PipelineRequest {
+                page: 0,
+                width: 16,
+                height: 16,
+                dpi: 96.0,
+            })
+            .expect("request");
         let mut frame = None;
         for _ in 0..400 {
             while let Some(event) = pipeline.try_recv() {
@@ -477,6 +573,9 @@ pub enum RenderBackend {
     /// wgpu renderer.
     #[cfg(any(feature = "gpu27", feature = "gpu30"))]
     Wgpu,
+    /// Test-only backend that always fails to initialize.
+    #[cfg(test)]
+    Failing,
 }
 
 enum Renderer {
@@ -489,6 +588,8 @@ impl Renderer {
     fn new(backend: RenderBackend) -> Result<Self, String> {
         match backend {
             RenderBackend::Cpu => Ok(Self::Cpu(ofdbox_folio_render::CpuRenderer::with_defaults())),
+            #[cfg(test)]
+            RenderBackend::Failing => Err("intentional backend failure".to_owned()),
             #[cfg(any(feature = "gpu27", feature = "gpu30"))]
             RenderBackend::Wgpu => {
                 let context = ofdbox_folio_render::WgpuContext::new_blocking()
@@ -551,17 +652,17 @@ pub struct RenderService {
 impl RenderService {
     /// Creates an inline CPU render service.
     pub fn new() -> Self {
-        Self::new_with_backend(RenderBackend::Cpu)
+        Self::new_with_backend(RenderBackend::Cpu).expect("CPU renderer")
     }
 
     /// Creates an inline render service for the selected backend.
-    pub fn new_with_backend(backend: RenderBackend) -> Self {
-        Self {
-            renderer: Renderer::new(backend).expect("render backend"),
+    pub fn new_with_backend(backend: RenderBackend) -> Result<Self, Error> {
+        Ok(Self {
+            renderer: Renderer::new(backend).map_err(Error::Service)?,
             events: VecDeque::new(),
             cancelled: std::collections::HashSet::new(),
             next: 1,
-        }
+        })
     }
 
     /// Renders synchronously and queues `Started` / `Frame` / `Error`.
@@ -637,13 +738,14 @@ mod render_thread {
 
     impl RenderService {
         /// Starts a worker with the selected backend.
-        pub fn new_with_backend(backend: RenderBackend) -> Self {
+        pub fn new_with_backend(backend: RenderBackend) -> Result<Self, Error> {
             let (command_tx, command_rx) = mpsc::channel::<Command>();
             let (event_tx, event_rx) = mpsc::channel::<RenderEvent>();
             let worker = thread::Builder::new()
                 .name("ofdbox-folio-render".to_owned())
                 .spawn(move || {
-                    let mut renderer = Renderer::new(backend).expect("render backend");
+                    let mut renderer: Option<Renderer> = None;
+                    let mut init_error: Option<String> = None;
                     let mut cancelled = HashSet::new();
                     while let Ok(command) = command_rx.recv() {
                         match command {
@@ -654,6 +756,27 @@ mod render_thread {
                                 if cancelled.contains(&id) {
                                     continue;
                                 }
+                                if let Some(message) = &init_error {
+                                    let _ = event_tx.send(RenderEvent::Error {
+                                        request: id,
+                                        message: message.clone(),
+                                    });
+                                    continue;
+                                }
+                                if renderer.is_none() {
+                                    match Renderer::new(backend) {
+                                        Ok(value) => renderer = Some(value),
+                                        Err(message) => {
+                                            init_error = Some(message.clone());
+                                            let _ = event_tx.send(RenderEvent::Error {
+                                                request: id,
+                                                message,
+                                            });
+                                            continue;
+                                        }
+                                    }
+                                }
+                                let renderer = renderer.as_mut().expect("renderer initialized");
                                 if event_tx.send(RenderEvent::Started { request: id }).is_err() {
                                     break;
                                 }
@@ -676,19 +799,19 @@ mod render_thread {
                         }
                     }
                 })
-                .expect("render worker thread");
-            Self {
+                .map_err(Error::Io)?;
+            Ok(Self {
                 tx: command_tx,
                 rx: event_rx,
                 next: AtomicU64::new(1),
                 cancelled: HashSet::new(),
                 worker: Some(worker),
-            }
+            })
         }
 
         /// Creates a threaded CPU render service.
         pub fn new() -> Self {
-            Self::new_with_backend(RenderBackend::Cpu)
+            Self::new_with_backend(RenderBackend::Cpu).expect("CPU renderer")
         }
 
         /// Queues a render request.
@@ -753,6 +876,37 @@ pub struct PipelineRequest {
     pub dpi: f64,
 }
 
+/// Priority for a pipeline request.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PipelinePriority {
+    /// Background prefetch.
+    Low,
+    /// Normal page load.
+    #[default]
+    Normal,
+    /// Current page.
+    High,
+}
+
+impl PipelinePriority {
+    fn rank(self) -> u8 {
+        match self {
+            Self::Low => 0,
+            Self::Normal => 1,
+            Self::High => 2,
+        }
+    }
+}
+
+/// Scheduling options for a pipeline request.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PipelineOptions {
+    /// Request priority.
+    pub priority: PipelinePriority,
+    /// Caller generation; lower generations can be cancelled in bulk.
+    pub generation: u64,
+}
+
 /// One event emitted by [`PipelineService`].
 #[derive(Debug)]
 pub enum PipelineEvent {
@@ -760,6 +914,8 @@ pub enum PipelineEvent {
     Page {
         /// Pipeline request identifier.
         request: u64,
+        /// Caller generation.
+        generation: u64,
         /// Immutable page snapshot.
         snapshot: Arc<PageSnapshot>,
     },
@@ -767,11 +923,15 @@ pub enum PipelineEvent {
     Started {
         /// Pipeline request identifier.
         request: u64,
+        /// Caller generation.
+        generation: u64,
     },
     /// Rendered RGBA tile.
     Frame {
         /// Pipeline request identifier.
         request: u64,
+        /// Caller generation.
+        generation: u64,
         /// Tile width.
         width: u32,
         /// Tile height in pixels.
@@ -783,6 +943,8 @@ pub enum PipelineEvent {
     Error {
         /// Pipeline request identifier.
         request: u64,
+        /// Caller generation.
+        generation: u64,
         /// Error message.
         message: String,
     },
@@ -790,6 +952,8 @@ pub enum PipelineEvent {
 
 struct PendingPipeline {
     request: PipelineRequest,
+    options: PipelineOptions,
+    seq: u64,
     snapshot_id: Option<u64>,
     render_id: Option<u64>,
 }
@@ -801,6 +965,11 @@ pub struct PipelineService {
     pending: std::collections::HashMap<u64, PendingPipeline>,
     by_snapshot: std::collections::HashMap<u64, u64>,
     by_render: std::collections::HashMap<u64, u64>,
+    queued: Vec<u64>,
+    active_snapshots: usize,
+    max_in_flight: usize,
+    max_pending: usize,
+    floor_generation: u64,
     events: VecDeque<PipelineEvent>,
     next: u64,
 }
@@ -827,38 +996,72 @@ impl PipelineService {
     ) -> Result<Self, Error> {
         Ok(Self {
             documents: SnapshotService::open_path_with_factory(path, factory)?,
-            renderer: RenderService::new_with_backend(backend),
+            renderer: RenderService::new_with_backend(backend)?,
             pending: std::collections::HashMap::new(),
             by_snapshot: std::collections::HashMap::new(),
             by_render: std::collections::HashMap::new(),
+            queued: Vec::new(),
+            active_snapshots: 0,
+            max_in_flight: 2,
+            max_pending: 32,
+            floor_generation: 0,
             events: VecDeque::new(),
             next: 1,
         })
     }
 
-    /// Queues a page load followed by a render.
-    pub fn request(&mut self, request: PipelineRequest) -> u64 {
+    /// Queues a page load followed by a render with default options.
+    pub fn request(&mut self, request: PipelineRequest) -> Result<u64, Error> {
+        self.request_with_options(request, PipelineOptions::default())
+    }
+
+    /// Queues a page load with explicit priority and generation.
+    pub fn request_with_options(
+        &mut self,
+        request: PipelineRequest,
+        options: PipelineOptions,
+    ) -> Result<u64, Error> {
+        if self.pending.len() >= self.max_pending {
+            return Err(Error::Service("pipeline queue is full".to_owned()));
+        }
         let id = self.next;
         self.next += 1;
-        let snapshot_id = self.documents.request(request.page);
-        self.by_snapshot.insert(snapshot_id, id);
         self.pending.insert(
             id,
             PendingPipeline {
                 request,
-                snapshot_id: Some(snapshot_id),
+                options,
+                seq: id,
+                snapshot_id: None,
                 render_id: None,
             },
         );
-        id
+        self.queued.push(id);
+        self.pump();
+        Ok(id)
+    }
+
+    /// Cancels all requests with a generation lower than `generation`.
+    pub fn cancel_before(&mut self, generation: u64) {
+        self.floor_generation = self.floor_generation.max(generation);
+        let stale: Vec<u64> = self
+            .pending
+            .iter()
+            .filter_map(|(id, pending)| (pending.options.generation < generation).then_some(*id))
+            .collect();
+        for id in stale {
+            self.cancel(id);
+        }
     }
 
     /// Cancels a pipeline request.
     pub fn cancel(&mut self, request: u64) {
         if let Some(pending) = self.pending.remove(&request) {
+            self.queued.retain(|value| *value != request);
             if let Some(snapshot) = pending.snapshot_id {
                 self.documents.cancel(snapshot);
                 self.by_snapshot.remove(&snapshot);
+                self.active_snapshots = self.active_snapshots.saturating_sub(1);
             }
             if let Some(render) = pending.render_id {
                 self.renderer.cancel(render);
@@ -867,11 +1070,39 @@ impl PipelineService {
         }
     }
 
+    fn pump(&mut self) {
+        while self.active_snapshots < self.max_in_flight {
+            let next = self
+                .queued
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, id)| {
+                    self.pending.get(id).map_or((0, 0), |pending| {
+                        (pending.options.priority.rank(), pending.seq)
+                    })
+                })
+                .map(|(index, _)| index);
+            let Some(index) = next else {
+                break;
+            };
+            let id = self.queued.remove(index);
+            let Some(pending) = self.pending.get_mut(&id) else {
+                continue;
+            };
+            let snapshot = self.documents.request(pending.request.page);
+            pending.snapshot_id = Some(snapshot);
+            self.by_snapshot.insert(snapshot, id);
+            self.active_snapshots += 1;
+        }
+    }
+
     /// Advances the pipeline and pops the next event.
     pub fn try_recv(&mut self) -> Option<PipelineEvent> {
+        self.pump();
         while let Some(event) = self.documents.try_recv() {
             match event {
                 SnapshotEvent::Snapshot { request, snapshot } => {
+                    self.active_snapshots = self.active_snapshots.saturating_sub(1);
                     let Some(pipeline) = self.by_snapshot.remove(&request) else {
                         continue;
                     };
@@ -879,6 +1110,10 @@ impl PipelineService {
                         continue;
                     };
                     pending.snapshot_id = None;
+                    if pending.options.generation < self.floor_generation {
+                        self.pending.remove(&pipeline);
+                        continue;
+                    }
                     let render_id = self.renderer.request(RenderRequest {
                         snapshot: Arc::clone(&snapshot),
                         width: pending.request.width,
@@ -886,21 +1121,24 @@ impl PipelineService {
                         dpi: pending.request.dpi,
                     });
                     self.by_render.insert(render_id, pipeline);
-                    if let Some(pending) = self.pending.get_mut(&pipeline) {
-                        pending.render_id = Some(render_id);
-                    }
+                    pending.render_id = Some(render_id);
                     self.events.push_back(PipelineEvent::Page {
                         request: pipeline,
+                        generation: pending.options.generation,
                         snapshot,
                     });
                 }
                 SnapshotEvent::Error { request, message } => {
+                    self.active_snapshots = self.active_snapshots.saturating_sub(1);
                     let Some(pipeline) = self.by_snapshot.remove(&request) else {
                         continue;
                     };
-                    self.pending.remove(&pipeline);
+                    let Some(pending) = self.pending.remove(&pipeline) else {
+                        continue;
+                    };
                     self.events.push_back(PipelineEvent::Error {
                         request: pipeline,
+                        generation: pending.options.generation,
                         message,
                     });
                 }
@@ -915,10 +1153,19 @@ impl PipelineService {
             let Some(pipeline) = pipeline else {
                 continue;
             };
+            let Some(generation) = self
+                .pending
+                .get(&pipeline)
+                .map(|pending| pending.options.generation)
+            else {
+                continue;
+            };
             match event {
                 RenderEvent::Started { .. } => {
-                    self.events
-                        .push_back(PipelineEvent::Started { request: pipeline });
+                    self.events.push_back(PipelineEvent::Started {
+                        request: pipeline,
+                        generation,
+                    });
                 }
                 RenderEvent::Frame {
                     width,
@@ -929,6 +1176,7 @@ impl PipelineService {
                     self.pending.remove(&pipeline);
                     self.events.push_back(PipelineEvent::Frame {
                         request: pipeline,
+                        generation,
                         width,
                         height,
                         rgba,
@@ -938,6 +1186,7 @@ impl PipelineService {
                     self.pending.remove(&pipeline);
                     self.events.push_back(PipelineEvent::Error {
                         request: pipeline,
+                        generation,
                         message,
                     });
                 }

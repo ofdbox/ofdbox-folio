@@ -52,7 +52,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let height = cpu_target.height() as usize;
     let mut differing = 0_usize;
     let mut max_delta = 0_u8;
-    for (cpu, gpu) in cpu_pixels.chunks_exact(4).zip(gpu_pixels.chunks_exact(4)) {
+    for (cpu, gpu) in cpu_pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(gpu_pixels.as_chunks::<4>().0.iter())
+    {
         let delta = cpu
             .iter()
             .zip(gpu)
