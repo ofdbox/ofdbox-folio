@@ -461,6 +461,7 @@ mod tests {
                 if let RenderEvent::Target {
                     request,
                     target: value,
+                    ..
                 } = event
                 {
                     assert_eq!(request, id);
@@ -802,8 +803,13 @@ mod tests {
         let mut rendered = None;
         for _ in 0..1000 {
             while let Some(event) = pipeline.try_recv() {
-                if let PipelineEvent::Target { target: value, .. } = event {
-                    rendered = Some(value);
+                if let PipelineEvent::Target {
+                    target: value,
+                    origin_px,
+                    ..
+                } = event
+                {
+                    rendered = Some((value, origin_px));
                 }
             }
             if rendered.is_some() {
@@ -812,8 +818,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         let _ = std::fs::remove_file(&path);
-        assert!(Arc::ptr_eq(&target, &rendered.expect("fit target")));
+        let (value, origin_px) = rendered.expect("fit target");
+        assert!(Arc::ptr_eq(&target, &value));
         assert_eq!((target.width(), target.height()), (20, 40));
+        assert!((origin_px.1 - 10.0).abs() < 0.01);
     }
 
     #[cfg(all(feature = "threaded", feature = "ofd"))]
@@ -957,6 +965,12 @@ pub enum RenderEvent {
     Target {
         /// Request identifier.
         request: u64,
+        /// Tile width.
+        width: u32,
+        /// Tile height.
+        height: u32,
+        /// Tile origin in whole-page device pixels.
+        origin_px: (f64, f64),
         /// Rendered target.
         target: Arc<ofdbox_folio_render::WgpuTarget>,
     },
@@ -1136,6 +1150,9 @@ impl RenderService {
         match self.renderer.render_to_target(&request, &target) {
             Ok(()) => self.events.push_back(RenderEvent::Target {
                 request: id,
+                width: request.width,
+                height: request.height,
+                origin_px: request.origin_px,
                 target,
             }),
             Err(message) => self.events.push_back(RenderEvent::Error {
@@ -1312,6 +1329,9 @@ mod render_thread {
                                     let event = match renderer.render_to_target(&request, &target) {
                                         Ok(()) => RenderEvent::Target {
                                             request: id,
+                                            width: request.width,
+                                            height: request.height,
+                                            origin_px: request.origin_px,
                                             target,
                                         },
                                         Err(message) => RenderEvent::Error {
@@ -1525,6 +1545,12 @@ pub enum PipelineEvent {
         request: u64,
         /// Caller generation.
         generation: u64,
+        /// Tile width.
+        width: u32,
+        /// Tile height.
+        height: u32,
+        /// Tile origin in whole-page device pixels.
+        origin_px: (f64, f64),
         /// Rendered target.
         target: Arc<ofdbox_folio_render::WgpuTarget>,
     },
@@ -1947,11 +1973,20 @@ impl PipelineService {
                     });
                 }
                 #[cfg(any(feature = "gpu27", feature = "gpu30"))]
-                RenderEvent::Target { target, .. } => {
+                RenderEvent::Target {
+                    width,
+                    height,
+                    origin_px,
+                    target,
+                    ..
+                } => {
                     self.pending.remove(&pipeline);
                     self.events.push_back(PipelineEvent::Target {
                         request: pipeline,
                         generation,
+                        width,
+                        height,
+                        origin_px,
                         target,
                     });
                 }
