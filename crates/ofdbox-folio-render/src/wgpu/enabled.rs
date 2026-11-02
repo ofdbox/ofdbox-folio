@@ -554,6 +554,8 @@ pub struct WgpuBackend {
     /// Backend-neutral prepared scenes, shared by all tiles of one page.
     prepared_cache: Mutex<HashMap<(usize, u64), Arc<PreparedScene>>>,
     atlas: Mutex<GpuAtlas>,
+    /// Scene that owns the glyphs currently packed in the atlas.
+    atlas_scene: Mutex<usize>,
     text_pipeline: TextPipeline,
     image_pipeline: ImagePipeline,
     /// Decoded image textures keyed by `ImageAsset` pointer.
@@ -663,6 +665,7 @@ impl WgpuBackend {
             path_cache: Mutex::new(HashMap::new()),
             prepared_cache: Mutex::new(HashMap::new()),
             atlas,
+            atlas_scene: Mutex::new(0),
             text_pipeline,
             image_pipeline,
             image_cache: Mutex::new(ImageCache::new(options.max_image_cache_bytes)),
@@ -697,6 +700,10 @@ impl WgpuBackend {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clear();
+        *self
+            .atlas_scene
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = 0;
         self.atlas
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -885,6 +892,16 @@ impl WgpuBackend {
             .create_command_encoder(&Default::default());
         {
             let mut atlas = self.atlas.lock().unwrap_or_else(|error| error.into_inner());
+            let scene_id = scene as *const Scene as usize;
+            let mut atlas_scene = self
+                .atlas_scene
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if *atlas_scene != scene_id {
+                atlas.clear();
+                *atlas_scene = scene_id;
+            }
+            drop(atlas_scene);
             if atlas.is_full()
                 || atlas.occupancy() > self.options.atlas_reset_threshold.clamp(0.5, 1.0)
             {
@@ -1077,7 +1094,7 @@ impl WgpuBackend {
         }
         let mut image_batches = Vec::with_capacity(image_draws.len());
         for draw in &image_draws {
-            let tier = image_draw_tier(&draw);
+            let tier = image_draw_tier(draw);
             let Some(cached) = self.cached_image(&draw.image, tier) else {
                 image_batches.push(None);
                 continue;
