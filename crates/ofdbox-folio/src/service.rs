@@ -254,12 +254,12 @@ pub use threaded::SnapshotService;
 
 #[cfg(test)]
 mod tests {
-    #[cfg(all(any(feature = "gpu27", feature = "gpu30"), feature = "ofd"))]
+    #[cfg(feature = "ofd")]
     use super::PipelineEvent;
     #[cfg(all(any(feature = "gpu27", feature = "gpu30"), feature = "ofd"))]
     use super::SystemFontsFactory;
     #[cfg(feature = "ofd")]
-    use super::{PipelineRequest, PipelineService};
+    use super::{PipelineFitRequest, PipelineOptions, PipelineRequest, PipelineService};
     use super::{RenderBackend, RenderEvent, RenderRequest, RenderService, SnapshotService};
     use ofdbox_folio_ir::{Page, PageInfo, Scene, Size};
     use ofdbox_folio_render::PageSnapshot;
@@ -580,6 +580,65 @@ mod tests {
         });
         service.cancel(id);
         assert!(service.try_recv().is_none());
+    }
+
+    #[cfg(feature = "ofd")]
+    #[test]
+    fn fit_request_centers_the_page() {
+        use ofdbox_folio_ir::{FixedDocument, Page, PageInfo, Scene, Size};
+        use ofdbox_folio_ofd::{OfdWriteOptions, write_fixed};
+
+        let mut fixed = FixedDocument::default();
+        fixed.pages.push(Page::new(
+            PageInfo::default(),
+            Scene {
+                size: Size::new(10.0, 10.0),
+                ..Scene::default()
+            },
+        ));
+        let bytes = write_fixed(&fixed, &OfdWriteOptions::default()).expect("write ofd");
+        let path = std::env::temp_dir().join(format!(
+            "ofdbox-fit-{}-{}.ofd",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::write(&path, bytes).expect("write temp");
+        let mut pipeline = PipelineService::open_path(&path).expect("pipeline");
+        pipeline
+            .request_fit(
+                PipelineFitRequest {
+                    page: 0,
+                    width: 20,
+                    height: 40,
+                },
+                PipelineOptions::default(),
+            )
+            .expect("fit request");
+        let mut frame = None;
+        for _ in 0..400 {
+            while let Some(event) = pipeline.try_recv() {
+                if let PipelineEvent::Frame {
+                    width,
+                    height,
+                    origin_px,
+                    ..
+                } = event
+                {
+                    frame = Some((width, height, origin_px));
+                }
+            }
+            if frame.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let _ = std::fs::remove_file(&path);
+        let (width, height, origin) = frame.expect("fit frame");
+        assert_eq!((width, height), (20, 40));
+        assert!((origin.1 - 10.0).abs() < 0.01);
     }
 
     #[cfg(feature = "ofd")]
@@ -1319,6 +1378,17 @@ pub struct PipelineRequest {
     pub origin_px: (f64, f64),
 }
 
+/// A request that fits a whole page into a target bitmap.
+#[derive(Clone, Copy, Debug)]
+pub struct PipelineFitRequest {
+    /// Page index.
+    pub page: usize,
+    /// Target width in pixels.
+    pub width: u32,
+    /// Target height in pixels.
+    pub height: u32,
+}
+
 /// Priority for a pipeline request.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PipelinePriority {
@@ -1409,6 +1479,7 @@ struct PendingPipeline {
     request: PipelineRequest,
     options: PipelineOptions,
     seq: u64,
+    fit: Option<(u32, u32)>,
     #[cfg(any(feature = "gpu27", feature = "gpu30"))]
     target: Option<Arc<ofdbox_folio_render::WgpuTarget>>,
     snapshot_id: Option<u64>,
@@ -1513,6 +1584,45 @@ impl PipelineService {
                 request,
                 options,
                 seq: id,
+                fit: None,
+                #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+                target: None,
+                snapshot_id: None,
+                render_id: None,
+            },
+        );
+        self.queued.push(id);
+        self.pump();
+        Ok(id)
+    }
+
+    /// Queues a fit-to-target render of the whole page.
+    pub fn request_fit(
+        &mut self,
+        request: PipelineFitRequest,
+        options: PipelineOptions,
+    ) -> Result<u64, Error> {
+        if request.width == 0 || request.height == 0 {
+            return Err(Error::Service("fit target must be non-empty".to_owned()));
+        }
+        if self.pending.len() >= self.max_pending {
+            return Err(Error::Service("pipeline queue is full".to_owned()));
+        }
+        let id = self.next;
+        self.next += 1;
+        self.pending.insert(
+            id,
+            PendingPipeline {
+                request: PipelineRequest {
+                    page: request.page,
+                    width: request.width,
+                    height: request.height,
+                    dpi: 0.0,
+                    origin_px: (0.0, 0.0),
+                },
+                options,
+                seq: id,
+                fit: Some((request.width, request.height)),
                 #[cfg(any(feature = "gpu27", feature = "gpu30"))]
                 target: None,
                 snapshot_id: None,
@@ -1543,6 +1653,7 @@ impl PipelineService {
                 request,
                 options,
                 seq: id,
+                fit: None,
                 target: Some(target),
                 snapshot_id: None,
                 render_id: None,
@@ -1626,12 +1737,29 @@ impl PipelineService {
                         self.pending.remove(&pipeline);
                         continue;
                     }
+                    let (dpi, origin_px) = if pending.fit.is_some() {
+                        let page = snapshot.plan.size;
+                        let dpi = (f64::from(pending.request.width) / page.width * 25.4)
+                            .min(f64::from(pending.request.height) / page.height * 25.4)
+                            .max(0.01);
+                        let page_width = page.width / 25.4 * dpi;
+                        let page_height = page.height / 25.4 * dpi;
+                        (
+                            dpi,
+                            (
+                                (f64::from(pending.request.width) - page_width) * 0.5,
+                                (f64::from(pending.request.height) - page_height) * 0.5,
+                            ),
+                        )
+                    } else {
+                        (pending.request.dpi, pending.request.origin_px)
+                    };
                     let render_request = RenderRequest {
                         snapshot: Arc::clone(&snapshot),
                         width: pending.request.width,
                         height: pending.request.height,
-                        dpi: pending.request.dpi,
-                        origin_px: pending.request.origin_px,
+                        dpi,
+                        origin_px,
                     };
                     #[cfg(any(feature = "gpu27", feature = "gpu30"))]
                     let render_id = if let Some(target) = pending.target.take() {
