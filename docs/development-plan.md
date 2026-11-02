@@ -35,8 +35,9 @@ Non-goals for the first pass:
   four-layer texture array leased per page; a full layer advances to the next
   one. Fine-grained per-glyph atlas eviction and a shared cross-backend budget
   remain.
-- Render IR: phases A/B/C complete — `RenderPlan`, `PageSnapshot`, command bounds,
-  `DevicePlan` tile culling, `PageSnapshotCache` and `DevicePlanCache` exist.
+- Render IR: complete for the current scope — `RenderPlan`, `PageSnapshot`,
+  command bounds, `DevicePlan` tile culling, spatial index, `PageSnapshotCache`,
+  `DevicePlanCache` and reader `page_snapshot()` integration exist.
 - Phase 3: started. Page cache hits are O(1) via a clock-based LRU,
   and search exposes page progress callbacks; damaged pages have a placeholder
   API and prefetch reports progress and can be cancelled; the background worker remains.

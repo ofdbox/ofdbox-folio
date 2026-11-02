@@ -16,6 +16,14 @@ use ofdbox_folio_ir::{
     Severity, Size, SourceFormat, TextPosition, TextRange,
 };
 
+#[cfg(any(
+    feature = "cpu",
+    feature = "gpu27",
+    feature = "gpu30",
+    feature = "tiny-skia"
+))]
+use ofdbox_folio_render::{PageSnapshot, PageSnapshotCache};
+
 use crate::error::Error;
 
 /// Page cache options.
@@ -214,6 +222,13 @@ impl PageCache {
 pub struct Document {
     source: Box<dyn DocumentSource>,
     cache: PageCache,
+    #[cfg(any(
+        feature = "cpu",
+        feature = "gpu27",
+        feature = "gpu30",
+        feature = "tiny-skia"
+    ))]
+    snapshots: PageSnapshotCache,
 }
 
 impl Document {
@@ -222,6 +237,13 @@ impl Document {
         Self {
             source,
             cache: PageCache::new(options.cache.max_bytes),
+            #[cfg(any(
+                feature = "cpu",
+                feature = "gpu27",
+                feature = "gpu30",
+                feature = "tiny-skia"
+            ))]
+            snapshots: PageSnapshotCache::new(4),
         }
     }
 
@@ -332,6 +354,13 @@ impl Document {
         Ok(Self {
             source,
             cache: PageCache::new(cache.max_bytes),
+            #[cfg(any(
+                feature = "cpu",
+                feature = "gpu27",
+                feature = "gpu30",
+                feature = "tiny-skia"
+            ))]
+            snapshots: PageSnapshotCache::new(4),
         })
     }
 
@@ -385,6 +414,23 @@ impl Document {
         let page = Arc::new(self.source.load_page(index)?);
         self.cache.insert(index, Arc::clone(&page));
         Ok(page)
+    }
+
+    /// Loads a page as an immutable [`PageSnapshot`] for a parse/render thread boundary.
+    #[cfg(any(
+        feature = "cpu",
+        feature = "gpu27",
+        feature = "gpu30",
+        feature = "tiny-skia"
+    ))]
+    pub fn page_snapshot(&mut self, index: usize) -> Result<Arc<PageSnapshot>, Error> {
+        if let Some(snapshot) = self.snapshots.get(index) {
+            return Ok(snapshot);
+        }
+        let page = self.page(index)?;
+        let snapshot = Arc::new(PageSnapshot::from_page_ref(&page));
+        self.snapshots.insert(index, Arc::clone(&snapshot));
+        Ok(snapshot)
     }
 
     /// Loads a page, returning a blank placeholder instead of failing when the page is damaged.
@@ -626,6 +672,13 @@ impl Document {
     /// Clears the page cache.
     pub fn clear_cache(&mut self) {
         self.cache.clear();
+        #[cfg(any(
+            feature = "cpu",
+            feature = "gpu27",
+            feature = "gpu30",
+            feature = "tiny-skia"
+        ))]
+        self.snapshots.clear();
         self.source.clear_caches();
     }
 
@@ -832,6 +885,19 @@ mod tests {
             .expect("search");
         assert_eq!(hits, 2);
         assert_eq!(pages, vec![0, 1]);
+    }
+
+    #[test]
+    fn page_snapshot_is_cached_and_carries_text() {
+        let (mut document, loads) = document(1, 1024 * 1024);
+        let first = document.page_snapshot(0).expect("snapshot");
+        let second = document.page_snapshot(0).expect("cached snapshot");
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        assert!(!first.text.items.is_empty());
+        document.clear_cache();
+        document.page_snapshot(0).expect("rebuilt snapshot");
+        assert_eq!(loads.load(Ordering::SeqCst), 2);
     }
 
     #[test]

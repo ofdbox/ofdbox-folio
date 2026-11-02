@@ -13,6 +13,8 @@ use ofdbox_folio::{Document, OpenOptions};
 
 let mut document = Document::open_path("input.ofd", OpenOptions::default())?;
 let page = document.page(0)?;
+// `document.page_snapshot(0)` returns an immutable Render IR snapshot
+// for a parse/render thread boundary.
 println!("{} x {} mm", page.display_size().width, page.display_size().height);
 
 // PDF: the same call, the format is detected from the leading bytes.

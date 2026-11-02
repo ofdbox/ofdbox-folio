@@ -6,7 +6,7 @@
 //! resources in page space. Rendering backends can consume the same list
 //! instead of walking the semantic scene tree themselves.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -104,6 +104,8 @@ pub struct RenderPlan {
     pub commands: Vec<RenderCommand>,
     /// Conservative page-space bounds of the whole plan.
     pub bounds: Option<Rect>,
+    /// Page-space tile index used for candidate lookup.
+    index: HashMap<(i32, i32), Vec<usize>>,
 }
 
 impl RenderPlan {
@@ -127,10 +129,12 @@ impl RenderPlan {
                 scene.size.height,
             ))
         });
+        let index = build_index(&commands);
         Self {
             size: scene.size,
             commands,
             bounds,
+            index,
         }
     }
 
@@ -142,6 +146,33 @@ impl RenderPlan {
     /// Whether the scene contains no commands.
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
+    }
+
+    /// Command indices whose bounds intersect the page-space rectangle.
+    pub fn candidate_commands(&self, rect: Rect) -> Vec<usize> {
+        if self.index.is_empty() {
+            return self
+                .commands
+                .iter()
+                .enumerate()
+                .filter_map(|(index, command)| command.bounds().map(|_| index))
+                .collect();
+        }
+        let x0 = (rect.x / CELL_MM).floor() as i32;
+        let y0 = (rect.y / CELL_MM).floor() as i32;
+        let x1 = (rect.right() / CELL_MM).floor() as i32;
+        let y1 = (rect.bottom() / CELL_MM).floor() as i32;
+        let mut candidates = Vec::new();
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                if let Some(indices) = self.index.get(&(x, y)) {
+                    candidates.extend_from_slice(indices);
+                }
+            }
+        }
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates
     }
 }
 
@@ -169,6 +200,34 @@ pub(crate) fn bounds_visible(bounds: Rect, device: Matrix, width: u32, height: u
         && rect.bottom() > 0.0
         && rect.x < f64::from(width)
         && rect.y < f64::from(height)
+}
+
+const CELL_MM: f64 = 64.0;
+
+fn build_index(commands: &[RenderCommand]) -> HashMap<(i32, i32), Vec<usize>> {
+    let mut index = HashMap::new();
+    for (command_index, command) in commands.iter().enumerate() {
+        let Some(bounds) = command.bounds() else {
+            continue;
+        };
+        let x0 = (bounds.x / CELL_MM).floor() as i32;
+        let y0 = (bounds.y / CELL_MM).floor() as i32;
+        let x1 = (bounds.right() / CELL_MM).floor() as i32;
+        let y1 = (bounds.bottom() / CELL_MM).floor() as i32;
+        let cells = (i64::from(x1 - x0 + 1) * i64::from(y1 - y0 + 1)).max(0);
+        if cells > 4096 {
+            continue;
+        }
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                index
+                    .entry((x, y))
+                    .or_insert_with(Vec::new)
+                    .push(command_index);
+            }
+        }
+    }
+    index
 }
 
 fn rect_union(a: Rect, b: Rect) -> Rect {
@@ -371,15 +430,27 @@ impl DevicePlan {
     ) -> Self {
         let k = dpi / 25.4;
         let device = Matrix::scale(k, k).then(Matrix::translate(-origin_px.0, -origin_px.1));
-        let visible = plan
-            .commands
-            .iter()
-            .map(|command| {
-                command
-                    .bounds()
-                    .is_none_or(|bounds| bounds_visible(bounds, device, width, height))
-            })
-            .collect();
+        let page_rect = Rect::new(
+            origin_px.0 / k,
+            origin_px.1 / k,
+            f64::from(width) / k,
+            f64::from(height) / k,
+        );
+        let candidates = plan.candidate_commands(page_rect);
+        let mut visible = vec![true; plan.commands.len()];
+        for (index, command) in plan.commands.iter().enumerate() {
+            if command.bounds().is_some() {
+                visible[index] = false;
+            }
+        }
+        for index in candidates {
+            if let Some(command) = plan.commands.get(index)
+                && let Some(bounds) = command.bounds()
+                && bounds_visible(bounds, device, width, height)
+            {
+                visible[index] = true;
+            }
+        }
         Self {
             width,
             height,
@@ -443,6 +514,17 @@ impl PageSnapshot {
             text: Arc::new(page.text),
             links: page.links.into(),
             diagnostics: page.content.diagnostics,
+        }
+    }
+
+    /// Builds a snapshot from a borrowed page.
+    pub fn from_page_ref(page: &Page) -> Self {
+        Self {
+            info: page.info.clone(),
+            plan: Arc::new(RenderPlan::from_scene(&page.content)),
+            text: Arc::new(page.text.clone()),
+            links: page.links.clone().into(),
+            diagnostics: page.content.diagnostics.clone(),
         }
     }
 
@@ -652,6 +734,13 @@ mod tests {
         assert!(full.is_visible(0));
         let outside = DevicePlan::new(&plan, 96.0, (1000.0, 1000.0), 10, 10);
         assert!(!outside.is_visible(0));
+    }
+
+    #[test]
+    fn spatial_index_filters_far_commands() {
+        let plan = RenderPlan::from_scene(&scene(vec![path_element(0.0), path_element(200.0)]));
+        let candidates = plan.candidate_commands(Rect::new(0.0, 0.0, 10.0, 10.0));
+        assert_eq!(candidates, vec![0]);
     }
 
     #[test]

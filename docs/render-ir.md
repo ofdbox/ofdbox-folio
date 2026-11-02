@@ -40,7 +40,8 @@ current tile before flattening or rasterizing.
 
 `PageSnapshot::from_page` consumes a `Page` on the parser thread and builds the
 plan there. Only the resulting snapshot crosses to the UI or a render worker.
-This avoids requiring `DocumentSource: Send` or `Page: Send`.
+This avoids requiring `DocumentSource: Send` or `Page: Send`. The facade exposes
+`Document::page_snapshot()` and caches a small snapshot LRU.
 
 ## Planned Layers
 

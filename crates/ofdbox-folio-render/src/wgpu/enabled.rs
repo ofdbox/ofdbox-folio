@@ -556,6 +556,8 @@ pub struct WgpuBackend {
     path_cache: Mutex<HashMap<TileCacheKey, CachedGeometry>>,
     /// Backend-neutral prepared scenes, shared by all tiles of one page.
     prepared_cache: Mutex<HashMap<(usize, u64), Arc<PreparedScene>>>,
+    /// Current-tile DevicePlan cache.
+    device_plans: Mutex<crate::prepared::DevicePlanCache>,
     atlas: Mutex<GpuAtlas>,
     /// Scene that owns the glyphs currently packed in the atlas.
     atlas_scene: Mutex<usize>,
@@ -671,6 +673,7 @@ impl WgpuBackend {
             font_hashes: Mutex::new(HashMap::new()),
             path_cache: Mutex::new(HashMap::new()),
             prepared_cache: Mutex::new(HashMap::new()),
+            device_plans: Mutex::new(crate::prepared::DevicePlanCache::default()),
             atlas,
             atlas_scene: Mutex::new(0),
             text_pipeline,
@@ -704,6 +707,10 @@ impl WgpuBackend {
             .unwrap_or_else(|error| error.into_inner())
             .clear();
         self.prepared_cache
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        self.device_plans
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clear();
@@ -848,6 +855,17 @@ impl WgpuBackend {
         origin_px: (f64, f64),
     ) -> Result<(), RenderError> {
         let prepared = self.prepared_scene(scene);
+        let device_plan = self
+            .device_plans
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_or_build(
+                &prepared,
+                target.dpi,
+                origin_px,
+                target.width,
+                target.height,
+            );
         let key = (
             scene as *const Scene as usize,
             target.dpi.to_bits(),
@@ -866,6 +884,7 @@ impl WgpuBackend {
             } else {
                 let collected = collect_paths(
                     &prepared,
+                    Some(&device_plan),
                     target.dpi,
                     origin_px,
                     target.width,
@@ -882,6 +901,7 @@ impl WgpuBackend {
         let (edges, paths) = cached.as_ref();
         let decorations = collect_decorations(
             &prepared,
+            Some(&device_plan),
             target.dpi,
             origin_px,
             target.width,
@@ -1617,6 +1637,7 @@ struct ClipDraw {
 
 fn collect_paths(
     prepared: &PreparedScene,
+    device_plan: Option<&crate::prepared::DevicePlan>,
     dpi: f64,
     origin_px: (f64, f64),
     width: u32,
@@ -1638,7 +1659,13 @@ fn collect_paths(
         opacity: 1.0,
     }];
     let mut skip_depth = 0_usize;
-    for command in &prepared.commands {
+    for (command_index, command) in prepared.commands.iter().enumerate() {
+        if device_plan.is_some_and(|plan| !plan.is_visible(command_index)) {
+            if command.bounds().is_some() {
+                order += 1;
+            }
+            continue;
+        }
         match command {
             PreparedCommand::PushLayer { clip, opacity } => {
                 if skip_depth > 0 {
@@ -1862,6 +1889,7 @@ struct DecorationFrame {
 #[allow(clippy::too_many_arguments)]
 fn collect_decorations(
     prepared: &PreparedScene,
+    device_plan: Option<&crate::prepared::DevicePlan>,
     dpi: f64,
     origin_px: (f64, f64),
     width: u32,
@@ -1874,7 +1902,6 @@ fn collect_decorations(
         max_y: height as f32 + 1.0,
     };
     let scale = dpi / 25.4;
-    let device = Matrix::scale(scale, scale).then(Matrix::translate(-origin_px.0, -origin_px.1));
     let mut decorations = Vec::new();
     let mut frames = vec![DecorationFrame {
         clip: None,
@@ -1883,7 +1910,13 @@ fn collect_decorations(
     }];
     let mut skip_depth = 0_usize;
     let mut order = 0_u32;
-    for command in &prepared.commands {
+    for (command_index, command) in prepared.commands.iter().enumerate() {
+        if device_plan.is_some_and(|plan| !plan.is_visible(command_index)) {
+            if command.bounds().is_some() {
+                order += 1;
+            }
+            continue;
+        }
         match command {
             PreparedCommand::PushLayer { clip, opacity } => {
                 if skip_depth > 0 {
@@ -1927,7 +1960,7 @@ fn collect_decorations(
                 run,
                 fill,
                 stroke,
-                bounds,
+                bounds: _,
             } => {
                 if skip_depth > 0 {
                     order += 1;
@@ -1957,7 +1990,7 @@ fn collect_decorations(
                 rect,
                 transform,
                 alpha,
-                bounds,
+                bounds: _,
             } => {
                 if skip_depth > 0 {
                     order += 1;
@@ -2714,7 +2747,7 @@ mod tests {
             diagnostics: Vec::new(),
         };
         let prepared = PreparedScene::from_scene(&scene);
-        let (_, paths) = collect_paths(&prepared, 96.0, (0.0, 0.0), 100, 100);
+        let (_, paths) = collect_paths(&prepared, None, 96.0, (0.0, 0.0), 100, 100);
         assert_eq!(paths.len(), 1, "the right-hand path is outside the tile");
     }
 
