@@ -16,8 +16,6 @@ use wgpu27 as wgpu_lib;
 
 use super::enabled::flatten_path;
 
-const LAYERS: u32 = 4;
-
 /// One rasterized glyph.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct GlyphBitmap {
@@ -367,6 +365,7 @@ pub(crate) struct GpuAtlas {
     texture: wgpu_lib::Texture,
     view: wgpu_lib::TextureView,
     sampler: wgpu_lib::Sampler,
+    layers: u32,
     packers: Vec<GlyphPacker>,
     current: usize,
     full: bool,
@@ -384,13 +383,14 @@ struct PendingGlyph {
 
 impl GpuAtlas {
     /// Create an atlas texture and sampler.
-    pub(crate) fn new(device: &wgpu_lib::Device, size: u32) -> Self {
+    pub(crate) fn new(device: &wgpu_lib::Device, size: u32, layers: u32) -> Self {
+        let layers = layers.clamp(1, 16);
         let texture = device.create_texture(&wgpu_lib::TextureDescriptor {
             label: Some("ofdbox-glyph-atlas"),
             size: wgpu_lib::Extent3d {
                 width: size,
                 height: size,
-                depth_or_array_layers: LAYERS,
+                depth_or_array_layers: layers,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -413,7 +413,8 @@ impl GpuAtlas {
             texture,
             view,
             sampler,
-            packers: (0..LAYERS)
+            layers,
+            packers: (0..layers)
                 .map(|layer| GlyphPacker::new(size, layer))
                 .collect(),
             current: 0,
@@ -438,7 +439,7 @@ impl GpuAtlas {
     /// are overwritten as new glyphs are packed.
     pub(crate) fn clear(&mut self) {
         let size = self.packers.first().map_or(0, |packer| packer.size);
-        self.packers = (0..LAYERS)
+        self.packers = (0..self.layers)
             .map(|layer| GlyphPacker::new(size, layer))
             .collect();
         self.current = 0;

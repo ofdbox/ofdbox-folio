@@ -116,6 +116,8 @@ pub struct WgpuOptions {
     pub max_glyph_cache_entries: usize,
     /// Glyph atlas edge length in pixels.
     pub atlas_size: u32,
+    /// Number of glyph atlas array layers.
+    pub atlas_layers: u32,
     /// Reset the atlas before a frame when this fraction is already packed.
     pub atlas_reset_threshold: f32,
 }
@@ -145,6 +147,7 @@ impl Default for WgpuOptions {
             max_prepared_scenes: 8,
             max_glyph_cache_entries: 16_384,
             atlas_size: 4096,
+            atlas_layers: 4,
             atlas_reset_threshold: 0.9,
         }
     }
@@ -644,7 +647,11 @@ impl WgpuBackend {
                     compilation_options: Default::default(),
                     cache: None,
                 });
-        let atlas = Mutex::new(GpuAtlas::new(&context.device, options.atlas_size.max(1024)));
+        let atlas = Mutex::new(GpuAtlas::new(
+            &context.device,
+            options.atlas_size.max(1024),
+            options.atlas_layers,
+        ));
         let text_pipeline = TextPipeline::new(&context.device);
         let image_pipeline = ImagePipeline::new(&context.device);
         let image_sampler = context.device.create_sampler(&wgpu_lib::SamplerDescriptor {

@@ -11,7 +11,7 @@ Bitmap rendering for [`ofdbox-folio`](../../README.md): it rasterizes Fixed IR p
 - `CpuRenderer` (`new()` / `with_defaults()`) draws a `Page` or `Scene` with `render_page()` / `render_scene()` into an `RasterTarget`; `render_scene_region()` refreshes one tile using `RenderRegion`. `clear_caches()`, `report()` and `take_report()` expose cache control and per-image diagnostics.
 - `RenderOptions` sets the page background, the maximum decoded image pixels and the decoded-image cache byte budget.
 - `decode_image()`, `decode_image_tier()` and `detect_format()` handle PNG, JPEG, BMP, JBIG2 and TIFF bytes; `DecodedImage` can apply a grayscale mask.
-- With the `wgpu` feature (facade feature `gpu`): `WgpuContext`, `WgpuTarget`, `WgpuCapabilities`, `WgpuOptions` (image cache bytes, tile cache entries, prepared scenes, glyph entries and atlas size), `WgpuCacheStats` and `WgpuBackend`; without it, `WgpuBackend` is a placeholder whose `draw()` returns `Unsupported`.
+- With the `wgpu` feature (facade feature `gpu`): `WgpuContext`, `WgpuTarget`, `WgpuCapabilities`, `WgpuOptions` (image cache bytes, tile cache entries, prepared scenes, glyph entries, atlas size and atlas layers), `WgpuCacheStats` and `WgpuBackend`; without it, `WgpuBackend` is a placeholder whose `draw()` returns `Unsupported`.
 
 ### Example
 
