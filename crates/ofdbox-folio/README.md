@@ -67,7 +67,7 @@ document.page(0)?;
 
 - **Lazy pages (OFD/PDF)**: first-screen time is independent of the total page count; memory is determined by the cache budget and the visible pages.
 - **Separated resources**: fonts and images are shared by content; an image is decoded once at full resolution and cached under the renderer budget. DPI-tier decoding is planned, not implemented yet.
-- **Prepared geometry**: `PreparedScene` resolves the Fixed IR tree into a backend-neutral command list; the CPU and tiny-skia renderers consume it, and the wgpu backend consumes it for text and image decorations. All three cache the current page's prepared scene across tiles, while wgpu keeps its tile path cache.
+- **Prepared geometry**: `PreparedScene` resolves the Fixed IR tree into a backend-neutral command list; all three renderers consume it for paths, text and images and cache the current page's prepared scene across tiles.
 - **Independent text layer**: drawing order is not reading order; the text layer stores line boxes, baselines and character mappings, so selection and search do not re-parse the page.
 - **Eager DOCX layout**: DOCX is parsed into Flow IR and fully laid out when opened; page count and layout cost are paid up front, and the page cache then caches laid-out pages. Progressive first-page-first layout is not implemented yet.
 

@@ -14,8 +14,7 @@ use wgpu_lib::util::DeviceExt;
 use owned_ttf_parser::{AsFaceRef, OwnedFace};
 
 use ofdbox_folio_ir::{
-    Element, FillRule, Group, ImageAsset, ImageElement, Matrix, Paint, Path, PathSegment, Point,
-    Rgba, Scene, Size,
+    FillRule, ImageAsset, ImageElement, Matrix, Paint, Path, PathSegment, Point, Rgba, Scene, Size,
 };
 
 use crate::RenderError;
@@ -690,6 +689,7 @@ impl WgpuBackend {
         target: &WgpuTarget,
         origin_px: (f64, f64),
     ) -> Result<(), RenderError> {
+        let prepared = self.prepared_scene(scene);
         let key = (
             scene as *const Scene as usize,
             target.dpi.to_bits(),
@@ -706,8 +706,13 @@ impl WgpuBackend {
             if let Some(cached) = cache.get(&key) {
                 Arc::clone(cached)
             } else {
-                let collected =
-                    collect_paths(scene, target.dpi, origin_px, target.width, target.height);
+                let collected = collect_paths(
+                    &prepared,
+                    target.dpi,
+                    origin_px,
+                    target.width,
+                    target.height,
+                );
                 let cached = Arc::new(collected);
                 if cache.len() > self.options.max_tile_cache_entries {
                     cache.clear();
@@ -717,7 +722,6 @@ impl WgpuBackend {
             }
         };
         let (edges, paths) = cached.as_ref();
-        let prepared = self.prepared_scene(scene);
         let decorations = collect_decorations(
             &prepared,
             target.dpi,
@@ -1427,8 +1431,16 @@ fn storage_entry(binding: u32, read_only: bool) -> wgpu_lib::BindGroupLayoutEntr
     }
 }
 
+/// A clip path retained for per-fragment testing.
+#[derive(Clone)]
+struct ClipDraw {
+    path: Arc<Path>,
+    transform: Matrix,
+    rule: FillRule,
+}
+
 fn collect_paths(
-    scene: &Scene,
+    prepared: &PreparedScene,
     dpi: f64,
     origin_px: (f64, f64),
     width: u32,
@@ -1444,30 +1456,191 @@ fn collect_paths(
         max_x: width as f32 + 1.0,
         max_y: height as f32 + 1.0,
     };
-    collect_group(
-        &scene.root,
-        GroupState {
-            parent: Matrix::IDENTITY,
-            clip: None,
-            opacity: 1.0,
-        },
-        scale,
-        origin_px,
-        viewport,
-        &mut order,
-        &mut edges,
-        &mut paths,
-    );
-    debug_assert!(paths.windows(2).all(|pair| pair[0].order <= pair[1].order));
+    let mut frames = vec![PathFrame {
+        clip: None,
+        opacity: 1.0,
+    }];
+    let mut skip_depth = 0_usize;
+    for command in &prepared.commands {
+        match command {
+            PreparedCommand::PushLayer { clip, opacity } => {
+                if skip_depth > 0 {
+                    skip_depth += 1;
+                    continue;
+                }
+                let parent = frames.last().expect("root path frame");
+                let combined_opacity = parent.opacity * opacity.clamp(0.0, 1.0);
+                if combined_opacity <= 0.0 {
+                    skip_depth = 1;
+                    continue;
+                }
+                let mut frame = PathFrame {
+                    clip: parent.clip,
+                    opacity: combined_opacity,
+                };
+                if let Some(clip) = clip {
+                    let start = u32::try_from(edges.len()).unwrap_or(u32::MAX);
+                    flatten_path(
+                        &clip.path,
+                        clip.transform,
+                        scale,
+                        origin_px,
+                        true,
+                        &mut edges,
+                    );
+                    let count = u32::try_from(edges.len()).unwrap_or(u32::MAX) - start;
+                    if count == 0
+                        || !viewport
+                            .intersects(edge_bounds(&edges[start as usize..]).unwrap_or([0.0; 4]))
+                    {
+                        skip_depth = 1;
+                        continue;
+                    }
+                    frame.clip = Some((start, count, u32::from(clip.rule == FillRule::EvenOdd)));
+                }
+                frames.push(frame);
+            }
+            PreparedCommand::PopLayer => {
+                if skip_depth > 0 {
+                    skip_depth -= 1;
+                } else if frames.len() > 1 {
+                    frames.pop();
+                }
+            }
+            PreparedCommand::FillPath {
+                path,
+                transform,
+                paint,
+                rule,
+            } => {
+                if skip_depth > 0 {
+                    order += 1;
+                    continue;
+                }
+                let frame = frames.last().expect("root path frame");
+                let start = u32::try_from(edges.len()).unwrap_or(u32::MAX);
+                flatten_path(path, *transform, scale, origin_px, true, &mut edges);
+                let count = u32::try_from(edges.len()).unwrap_or(u32::MAX) - start;
+                if count == 0 {
+                    order += 1;
+                    continue;
+                }
+                let Some(bounds) = edge_bounds(&edges[start as usize..]) else {
+                    order += 1;
+                    continue;
+                };
+                if viewport.intersects(bounds) {
+                    let (kind, color, end_color, gradient) = match paint {
+                        Paint::Color(color) => (
+                            0,
+                            scaled_color(*color, frame.opacity),
+                            scaled_color(*color, frame.opacity),
+                            [0.0; 4],
+                        ),
+                        Paint::LinearGradient(linear) => {
+                            let start_color =
+                                linear.stops.first().map_or(Rgba::BLACK, |stop| stop.color);
+                            let end_color =
+                                linear.stops.last().map_or(start_color, |stop| stop.color);
+                            let a = transform.apply(linear.start);
+                            let b = transform.apply(linear.end);
+                            (
+                                2,
+                                scaled_color(start_color, frame.opacity),
+                                scaled_color(end_color, frame.opacity),
+                                [
+                                    (a.x * scale - origin_px.0) as f32,
+                                    (a.y * scale - origin_px.1) as f32,
+                                    (b.x * scale - origin_px.0) as f32,
+                                    (b.y * scale - origin_px.1) as f32,
+                                ],
+                            )
+                        }
+                        Paint::RadialGradient(radial) => {
+                            let color = radial.stops.first().map_or(Rgba::BLACK, |stop| stop.color);
+                            (
+                                0,
+                                scaled_color(color, frame.opacity),
+                                scaled_color(color, frame.opacity),
+                                [0.0; 4],
+                            )
+                        }
+                        _ => (0, [0.0; 4], [0.0; 4], [0.0; 4]),
+                    };
+                    paths.push(DrawPath {
+                        start,
+                        count,
+                        rule: u32::from(*rule == FillRule::EvenOdd),
+                        kind,
+                        color,
+                        width: 0.0,
+                        clip_start: frame.clip.map_or(0, |value| value.0),
+                        clip_count: frame.clip.map_or(0, |value| value.1),
+                        clip_rule: frame.clip.map_or(0, |value| value.2),
+                        end_color,
+                        gradient,
+                        bbox: bounds,
+                        order,
+                    });
+                }
+                order += 1;
+            }
+            PreparedCommand::StrokePath {
+                path,
+                transform,
+                stroke,
+            } => {
+                if skip_depth > 0 {
+                    order += 1;
+                    continue;
+                }
+                let frame = frames.last().expect("root path frame");
+                let start = u32::try_from(edges.len()).unwrap_or(u32::MAX);
+                flatten_path(path, *transform, scale, origin_px, false, &mut edges);
+                let count = u32::try_from(edges.len()).unwrap_or(u32::MAX) - start;
+                if count == 0 {
+                    order += 1;
+                    continue;
+                }
+                let Some(bounds) = edge_bounds(&edges[start as usize..]) else {
+                    order += 1;
+                    continue;
+                };
+                if let Paint::Color(color) = &stroke.paint {
+                    let width = (stroke.style.width * scale) as f32;
+                    let stroke_bounds = expand_bounds(bounds, width * 0.5);
+                    if viewport.intersects(stroke_bounds) {
+                        paths.push(DrawPath {
+                            start,
+                            count,
+                            rule: 0,
+                            kind: 1,
+                            color: scaled_color(*color, frame.opacity),
+                            width,
+                            clip_start: frame.clip.map_or(0, |value| value.0),
+                            clip_count: frame.clip.map_or(0, |value| value.1),
+                            clip_rule: frame.clip.map_or(0, |value| value.2),
+                            end_color: scaled_color(*color, frame.opacity),
+                            gradient: [0.0; 4],
+                            bbox: stroke_bounds,
+                            order,
+                        });
+                    }
+                }
+                order += 1;
+            }
+            PreparedCommand::DrawText { .. } | PreparedCommand::DrawImage { .. } => {
+                order += 1;
+            }
+        }
+    }
     (edges, paths)
 }
 
-/// A clip path retained for per-fragment testing.
-#[derive(Clone)]
-struct ClipDraw {
-    path: Arc<Path>,
-    transform: Matrix,
-    rule: FillRule,
+#[derive(Clone, Copy)]
+struct PathFrame {
+    clip: Option<(u32, u32, u32)>,
+    opacity: f32,
 }
 
 /// One ordered text or image draw from the prepared scene.
@@ -2016,169 +2189,6 @@ impl Viewport {
     }
 }
 
-/// Shared transform/clip state while flattening a group tree.
-#[derive(Clone, Copy)]
-struct GroupState {
-    parent: Matrix,
-    clip: Option<(u32, u32, u32)>,
-    opacity: f32,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn collect_group(
-    group: &Group,
-    state: GroupState,
-    scale: f64,
-    origin_px: (f64, f64),
-    viewport: Viewport,
-    order: &mut u32,
-    edges: &mut Vec<[f32; 4]>,
-    paths: &mut Vec<DrawPath>,
-) {
-    if state.opacity <= 0.0 {
-        return;
-    }
-    let transform = group.transform.then(state.parent);
-    let opacity = state.opacity * group.opacity.clamp(0.0, 1.0);
-    if opacity <= 0.0 {
-        return;
-    }
-    let clip = if let Some(clip) = &group.clip {
-        let start = u32::try_from(edges.len()).unwrap_or(u32::MAX);
-        flatten_path(&clip.path, transform, scale, origin_px, true, edges);
-        let count = u32::try_from(edges.len()).unwrap_or(u32::MAX) - start;
-        if count == 0
-            || !viewport.intersects(edge_bounds(&edges[start as usize..]).unwrap_or([0.0; 4]))
-        {
-            return;
-        }
-        Some((start, count, u32::from(clip.rule == FillRule::EvenOdd)))
-    } else {
-        state.clip
-    };
-    for element in &group.children {
-        match element {
-            Element::Group(child) => collect_group(
-                child,
-                GroupState {
-                    parent: transform,
-                    clip,
-                    opacity,
-                },
-                scale,
-                origin_px,
-                viewport,
-                order,
-                edges,
-                paths,
-            ),
-            Element::Path(path) => {
-                let element_order = *order;
-                *order += 1;
-                let start = u32::try_from(edges.len()).unwrap_or(u32::MAX);
-                flatten_path(
-                    &path.path,
-                    transform,
-                    scale,
-                    origin_px,
-                    path.stroke.is_none(),
-                    edges,
-                );
-                let count = u32::try_from(edges.len()).unwrap_or(u32::MAX) - start;
-                if count == 0 {
-                    continue;
-                }
-                let Some(bounds) = edge_bounds(&edges[start as usize..]) else {
-                    continue;
-                };
-                if let Some(fill) = &path.fill
-                    && viewport.intersects(bounds)
-                {
-                    let (kind, color, end_color, gradient) = match fill {
-                        Paint::Color(color) => (
-                            0,
-                            scaled_color(*color, opacity),
-                            scaled_color(*color, opacity),
-                            [0.0, 0.0, 0.0, 0.0],
-                        ),
-                        Paint::LinearGradient(linear) => {
-                            let start_color =
-                                linear.stops.first().map_or(Rgba::BLACK, |stop| stop.color);
-                            let end_color =
-                                linear.stops.last().map_or(start_color, |stop| stop.color);
-                            let a = transform.apply(linear.start);
-                            let b = transform.apply(linear.end);
-                            (
-                                2,
-                                scaled_color(start_color, opacity),
-                                scaled_color(end_color, opacity),
-                                [
-                                    (a.x * scale - origin_px.0) as f32,
-                                    (a.y * scale - origin_px.1) as f32,
-                                    (b.x * scale - origin_px.0) as f32,
-                                    (b.y * scale - origin_px.1) as f32,
-                                ],
-                            )
-                        }
-                        Paint::RadialGradient(radial) => {
-                            let color = radial.stops.first().map_or(Rgba::BLACK, |stop| stop.color);
-                            (
-                                0,
-                                scaled_color(color, opacity),
-                                scaled_color(color, opacity),
-                                [0.0; 4],
-                            )
-                        }
-                        _ => (0, [0.0; 4], [0.0; 4], [0.0; 4]),
-                    };
-                    paths.push(DrawPath {
-                        start,
-                        count,
-                        rule: u32::from(path.rule == FillRule::EvenOdd),
-                        kind,
-                        color,
-                        width: 0.0,
-                        clip_start: clip.map_or(0, |value| value.0),
-                        clip_count: clip.map_or(0, |value| value.1),
-                        clip_rule: clip.map_or(0, |value| value.2),
-                        end_color,
-                        gradient,
-                        bbox: bounds,
-                        order: element_order,
-                    });
-                }
-                if let Some(stroke) = &path.stroke
-                    && let Paint::Color(color) = &stroke.paint
-                {
-                    let width = (stroke.style.width * scale) as f32;
-                    let stroke_bounds = expand_bounds(bounds, width * 0.5);
-                    if !viewport.intersects(stroke_bounds) {
-                        continue;
-                    }
-                    paths.push(DrawPath {
-                        start,
-                        count,
-                        rule: 0,
-                        kind: 1,
-                        color: scaled_color(*color, opacity),
-                        width,
-                        clip_start: clip.map_or(0, |value| value.0),
-                        clip_count: clip.map_or(0, |value| value.1),
-                        clip_rule: clip.map_or(0, |value| value.2),
-                        end_color: scaled_color(*color, opacity),
-                        gradient: [0.0; 4],
-                        bbox: stroke_bounds,
-                        order: element_order,
-                    });
-                }
-            }
-            Element::Text(_) => *order += 1,
-            Element::Image(_) => *order += 1,
-            _ => {}
-        }
-    }
-}
-
 fn edge_bounds(edges: &[[f32; 4]]) -> Option<[f32; 4]> {
     let mut bounds = [
         f32::INFINITY,
@@ -2447,6 +2457,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 #[cfg(test)]
 mod tests {
     use super::{WgpuBackend, WgpuContext, WgpuTarget, collect_paths};
+    use crate::prepared::PreparedScene;
     use ofdbox_folio_ir::{
         Element, FillRule, Group, Matrix, Paint, Path, PathElement, Point, Rgba, Scene, Size,
     };
@@ -2480,7 +2491,8 @@ mod tests {
             },
             diagnostics: Vec::new(),
         };
-        let (_, paths) = collect_paths(&scene, 96.0, (0.0, 0.0), 100, 100);
+        let prepared = PreparedScene::from_scene(&scene);
+        let (_, paths) = collect_paths(&prepared, 96.0, (0.0, 0.0), 100, 100);
         assert_eq!(paths.len(), 1, "the right-hand path is outside the tile");
     }
 

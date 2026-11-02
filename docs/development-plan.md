@@ -24,10 +24,8 @@ Non-goals for the first pass:
 ## Status
 
 - Phase 0: complete.
-- Phase 1: in progress. `PreparedScene` is consumed by the CPU and tiny-skia
-  renderers and by wgpu text/image decorations. All three renderers cache a
-  prepared scene for the current page; wgpu path collection still needs to
-  migrate.
+- Phase 1: complete. All three renderers consume `PreparedScene` (paths,
+  text and images) and cache the current page's prepared scene across tiles.
 - Phase 2: started. The wgpu image texture cache has a configurable byte budget
   (`WgpuOptions`); atlas/glyph eviction remains.
 
