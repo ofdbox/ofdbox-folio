@@ -28,6 +28,7 @@ pub struct TinySkiaRenderer {
     image_order: VecDeque<(u64, u32)>,
     image_bytes: usize,
     prepared: Option<(usize, u64, Arc<PreparedScene>)>,
+    device_plans: crate::prepared::DevicePlanCache,
 }
 
 #[derive(Default)]
@@ -46,6 +47,7 @@ impl TinySkiaRenderer {
             image_order: VecDeque::new(),
             image_bytes: 0,
             prepared: None,
+            device_plans: crate::prepared::DevicePlanCache::default(),
         }
     }
 
@@ -74,6 +76,7 @@ impl TinySkiaRenderer {
     /// Drops cached glyph outlines and decoded images.
     pub fn clear_caches(&mut self) {
         self.prepared = None;
+        self.device_plans.clear();
         self.glyphs.clear();
         self.images.clear();
         self.image_order.clear();
@@ -200,7 +203,7 @@ impl TinySkiaRenderer {
         {
             return Err(RenderError::InvalidPage);
         }
-        let device_plan = crate::prepared::DevicePlan::new(
+        let device_plan = self.device_plans.get_or_build(
             prepared,
             region.dpi,
             region.origin_px,

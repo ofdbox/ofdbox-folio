@@ -6,6 +6,7 @@
 //! resources in page space. Rendering backends can consume the same list
 //! instead of walking the semantic scene tree themselves.
 
+use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -233,6 +234,116 @@ fn text_bounds(text: &ofdbox_folio_ir::TextElement, transform: Matrix) -> Rect {
         (max_x - min_x).max(0.0),
         height * 1.2,
     ))
+}
+
+/// Small LRU cache for page snapshots.
+pub struct PageSnapshotCache {
+    entries: std::collections::HashMap<usize, Arc<PageSnapshot>>,
+    order: VecDeque<usize>,
+    capacity: usize,
+}
+
+impl PageSnapshotCache {
+    /// Creates a cache holding at most `capacity` pages.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            order: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    /// Returns a cached snapshot and marks it recently used.
+    pub fn get(&mut self, page: usize) -> Option<Arc<PageSnapshot>> {
+        let snapshot = Arc::clone(self.entries.get(&page)?);
+        self.order.retain(|value| *value != page);
+        self.order.push_back(page);
+        Some(snapshot)
+    }
+
+    /// Inserts a snapshot, evicting the least recently used one.
+    pub fn insert(&mut self, page: usize, snapshot: Arc<PageSnapshot>) {
+        if self.capacity == 0 {
+            return;
+        }
+        if self.entries.insert(page, snapshot).is_some() {
+            self.order.retain(|value| *value != page);
+        }
+        self.order.push_back(page);
+        while self.entries.len() > self.capacity {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+    }
+
+    /// Drops all snapshots.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    /// Number of cached snapshots.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether no snapshot is cached.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// Cached DevicePlan entry.
+type DevicePlanEntry = (usize, u64, u64, u64, u32, u32, Arc<DevicePlan>);
+
+/// One-entry cache for the current tile's DevicePlan.
+#[derive(Default)]
+pub struct DevicePlanCache {
+    entry: Option<DevicePlanEntry>,
+}
+
+impl DevicePlanCache {
+    /// Returns the cached device plan or culls and stores a new one.
+    pub fn get_or_build(
+        &mut self,
+        plan: &RenderPlan,
+        dpi: f64,
+        origin_px: (f64, f64),
+        width: u32,
+        height: u32,
+    ) -> Arc<DevicePlan> {
+        let key = (
+            plan as *const RenderPlan as usize,
+            dpi.to_bits(),
+            origin_px.0.to_bits(),
+            origin_px.1.to_bits(),
+            width,
+            height,
+        );
+        if let Some((id, dpi_bits, x_bits, y_bits, w, h, cached)) = &self.entry
+            && (*id, *dpi_bits, *x_bits, *y_bits, *w, *h) == key
+        {
+            return Arc::clone(cached);
+        }
+        let device = Arc::new(DevicePlan::new(plan, dpi, origin_px, width, height));
+        self.entry = Some((
+            key.0,
+            key.1,
+            key.2,
+            key.3,
+            key.4,
+            key.5,
+            Arc::clone(&device),
+        ));
+        device
+    }
+
+    /// Drops the cached plan.
+    pub fn clear(&mut self) {
+        self.entry = None;
+    }
 }
 
 /// A RenderPlan culled for one DPI / tile.
@@ -508,6 +619,30 @@ mod tests {
             },
             diagnostics: Vec::new(),
         }
+    }
+
+    #[test]
+    fn device_plan_cache_reuses_same_tile() {
+        let plan = RenderPlan::from_scene(&scene(vec![path_element(0.0)]));
+        let mut cache = DevicePlanCache::default();
+        let first = cache.get_or_build(&plan, 96.0, (0.0, 0.0), 100, 100);
+        let second = cache.get_or_build(&plan, 96.0, (0.0, 0.0), 100, 100);
+        assert!(Arc::ptr_eq(&first, &second));
+        let other = cache.get_or_build(&plan, 96.0, (10.0, 10.0), 100, 100);
+        assert!(!Arc::ptr_eq(&first, &other));
+    }
+
+    #[test]
+    fn page_snapshot_cache_evicts_lru() {
+        let page = || Page::new(PageInfo::default(), scene(vec![path_element(0.0)]));
+        let mut cache = PageSnapshotCache::new(1);
+        cache.insert(0, Arc::new(PageSnapshot::from_page(page())));
+        let first = cache.get(0).expect("first");
+        cache.insert(1, Arc::new(PageSnapshot::from_page(page())));
+        assert!(cache.get(0).is_none());
+        assert!(cache.get(1).is_some());
+        assert_eq!(cache.len(), 1);
+        drop(first);
     }
 
     #[test]

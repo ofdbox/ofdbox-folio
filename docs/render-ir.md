@@ -46,6 +46,8 @@ This avoids requiring `DocumentSource: Send` or `Page: Send`.
 
 - `RenderPlan`: page-space commands and bounds (current); tile culling is implemented.
 - `DevicePlan`: per-DPI/tile command visibility (current; CPU and tiny-skia consume it).
+- `PageSnapshotCache`: LRU for parsed page snapshots (current).
+- `DevicePlanCache`: one-entry cache for the current tile (current).
 - `DevicePlan`: optional per-DPI/tile culling and precomputed device data.
 - Backend caches: glyph outlines, atlases, decoded images and textures.
 

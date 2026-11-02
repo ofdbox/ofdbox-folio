@@ -223,6 +223,7 @@ pub struct CpuRenderer {
     pixmaps: PixmapCache,
     report: Report,
     prepared: Option<(usize, u64, Arc<PreparedScene>)>,
+    device_plans: crate::prepared::DevicePlanCache,
 }
 
 /// Decoded image cache: evicted against a byte budget; a budget of 0 disables caching entirely.
@@ -301,6 +302,7 @@ impl CpuRenderer {
             pixmaps: PixmapCache::new(options.max_image_cache_bytes),
             report: Report::new(),
             prepared: None,
+            device_plans: crate::prepared::DevicePlanCache::default(),
         }
     }
 
@@ -324,6 +326,7 @@ impl CpuRenderer {
     /// Clears the font, image and rendering resource caches.
     pub fn clear_caches(&mut self) {
         self.prepared = None;
+        self.device_plans.clear();
         self.fonts.clear();
         self.pixmaps.clear();
         self.resources = Resources::new();
@@ -489,7 +492,7 @@ impl CpuRenderer {
         {
             return Err(RenderError::InvalidPage);
         }
-        let device_plan = crate::prepared::DevicePlan::new(
+        let device_plan = self.device_plans.get_or_build(
             prepared,
             region.dpi,
             region.origin_px,
