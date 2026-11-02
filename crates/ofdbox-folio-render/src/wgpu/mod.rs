@@ -18,4 +18,4 @@ mod text;
 #[cfg(not(any(feature = "wgpu27", feature = "wgpu30")))]
 pub use disabled::WgpuBackend;
 #[cfg(any(feature = "wgpu27", feature = "wgpu30"))]
-pub use enabled::{WgpuBackend, WgpuCapabilities, WgpuContext, WgpuTarget};
+pub use enabled::{WgpuBackend, WgpuCapabilities, WgpuContext, WgpuOptions, WgpuTarget};

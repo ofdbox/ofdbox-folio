@@ -102,6 +102,24 @@ impl WgpuContext {
     }
 }
 
+/// Resource limits for a wgpu backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WgpuOptions {
+    /// Byte budget for decoded image textures.
+    pub max_image_cache_bytes: usize,
+    /// Maximum number of cached tile geometries before the cache is cleared.
+    pub max_tile_cache_entries: usize,
+}
+
+impl Default for WgpuOptions {
+    fn default() -> Self {
+        Self {
+            max_image_cache_bytes: 64 * 1024 * 1024,
+            max_tile_cache_entries: 64,
+        }
+    }
+}
+
 /// Current wgpu capabilities.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WgpuCapabilities {
@@ -446,16 +464,33 @@ pub struct WgpuBackend {
     /// Decoded image textures keyed by `ImageAsset` pointer.
     image_cache: Mutex<ImageCache>,
     image_sampler: wgpu_lib::Sampler,
+    options: WgpuOptions,
 }
 
 impl WgpuBackend {
     /// Creates a backend; an initialized context must be supplied explicitly.
     pub fn new(context: WgpuContext) -> Result<Self, RenderError> {
-        Self::from_shared(Arc::new(context))
+        Self::new_with_options(context, WgpuOptions::default())
+    }
+
+    /// Creates a backend with explicit resource limits.
+    pub fn new_with_options(
+        context: WgpuContext,
+        options: WgpuOptions,
+    ) -> Result<Self, RenderError> {
+        Self::from_shared_with_options(Arc::new(context), options)
     }
 
     /// Creates a backend from a shared context.
     pub fn from_shared(context: Arc<WgpuContext>) -> Result<Self, RenderError> {
+        Self::from_shared_with_options(context, WgpuOptions::default())
+    }
+
+    /// Creates a backend from a shared context with explicit resource limits.
+    pub fn from_shared_with_options(
+        context: Arc<WgpuContext>,
+        options: WgpuOptions,
+    ) -> Result<Self, RenderError> {
         let module = context
             .device
             .create_shader_module(wgpu_lib::ShaderModuleDescriptor {
@@ -533,8 +568,9 @@ impl WgpuBackend {
             atlas,
             text_pipeline,
             image_pipeline,
-            image_cache: Mutex::new(ImageCache::new(64 * 1024 * 1024)),
+            image_cache: Mutex::new(ImageCache::new(options.max_image_cache_bytes)),
             image_sampler,
+            options,
         })
     }
 
@@ -646,7 +682,7 @@ impl WgpuBackend {
                 let collected =
                     collect_paths(scene, target.dpi, origin_px, target.width, target.height);
                 let cached = Arc::new(collected);
-                if cache.len() > 64 {
+                if cache.len() > self.options.max_tile_cache_entries {
                     cache.clear();
                 }
                 cache.insert(key, Arc::clone(&cached));
