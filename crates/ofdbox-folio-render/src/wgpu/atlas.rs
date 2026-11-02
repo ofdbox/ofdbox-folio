@@ -480,7 +480,12 @@ impl GpuAtlas {
     }
 
     /// Uploads deferred glyph bitmaps with one staging buffer.
-    pub(crate) fn flush(&mut self, device: &wgpu_lib::Device, queue: &wgpu_lib::Queue) {
+    pub(crate) fn flush(
+        &mut self,
+        device: &wgpu_lib::Device,
+        queue: &wgpu_lib::Queue,
+        encoder: &mut wgpu_lib::CommandEncoder,
+    ) {
         if self.pending.is_empty() {
             return;
         }
@@ -501,7 +506,6 @@ impl GpuAtlas {
             mapped_at_creation: false,
         });
         queue.write_buffer(&buffer, 0, &bytes);
-        let mut encoder = device.create_command_encoder(&Default::default());
         for (glyph, offset) in self.pending.iter().zip(offsets) {
             encoder.copy_buffer_to_texture(
                 wgpu_lib::TexelCopyBufferInfo {
@@ -531,7 +535,6 @@ impl GpuAtlas {
                 },
             );
         }
-        queue.submit([encoder.finish()]);
         self.pending.clear();
     }
 }

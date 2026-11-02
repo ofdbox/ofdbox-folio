@@ -21,6 +21,7 @@ use ofdbox_folio_ir::{
 use crate::RenderError;
 use crate::image::decode_image;
 use crate::prepared::{PreparedClip, PreparedCommand, PreparedScene, scene_fingerprint};
+use crate::renderer::RenderCacheStats;
 
 use super::atlas::{GlyphInstance, GpuAtlas};
 use super::image::ImagePipeline;
@@ -742,6 +743,18 @@ impl WgpuBackend {
         }
     }
 
+    /// Backend-neutral cache statistics.
+    pub fn render_cache_stats(&self) -> RenderCacheStats {
+        let stats = self.cache_stats_detailed();
+        RenderCacheStats {
+            fonts: 0,
+            glyphs: stats.glyphs,
+            images: stats.images,
+            image_bytes: stats.image_bytes as u64,
+            prepared_scene: stats.prepared_scenes > 0,
+        }
+    }
+
     /// Number of cached glyph outlines and flattened tile geometries.
     pub fn cache_stats(&self) -> (usize, usize) {
         let glyphs = self
@@ -866,6 +879,10 @@ impl WgpuBackend {
         let mut text_bind_group = None;
         let mut clip_edges: Vec<[f32; 4]> = Vec::new();
         let clip_buffer;
+        let mut encoder = self
+            .context
+            .device
+            .create_command_encoder(&Default::default());
         {
             let mut atlas = self.atlas.lock().unwrap_or_else(|error| error.into_inner());
             if atlas.is_full()
@@ -1000,7 +1017,7 @@ impl WgpuBackend {
                         contents: &clip_data,
                         usage: wgpu_lib::BufferUsages::STORAGE,
                     });
-            atlas.flush(&self.context.device, &self.context.queue);
+            atlas.flush(&self.context.device, &self.context.queue, &mut encoder);
             if !instances.is_empty() {
                 let mut instance_data = Vec::with_capacity(instances.len() * 160);
                 for instance in &instances {
@@ -1153,10 +1170,6 @@ impl WgpuBackend {
                 decor_index += 1;
             }
         }
-        let mut encoder = self
-            .context
-            .device
-            .create_command_encoder(&Default::default());
         let clear_attachment = Some(wgpu_lib::RenderPassColorAttachment {
             view: &target.view,
             depth_slice: None,

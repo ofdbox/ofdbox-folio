@@ -6,7 +6,7 @@ Bitmap rendering for [`ofdbox-folio`](../../README.md): it rasterizes Fixed IR p
 
 ## Public Entry Points
 
-- `RenderCacheStats` reports cached fonts, glyphs, images and image bytes for the CPU and tiny-skia renderers; `cache_stats()` on each backend returns it.
+- `RenderCacheStats` reports cached fonts, glyphs, images and image bytes for all three renderers; the CPU and tiny-skia `cache_stats()` and wgpu `render_cache_stats()` return it.
 - `PreparedScene::from_scene()` resolves a Fixed IR scene into a backend-neutral command list with explicit layer/clip commands; `CpuRenderer` and `TinySkiaRenderer` expose `render_prepared()` and `render_prepared_region()` and consume it directly; the wgpu backend consumes it for path, text and image draws and caches the current page's prepared scene.
 - `CpuRenderer` (`new()` / `with_defaults()`) draws a `Page` or `Scene` with `render_page()` / `render_scene()` into an `RasterTarget`; `render_scene_region()` refreshes one tile using `RenderRegion`. `clear_caches()`, `report()` and `take_report()` expose cache control and per-image diagnostics.
 - `RenderOptions` sets the page background, the maximum decoded image pixels and the decoded-image cache byte budget.
@@ -54,7 +54,7 @@ each run into a transparent layer and composites it at the right position, so
 paths, text and images follow the scene tree order. Glyphs are batched into one
 instanced text draw, and all image quads share one render pass. Text glyphs are
 rasterized into an R8 atlas and new glyph bitmaps are uploaded through one
-staging buffer per frame; images are decoded once and cached as GPU textures. `WgpuBackend::render_page` is the page-level entry point,
+staging buffer per frame and copied in the main command encoder; images are decoded once and cached as GPU textures. `WgpuBackend::render_page` is the page-level entry point,
 `render_page_region` renders a tile of a page for incremental refresh, and
 `examples/wgpu_compare.rs` in the facade renders a page with both backends and
 reports the pixel difference.
