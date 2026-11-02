@@ -30,11 +30,17 @@ pub use reader::{
 pub use ofdbox_folio_ir as ir;
 
 /// Compile-time selectable page-snapshot service.
-#[cfg(any(
-    feature = "cpu",
-    feature = "gpu27",
-    feature = "gpu30",
-    feature = "tiny-skia"
+///
+/// Native only: the service opens documents by path and produces page snapshots for the
+/// render pipeline; wasm targets use `TileSource`/canvas2d presenters instead.
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(
+        feature = "cpu",
+        feature = "gpu27",
+        feature = "gpu30",
+        feature = "tiny-skia"
+    )
 ))]
 pub mod service;
 
