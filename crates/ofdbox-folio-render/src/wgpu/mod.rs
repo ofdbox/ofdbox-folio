@@ -19,5 +19,6 @@ mod text;
 pub use disabled::WgpuBackend;
 #[cfg(any(feature = "wgpu27", feature = "wgpu30"))]
 pub use enabled::{
-    WgpuBackend, WgpuCacheStats, WgpuCapabilities, WgpuContext, WgpuOptions, WgpuTarget,
+    WgpuBackend, WgpuCacheStats, WgpuCapabilities, WgpuContext, WgpuContextOptions, WgpuOptions,
+    WgpuTarget,
 };

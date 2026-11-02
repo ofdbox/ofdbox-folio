@@ -52,13 +52,46 @@ pub struct WgpuContext {
     queue: wgpu_lib::Queue,
 }
 
+/// Options for creating an embedded wgpu context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WgpuContextOptions {
+    /// Enabled backends.
+    pub backends: wgpu_lib::Backends,
+    /// Instance flags; empty by default so embedded rendering does not enable
+    /// backend debug/validation layers.
+    pub flags: wgpu_lib::InstanceFlags,
+}
+
+impl Default for WgpuContextOptions {
+    fn default() -> Self {
+        Self {
+            backends: wgpu_lib::Backends::all(),
+            flags: wgpu_lib::InstanceFlags::empty(),
+        }
+    }
+}
+
 impl WgpuContext {
-    /// Creates the default adapter and device.
+    /// Creates the default adapter and device without backend debug layers.
     pub async fn new() -> Result<Self, RenderError> {
+        Self::new_with(WgpuContextOptions::default()).await
+    }
+
+    /// Creates an adapter and device with explicit instance options.
+    pub async fn new_with(options: WgpuContextOptions) -> Result<Self, RenderError> {
         #[cfg(feature = "wgpu30")]
-        let descriptor = wgpu_lib::InstanceDescriptor::new_without_display_handle();
+        let descriptor = {
+            let mut descriptor = wgpu_lib::InstanceDescriptor::new_without_display_handle();
+            descriptor.backends = options.backends;
+            descriptor.flags = options.flags;
+            descriptor
+        };
         #[cfg(feature = "wgpu27")]
-        let descriptor = wgpu_lib::InstanceDescriptor::from_env_or_default();
+        let descriptor = wgpu_lib::InstanceDescriptor {
+            backends: options.backends,
+            flags: options.flags,
+            ..Default::default()
+        };
         #[cfg(feature = "wgpu30")]
         let instance = wgpu_lib::Instance::new(descriptor);
         #[cfg(feature = "wgpu27")]
@@ -77,9 +110,41 @@ impl WgpuContext {
         Ok(Self { device, queue })
     }
 
+    /// Creates a context using wgpu environment variables for instance flags.
+    ///
+    /// Standalone tools may use this to opt into validation or backend
+    /// selection; embedded renderers should prefer [`Self::new`].
+    pub async fn new_from_env() -> Result<Self, RenderError> {
+        #[cfg(feature = "wgpu30")]
+        let descriptor = wgpu_lib::InstanceDescriptor::new_without_display_handle_from_env();
+        #[cfg(feature = "wgpu27")]
+        let descriptor = wgpu_lib::InstanceDescriptor::from_env_or_default();
+        #[cfg(feature = "wgpu30")]
+        let instance = wgpu_lib::Instance::new(descriptor);
+        #[cfg(feature = "wgpu27")]
+        let instance = wgpu_lib::Instance::new(&descriptor);
+        let adapter = instance
+            .request_adapter(&wgpu_lib::RequestAdapterOptions::default())
+            .await
+            .map_err(|error| RenderError::Backend(format!("wgpu adapter: {error}")))?;
+        let (device, queue) = adapter
+            .request_device(&wgpu_lib::DeviceDescriptor {
+                label: Some("ofdbox-wgpu-env"),
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| RenderError::Backend(format!("wgpu device: {error}")))?;
+        Ok(Self { device, queue })
+    }
+
     /// Creates the context in a blocking manner.
     pub fn new_blocking() -> Result<Self, RenderError> {
         pollster::block_on(Self::new())
+    }
+
+    /// Creates the context from environment variables in a blocking manner.
+    pub fn new_blocking_from_env() -> Result<Self, RenderError> {
+        pollster::block_on(Self::new_from_env())
     }
 
     /// Reuses a device and queue already created externally.
@@ -2724,6 +2789,12 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wgpu_context_defaults_to_empty_flags() {
+        let options = super::WgpuContextOptions::default();
+        assert!(options.flags.is_empty());
+    }
+
     use super::{CachedGlyph, GlyphCache, WgpuBackend, WgpuContext, WgpuTarget, collect_paths};
     use crate::prepared::PreparedScene;
     use ofdbox_folio_ir::{

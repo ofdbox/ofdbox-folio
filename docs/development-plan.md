@@ -42,9 +42,10 @@ Non-goals for the first pass:
 - Page/render service: `SnapshotService`, `RenderService` (CPU and wgpu) and
   `PipelineService` exist with compile-time inline and `threaded` implementations,
   backend error events, `FontProviderFactory`, priority, generation filtering,
-  bounded pending requests, arbitrary `origin_px` tiles, `Started` progress,
-  `cancel()`, integration examples and a multi-page benchmark; the reader UI
-  integration remains.
+  bounded pending requests, arbitrary `origin_px` tiles, empty-flags wgpu contexts,
+  shared wgpu context/service entry points, `Started` progress, `cancel()`,
+  integration examples and a multi-page benchmark; the reader UI integration
+  remains.
 - Phase 3: started. Page cache hits are O(1) via a clock-based LRU,
   and search exposes page progress callbacks; damaged pages have a placeholder
   API and prefetch reports progress and can be cancelled; the background worker remains.

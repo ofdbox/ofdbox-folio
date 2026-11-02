@@ -11,7 +11,7 @@ Bitmap rendering for [`ofdbox-folio`](../../README.md): it rasterizes Fixed IR p
 - `CpuRenderer` (`new()` / `with_defaults()`) draws a `Page` or `Scene` with `render_page()` / `render_scene()` into an `RasterTarget`; `render_scene_region()` refreshes one tile using `RenderRegion`. `clear_caches()`, `report()` and `take_report()` expose cache control and per-image diagnostics.
 - `RenderOptions` sets the page background, the maximum decoded image pixels and the decoded-image cache byte budget.
 - `decode_image()`, `decode_image_tier()` and `detect_format()` handle PNG, JPEG, BMP, JBIG2 and TIFF bytes; `DecodedImage` can apply a grayscale mask.
-- With the `wgpu` feature (facade feature `gpu`): `WgpuContext`, `WgpuTarget`, `WgpuCapabilities`, `WgpuOptions` (image cache bytes, tile cache entries, prepared scenes, glyph entries, atlas size and atlas layers), `WgpuCacheStats` and `WgpuBackend`; without it, `WgpuBackend` is a placeholder whose `draw()` returns `Unsupported`.
+- With the `wgpu` feature (facade feature `gpu`): `WgpuContext` (`new()` uses empty `InstanceFlags`; `new_from_env()` is the opt-in diagnostic path), `WgpuContext::from_device_queue()`, `WgpuTarget`, `WgpuCapabilities`, `WgpuOptions` (image cache bytes, tile cache entries, prepared scenes, glyph entries, atlas size and atlas layers), `WgpuCacheStats` and `WgpuBackend` (`new()` or `from_shared()`); without it, `WgpuBackend` is a placeholder whose `draw()` returns `Unsupported`.
 
 ### Example
 
@@ -48,6 +48,8 @@ cargo build -p ofdbox-folio-render --features tiny-skia
 The `wgpu` feature of `ofdbox-folio-render` (facade `gpu`) provides the compute backend; `gpu` is off by default.
 
 Solid fills, strokes, linear gradients, clipping, atlas-backed text and RGBA images.
+
+Embedded renderers should share the host device with `WgpuContext::from_device_queue` + `WgpuBackend::from_shared` instead of creating a second GPU device. `WgpuContext::new()` deliberately disables backend validation/debug layers; wgpu 27 can otherwise enable the D3D12 debug layer in debug builds and reset the GPU in processes that already own a display device.
 
 The backend groups consecutive path elements into source-ordered runs, rasterizes
 each run into a transparent layer and composites it at the right position, so

@@ -85,6 +85,20 @@ impl SnapshotService {
         })
     }
 
+    /// Creates an inline render service from an existing wgpu context.
+    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+    pub fn new_with_shared_context(
+        backend: RenderBackend,
+        context: Arc<ofdbox_folio_render::WgpuContext>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            renderer: Renderer::new_shared(backend, context).map_err(Error::Service)?,
+            events: VecDeque::new(),
+            cancelled: std::collections::HashSet::new(),
+            next: 1,
+        })
+    }
+
     /// Requests a page snapshot; the result is queued for [`Self::try_recv`].
     pub fn request(&mut self, page: usize) -> u64 {
         let request = self.next;
@@ -427,6 +441,44 @@ mod tests {
 
     #[cfg(any(feature = "gpu27", feature = "gpu30"))]
     #[test]
+    fn render_service_reuses_shared_wgpu_context() {
+        let context =
+            Arc::new(ofdbox_folio_render::WgpuContext::new_blocking().expect("shared context"));
+        let scene = Scene {
+            size: Size::new(10.0, 10.0),
+            ..Scene::default()
+        };
+        let snapshot = Arc::new(PageSnapshot::from_page(Page::new(
+            PageInfo::default(),
+            scene,
+        )));
+        let mut service = RenderService::new_with_shared_context(RenderBackend::Wgpu, context)
+            .expect("shared render service");
+        let id = service.request(RenderRequest {
+            snapshot,
+            width: 4,
+            height: 4,
+            dpi: 96.0,
+            origin_px: (0.0, 0.0),
+        });
+        let mut frame = None;
+        for _ in 0..1000 {
+            while let Some(event) = service.try_recv() {
+                if let RenderEvent::Frame { request, rgba, .. } = event {
+                    assert_eq!(request, id);
+                    frame = Some(rgba);
+                }
+            }
+            if frame.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(frame.expect("shared context frame").len(), 4 * 4 * 4);
+    }
+
+    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+    #[test]
     fn render_service_wgpu_produces_a_tile() {
         use super::{RenderBackend, RenderEvent, RenderRequest, RenderService};
         let scene = Scene {
@@ -722,6 +774,23 @@ impl Renderer {
         }
     }
 
+    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+    fn new_shared(
+        backend: RenderBackend,
+        context: Arc<ofdbox_folio_render::WgpuContext>,
+    ) -> Result<Self, String> {
+        match backend {
+            RenderBackend::Cpu => Ok(Self::Cpu(ofdbox_folio_render::CpuRenderer::with_defaults())),
+            RenderBackend::Wgpu => {
+                let backend = ofdbox_folio_render::WgpuBackend::from_shared(context)
+                    .map_err(|error| error.to_string())?;
+                Ok(Self::Wgpu(backend))
+            }
+            #[cfg(test)]
+            RenderBackend::Failing => Err("intentional backend failure".to_owned()),
+        }
+    }
+
     fn render(&mut self, request: &RenderRequest) -> Result<Vec<u8>, String> {
         match self {
             Self::Cpu(renderer) => {
@@ -848,6 +917,11 @@ mod render_thread {
 
     use super::*;
 
+    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+    type SharedContext = Arc<ofdbox_folio_render::WgpuContext>;
+    #[cfg(not(any(feature = "gpu27", feature = "gpu30")))]
+    type SharedContext = ();
+
     enum Command {
         Render { id: u64, request: RenderRequest },
         Cancel { id: u64 },
@@ -865,6 +939,22 @@ mod render_thread {
     impl RenderService {
         /// Starts a worker with the selected backend.
         pub fn new_with_backend(backend: RenderBackend) -> Result<Self, Error> {
+            Self::new_with_context(backend, None)
+        }
+
+        /// Starts a worker from an existing wgpu context.
+        #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+        pub fn new_with_shared_context(
+            backend: RenderBackend,
+            context: SharedContext,
+        ) -> Result<Self, Error> {
+            Self::new_with_context(backend, Some(context))
+        }
+
+        fn new_with_context(
+            backend: RenderBackend,
+            shared: Option<SharedContext>,
+        ) -> Result<Self, Error> {
             let (command_tx, command_rx) = mpsc::channel::<Command>();
             let (event_tx, event_rx) = mpsc::channel::<RenderEvent>();
             let worker = thread::Builder::new()
@@ -872,6 +962,14 @@ mod render_thread {
                 .spawn(move || {
                     let mut renderer: Option<Renderer> = None;
                     let mut init_error: Option<String> = None;
+                    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+                    if let Some(context) = &shared {
+                        match Renderer::new_shared(backend, Arc::clone(context)) {
+                            Ok(value) => renderer = Some(value),
+                            Err(message) => init_error = Some(message),
+                        }
+                    }
+                    let _ = &shared;
                     let mut cancelled = HashSet::new();
                     while let Ok(command) = command_rx.recv() {
                         match command {
@@ -1117,6 +1215,30 @@ impl PipelineService {
         backend: RenderBackend,
     ) -> Result<Self, Error> {
         Self::open_path_with_factory_and_backend(path, Arc::new(SystemFontsFactory), backend)
+    }
+
+    /// Opens a document using an existing wgpu context.
+    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+    pub fn open_path_with_shared_context(
+        path: impl AsRef<std::path::Path>,
+        factory: Arc<dyn FontProviderFactory>,
+        backend: RenderBackend,
+        context: Arc<ofdbox_folio_render::WgpuContext>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            documents: SnapshotService::open_path_with_factory(path, factory)?,
+            renderer: RenderService::new_with_shared_context(backend, context)?,
+            pending: std::collections::HashMap::new(),
+            by_snapshot: std::collections::HashMap::new(),
+            by_render: std::collections::HashMap::new(),
+            queued: Vec::new(),
+            active_snapshots: 0,
+            max_in_flight: 2,
+            max_pending: 32,
+            floor_generation: 0,
+            events: VecDeque::new(),
+            next: 1,
+        })
     }
 
     /// Opens a document with a custom factory and render backend.
