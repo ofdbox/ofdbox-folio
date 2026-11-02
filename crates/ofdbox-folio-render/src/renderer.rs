@@ -4,7 +4,7 @@
 //! format. Page geometry is mapped to pixel coordinates via the device scale;
 //! fonts and images are cached by resource ID.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ofdbox_folio_ir::{
@@ -26,6 +26,21 @@ use crate::error::RenderError;
 use crate::image::decode_image;
 use crate::options::RenderOptions;
 use crate::prepared::{PreparedCommand, PreparedScene, scene_fingerprint};
+
+/// Backend-neutral renderer cache statistics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RenderCacheStats {
+    /// Cached parsed fonts.
+    pub fonts: usize,
+    /// Cached glyph outlines.
+    pub glyphs: usize,
+    /// Cached decoded images.
+    pub images: usize,
+    /// Decoded image bytes.
+    pub image_bytes: u64,
+    /// Whether a prepared scene is cached.
+    pub prepared_scene: bool,
+}
 
 /// An RGBA8 pixel target.
 #[derive(Clone, Debug)]
@@ -212,8 +227,8 @@ pub struct CpuRenderer {
 
 /// Decoded image cache: evicted against a byte budget; a budget of 0 disables caching entirely.
 struct PixmapCache {
-    entries: HashMap<u64, Arc<Pixmap>>,
-    order: VecDeque<u64>,
+    entries: HashMap<u64, (Arc<Pixmap>, u64)>,
+    clock: u64,
     bytes: u64,
     budget: u64,
 }
@@ -222,14 +237,17 @@ impl PixmapCache {
     fn new(budget: u64) -> Self {
         Self {
             entries: HashMap::new(),
-            order: VecDeque::new(),
+            clock: 0,
             bytes: 0,
             budget,
         }
     }
 
-    fn get(&self, id: u64) -> Option<Arc<Pixmap>> {
-        self.entries.get(&id).cloned()
+    fn get(&mut self, id: u64) -> Option<Arc<Pixmap>> {
+        self.clock = self.clock.wrapping_add(1);
+        let entry = self.entries.get_mut(&id)?;
+        entry.1 = self.clock;
+        Some(Arc::clone(&entry.0))
     }
 
     fn insert(&mut self, id: u64, pixmap: Arc<Pixmap>) {
@@ -240,23 +258,32 @@ impl PixmapCache {
         if self.budget == 0 || size > self.budget {
             return;
         }
+        self.clock = self.clock.wrapping_add(1);
         while self.bytes + size > self.budget {
-            let Some(oldest) = self.order.pop_front() else {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, used))| *used)
+                .map(|(id, _)| *id)
+            else {
                 break;
             };
-            if let Some(removed) = self.entries.remove(&oldest) {
+            if let Some((removed, _)) = self.entries.remove(&oldest) {
                 self.bytes = self.bytes.saturating_sub(pixmap_bytes(&removed));
             }
         }
-        self.order.push_back(id);
-        self.entries.insert(id, pixmap);
         self.bytes += size;
+        self.entries.insert(id, (pixmap, self.clock));
     }
 
     fn clear(&mut self) {
         self.entries.clear();
-        self.order.clear();
+        self.clock = 0;
         self.bytes = 0;
+    }
+
+    fn stats(&self) -> (usize, u64) {
+        (self.entries.len(), self.bytes)
     }
 }
 
@@ -280,6 +307,18 @@ impl CpuRenderer {
     /// Creates a renderer with default options.
     pub fn with_defaults() -> Self {
         Self::new(RenderOptions::default())
+    }
+
+    /// Current cache occupancy.
+    pub fn cache_stats(&self) -> RenderCacheStats {
+        let (images, image_bytes) = self.pixmaps.stats();
+        RenderCacheStats {
+            fonts: self.fonts.len(),
+            glyphs: 0,
+            images,
+            image_bytes,
+            prepared_scene: self.prepared.is_some(),
+        }
     }
 
     /// Clears the font, image and rendering resource caches.
@@ -1006,17 +1045,17 @@ mod tests {
 
     #[test]
     fn evicts_pixmaps_over_budget() {
-        // Two 2×2 RGBA images exactly fill the budget, so a third evicts the earliest inserted entry.
+        // Two 2×2 RGBA images exactly fill the budget; touching entry 1 makes entry 2 the LRU victim.
         let mut cache = PixmapCache::new(2 * 2 * 4 * 2);
         cache.insert(1, Arc::new(Pixmap::new(2, 2)));
         cache.insert(2, Arc::new(Pixmap::new(2, 2)));
         assert!(cache.get(1).is_some());
         cache.insert(3, Arc::new(Pixmap::new(2, 2)));
         assert!(
-            cache.get(1).is_none(),
-            "the earliest cache entry should be evicted"
+            cache.get(2).is_none(),
+            "the least recently used entry should be evicted"
         );
-        assert!(cache.get(2).is_some());
+        assert!(cache.get(1).is_some());
         assert!(cache.get(3).is_some());
         assert!(cache.bytes <= cache.budget);
     }

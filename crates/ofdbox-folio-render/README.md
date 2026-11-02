@@ -6,6 +6,7 @@ Bitmap rendering for [`ofdbox-folio`](../../README.md): it rasterizes Fixed IR p
 
 ## Public Entry Points
 
+- `RenderCacheStats` reports cached fonts, glyphs, images and image bytes for the CPU and tiny-skia renderers; `cache_stats()` on each backend returns it.
 - `PreparedScene::from_scene()` resolves a Fixed IR scene into a backend-neutral command list with explicit layer/clip commands; `CpuRenderer` and `TinySkiaRenderer` expose `render_prepared()` and `render_prepared_region()` and consume it directly; the wgpu backend consumes it for path, text and image draws and caches the current page's prepared scene.
 - `CpuRenderer` (`new()` / `with_defaults()`) draws a `Page` or `Scene` with `render_page()` / `render_scene()` into an `RasterTarget`; `render_scene_region()` refreshes one tile using `RenderRegion`. `clear_caches()`, `report()` and `take_report()` expose cache control and per-image diagnostics.
 - `RenderOptions` sets the page background, the maximum decoded image pixels and the decoded-image cache byte budget.

@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 #[cfg(all(feature = "wgpu30", not(feature = "wgpu27")))]
@@ -541,7 +542,9 @@ pub struct WgpuBackend {
     /// Font outlines keyed by `(font asset pointer, glyph id)`.
     glyph_cache: Mutex<GlyphCache>,
     /// Parsed font faces keyed by `(font asset pointer, face index)`.
-    font_faces: Mutex<HashMap<(usize, u32), Arc<CachedFace>>>,
+    font_faces: Mutex<HashMap<(u64, u32), Arc<CachedFace>>>,
+    /// Content hashes keyed by `(font pointer, face index)`.
+    font_hashes: Mutex<HashMap<(usize, u32), u64>>,
     /// Already-flattened scene geometry per scene / dpi / region.
     path_cache: Mutex<HashMap<TileCacheKey, CachedGeometry>>,
     /// Backend-neutral prepared scenes, shared by all tiles of one page.
@@ -652,6 +655,7 @@ impl WgpuBackend {
             layout,
             glyph_cache: Mutex::new(GlyphCache::new(options.max_glyph_cache_entries)),
             font_faces: Mutex::new(HashMap::new()),
+            font_hashes: Mutex::new(HashMap::new()),
             path_cache: Mutex::new(HashMap::new()),
             prepared_cache: Mutex::new(HashMap::new()),
             atlas,
@@ -674,6 +678,10 @@ impl WgpuBackend {
             .unwrap_or_else(|error| error.into_inner())
             .clear();
         self.font_faces
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        self.font_hashes
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clear();
@@ -900,6 +908,7 @@ impl WgpuBackend {
                             },
                             &self.glyph_cache,
                             &self.font_faces,
+                            &self.font_hashes,
                             &mut atlas,
                             &self.context.queue,
                             &mut instances,
@@ -1973,7 +1982,8 @@ fn emit_text_instances(
     origin_px: (f64, f64),
     viewport: Viewport,
     glyph_cache: &Mutex<GlyphCache>,
-    font_faces: &Mutex<HashMap<(usize, u32), Arc<CachedFace>>>,
+    font_faces: &Mutex<HashMap<(u64, u32), Arc<CachedFace>>>,
+    font_hashes: &Mutex<HashMap<(usize, u32), u64>>,
     atlas: &mut GpuAtlas,
     queue: &wgpu_lib::Queue,
     instances: &mut Vec<GlyphInstance>,
@@ -2021,7 +2031,24 @@ fn emit_text_instances(
         }
         Some(_) | None => return,
     };
-    let face_key = (Arc::as_ptr(&text.font) as usize, text.font.face_index());
+    let font_ptr = Arc::as_ptr(&text.font) as usize;
+    let face_index = text.font.face_index();
+    let font_key = {
+        let mut hashes = font_hashes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(hash) = hashes.get(&(font_ptr, face_index)) {
+            *hash
+        } else {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            text.font.data().hash(&mut hasher);
+            face_index.hash(&mut hasher);
+            let hash = hasher.finish();
+            hashes.insert((font_ptr, face_index), hash);
+            hash
+        }
+    };
+    let face_key = (font_key, face_index);
     let face = {
         let faces = font_faces.lock().unwrap_or_else(|error| error.into_inner());
         match faces.get(&face_key) {
@@ -2095,7 +2122,7 @@ fn emit_text_instances(
     } else {
         [0.0; 4]
     };
-    let font_key = Arc::as_ptr(&text.font) as usize;
+    let font_key = font_key as usize;
     for glyph in &text.run.glyphs {
         let Ok(glyph_id) = u16::try_from(glyph.id) else {
             continue;

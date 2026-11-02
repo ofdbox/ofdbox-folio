@@ -17,7 +17,7 @@ use crate::error::RenderError;
 use crate::image::decode_image;
 use crate::options::RenderOptions;
 use crate::prepared::{PreparedClip, PreparedCommand, PreparedScene, scene_fingerprint};
-use crate::renderer::{PixelRect, RasterTarget, RenderRegion};
+use crate::renderer::{PixelRect, RasterTarget, RenderCacheStats, RenderRegion};
 
 /// A software renderer that rasterizes Fixed IR with `tiny-skia`.
 pub struct TinySkiaRenderer {
@@ -58,6 +58,17 @@ impl TinySkiaRenderer {
     pub fn take_report(&mut self) -> ofdbox_folio_ir::Report {
         let diagnostics = std::mem::take(&mut self.report.diagnostics);
         ofdbox_folio_ir::Report { diagnostics }
+    }
+
+    /// Current cache occupancy.
+    pub fn cache_stats(&self) -> RenderCacheStats {
+        RenderCacheStats {
+            fonts: 0,
+            glyphs: self.glyphs.len(),
+            images: self.images.len(),
+            image_bytes: self.image_bytes as u64,
+            prepared_scene: self.prepared.is_some(),
+        }
     }
 
     /// Drops cached glyph outlines and decoded images.

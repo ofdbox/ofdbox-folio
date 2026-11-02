@@ -26,10 +26,11 @@ Non-goals for the first pass:
 - Phase 0: complete.
 - Phase 1: complete. All three renderers consume `PreparedScene` (paths,
   text and images) and cache the current page's prepared scene across tiles.
-- Phase 2: in progress. The wgpu image texture cache has a configurable byte
-  budget, the glyph outline cache is an entry-bounded LRU, the atlas size is
-  configurable and a full atlas is reset before the next frame, and detailed
-  cache statistics are exposed. Fine-grained per-entry atlas eviction remains.
+- Phase 2: in progress. Font faces and glyph/atlas keys are content-addressed,
+  the wgpu image cache has a configurable byte budget, glyph outlines are an
+  entry-bounded LRU, the CPU/Tiny image caches are LRUs, and all three backends
+  expose cache statistics. Fine-grained per-entry atlas eviction, batched atlas
+  uploads and DPI-tier image decoding remain.
 - Phase 3: started. Page cache hits are O(1) via a clock-based LRU,
   and search exposes page progress callbacks; damaged pages have a placeholder
   API, while the background worker and cancellable prefetch remain.
