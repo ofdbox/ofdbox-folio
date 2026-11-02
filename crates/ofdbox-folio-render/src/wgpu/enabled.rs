@@ -20,6 +20,7 @@ use ofdbox_folio_ir::{
 
 use crate::RenderError;
 use crate::image::decode_image;
+use crate::prepared::{PreparedClip, PreparedCommand, PreparedScene};
 
 use super::atlas::{GlyphInstance, GpuAtlas};
 use super::image::ImagePipeline;
@@ -689,7 +690,7 @@ impl WgpuBackend {
                         let start = u32::try_from(instances.len())
                             .map_err(|_| RenderError::Backend("too many text glyphs".into()))?;
                         emit_text_instances(
-                            text,
+                            &text,
                             world,
                             opacity,
                             clip,
@@ -1400,10 +1401,10 @@ struct ClipDraw {
     rule: FillRule,
 }
 
-/// One ordered text or image draw from the scene tree.
-enum Decoration<'a> {
+/// One ordered text or image draw from the prepared scene.
+enum Decoration {
     Text {
-        text: &'a ofdbox_folio_ir::TextElement,
+        text: Box<ofdbox_folio_ir::TextElement>,
         world: Matrix,
         opacity: f32,
         clip: Option<[f32; 4]>,
@@ -1418,7 +1419,14 @@ enum Decoration<'a> {
     },
 }
 
-/// Collect text and image draws in scene order.
+#[derive(Clone)]
+struct DecorationFrame {
+    clip: Option<[f32; 4]>,
+    clip_path: Option<ClipDraw>,
+    opacity: f32,
+}
+
+/// Collect text and image draws from a prepared scene.
 ///
 /// Paths are still collected separately and drawn first; this ordering is used to
 /// preserve the relative stacking of images and text.
@@ -1429,119 +1437,165 @@ fn collect_decorations(
     origin_px: (f64, f64),
     width: u32,
     height: u32,
-) -> Vec<Decoration<'_>> {
+) -> Vec<Decoration> {
+    let prepared = PreparedScene::from_scene(scene);
     let viewport = Viewport {
         min_x: -1.0,
         min_y: -1.0,
         max_x: width as f32 + 1.0,
         max_y: height as f32 + 1.0,
     };
+    let scale = dpi / 25.4;
     let mut decorations = Vec::new();
+    let mut frames = vec![DecorationFrame {
+        clip: None,
+        clip_path: None,
+        opacity: 1.0,
+    }];
+    let mut skip_depth = 0_usize;
     let mut order = 0_u32;
-    collect_decoration_group(
-        &scene.root,
-        Matrix::IDENTITY,
-        1.0,
-        None,
-        None,
-        dpi / 25.4,
-        origin_px,
-        viewport,
-        &mut order,
-        &mut decorations,
-    );
+    for command in &prepared.commands {
+        match command {
+            PreparedCommand::PushLayer { clip, opacity } => {
+                if skip_depth > 0 {
+                    skip_depth += 1;
+                    continue;
+                }
+                let parent = frames.last().expect("root decoration frame");
+                let combined_opacity = parent.opacity * opacity.clamp(0.0, 1.0);
+                if combined_opacity <= 0.0 {
+                    skip_depth = 1;
+                    continue;
+                }
+                let mut frame = DecorationFrame {
+                    clip: parent.clip,
+                    clip_path: parent.clip_path.clone(),
+                    opacity: combined_opacity,
+                };
+                if let Some(clip) = clip {
+                    let Some((intersected, clip_path)) =
+                        prepared_clip(clip, scale, origin_px, viewport, frame.clip)
+                    else {
+                        skip_depth = 1;
+                        continue;
+                    };
+                    frame.clip = Some(intersected);
+                    frame.clip_path = Some(clip_path);
+                }
+                frames.push(frame);
+            }
+            PreparedCommand::PopLayer => {
+                if skip_depth > 0 {
+                    skip_depth -= 1;
+                } else if frames.len() > 1 {
+                    frames.pop();
+                }
+            }
+            PreparedCommand::DrawText {
+                font,
+                font_size,
+                transform,
+                run,
+                fill,
+                stroke,
+            } => {
+                if skip_depth > 0 {
+                    order += 1;
+                    continue;
+                }
+                let frame = frames.last().expect("root decoration frame");
+                let element = ofdbox_folio_ir::TextElement {
+                    font: Arc::clone(font),
+                    font_size: *font_size,
+                    transform: *transform,
+                    run: Arc::clone(run),
+                    fill: fill.clone(),
+                    stroke: stroke.clone(),
+                };
+                decorations.push(Decoration::Text {
+                    text: Box::new(element),
+                    world: *transform,
+                    opacity: frame.opacity,
+                    clip: frame.clip,
+                    clip_path: frame.clip_path.clone(),
+                    _order: order,
+                });
+                order += 1;
+            }
+            PreparedCommand::DrawImage {
+                image,
+                rect,
+                transform,
+                alpha,
+            } => {
+                if skip_depth > 0 {
+                    order += 1;
+                    continue;
+                }
+                let frame = frames.last().expect("root decoration frame");
+                let element = ofdbox_folio_ir::ImageElement {
+                    image: Arc::clone(image),
+                    rect: *rect,
+                    transform: *transform,
+                    alpha: *alpha,
+                };
+                if let Some(draw) = image_draw(
+                    &element,
+                    Matrix::IDENTITY,
+                    frame.opacity,
+                    frame.clip,
+                    scale,
+                    origin_px,
+                    viewport,
+                ) {
+                    decorations.push(Decoration::Image {
+                        draw,
+                        clip: frame.clip,
+                        clip_path: frame.clip_path.clone(),
+                        _order: order,
+                    });
+                }
+                order += 1;
+            }
+            PreparedCommand::FillPath { .. } | PreparedCommand::StrokePath { .. } => {
+                if skip_depth == 0 {
+                    order += 1;
+                }
+            }
+        }
+    }
     decorations
 }
 
-#[allow(clippy::too_many_arguments)]
-fn collect_decoration_group<'a>(
-    group: &'a Group,
-    parent: Matrix,
-    parent_opacity: f32,
-    parent_clip: Option<[f32; 4]>,
-    parent_clip_path: Option<ClipDraw>,
+fn prepared_clip(
+    clip: &PreparedClip,
     scale: f64,
     origin_px: (f64, f64),
     viewport: Viewport,
-    order: &mut u32,
-    decorations: &mut Vec<Decoration<'a>>,
-) {
-    let opacity = parent_opacity * group.opacity.clamp(0.0, 1.0);
-    if opacity <= 0.0 {
-        return;
+    parent: Option<[f32; 4]>,
+) -> Option<([f32; 4], ClipDraw)> {
+    let mut edges = Vec::new();
+    flatten_path(
+        &clip.path,
+        clip.transform,
+        scale,
+        origin_px,
+        true,
+        &mut edges,
+    );
+    let bounds = edge_bounds(&edges)?;
+    let intersected = intersect_bounds(parent.unwrap_or(bounds), bounds)?;
+    if !viewport.intersects(intersected) {
+        return None;
     }
-    let transform = group.transform.then(parent);
-    let mut clip = parent_clip;
-    let mut clip_path = parent_clip_path;
-    if let Some(group_clip) = &group.clip {
-        let mut clip_edges = Vec::new();
-        flatten_path(
-            &group_clip.path,
-            transform,
-            scale,
-            origin_px,
-            true,
-            &mut clip_edges,
-        );
-        let Some(bounds) = edge_bounds(&clip_edges) else {
-            return;
-        };
-        let Some(intersected) = intersect_bounds(clip.unwrap_or(bounds), bounds) else {
-            return;
-        };
-        if !viewport.intersects(intersected) {
-            return;
-        }
-        clip = Some(intersected);
-        clip_path = Some(ClipDraw {
-            path: Arc::clone(&group_clip.path),
-            transform,
-            rule: group_clip.rule,
-        });
-    }
-    for element in &group.children {
-        match element {
-            Element::Group(child) => collect_decoration_group(
-                child,
-                transform,
-                opacity,
-                clip,
-                clip_path.clone(),
-                scale,
-                origin_px,
-                viewport,
-                order,
-                decorations,
-            ),
-            Element::Text(text) => {
-                let element_order = *order;
-                *order += 1;
-                decorations.push(Decoration::Text {
-                    text,
-                    world: text.transform.then(transform),
-                    opacity,
-                    clip,
-                    clip_path: clip_path.clone(),
-                    _order: element_order,
-                });
-            }
-            Element::Image(image) => {
-                let element_order = *order;
-                *order += 1;
-                if let Some(draw) =
-                    image_draw(image, transform, opacity, clip, scale, origin_px, viewport)
-                {
-                    decorations.push(Decoration::Image {
-                        draw,
-                        clip,
-                        clip_path: clip_path.clone(),
-                        _order: element_order,
-                    });
-                }
-            }
-            _ => *order += 1,
-        }
-    }
+    Some((
+        intersected,
+        ClipDraw {
+            path: Arc::clone(&clip.path),
+            transform: clip.transform,
+            rule: clip.rule,
+        },
+    ))
 }
 
 /// Emit atlas-backed glyph quads for one text element.
