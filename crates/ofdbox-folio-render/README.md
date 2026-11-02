@@ -49,7 +49,7 @@ The `wgpu` feature of `ofdbox-folio-render` (facade `gpu`) provides the compute 
 
 Solid fills, strokes, linear gradients, clipping, atlas-backed text and RGBA images.
 
-`WgpuTarget::from_texture()` wraps a caller-owned `Rgba8Unorm` texture (storage + render attachment usage) so rendering can complete without `read_rgba()`; `texture()` and `view()` expose the backing target; `copy_to_texture()` performs the GPU-side copy into a display texture. Embedded renderers should share the host device with `WgpuContext::from_device_queue` + `WgpuBackend::from_shared` instead of creating a second GPU device. `WgpuContext::new()` deliberately disables backend validation/debug layers; wgpu 27 can otherwise enable the D3D12 debug layer in debug builds and reset the GPU in processes that already own a display device.
+`WgpuTarget::from_texture()` wraps a caller-owned `Rgba8Unorm` texture (storage + render attachment usage) so rendering can complete without `read_rgba()`; `texture()` and `view()` expose the backing target; `copy_to_texture()` performs the GPU-side copy into a display texture; `with_transparent_background()` / `with_background()` control the clear color used before wgpu rendering. Embedded renderers should share the host device with `WgpuContext::from_device_queue` + `WgpuBackend::from_shared` instead of creating a second GPU device. `WgpuContext::new()` deliberately disables backend validation/debug layers; wgpu 27 can otherwise enable the D3D12 debug layer in debug builds and reset the GPU in processes that already own a display device.
 
 The backend groups consecutive path elements into source-ordered runs, rasterizes
 each run into a transparent layer and composites it at the right position, so

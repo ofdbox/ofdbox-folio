@@ -779,8 +779,11 @@ mod tests {
         ));
         std::fs::write(&path, bytes).expect("write temp");
         let context = Arc::new(ofdbox_folio_render::WgpuContext::new_blocking().expect("context"));
+        let read_context = Arc::clone(&context);
         let target = Arc::new(
-            ofdbox_folio_render::WgpuTarget::from_pixels(&context, 20, 40, 96.0).expect("target"),
+            ofdbox_folio_render::WgpuTarget::from_pixels(&context, 20, 40, 96.0)
+                .expect("target")
+                .with_transparent_background(),
         );
         let mut pipeline = PipelineService::open_path_with_shared_context(
             &path,
@@ -821,6 +824,8 @@ mod tests {
         let (value, origin_px) = rendered.expect("fit target");
         assert!(Arc::ptr_eq(&target, &value));
         assert_eq!((target.width(), target.height()), (20, 40));
+        let pixels = target.read_rgba(&read_context).expect("read target");
+        assert_eq!(pixels[3], 0);
         assert!((origin_px.1 - 10.0).abs() < 0.01);
     }
 

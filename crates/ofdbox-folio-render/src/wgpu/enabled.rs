@@ -244,6 +244,7 @@ pub struct WgpuTarget {
     width: u32,
     height: u32,
     dpi: f64,
+    background: wgpu_lib::Color,
 }
 
 impl WgpuTarget {
@@ -285,7 +286,30 @@ impl WgpuTarget {
             width,
             height,
             dpi,
+            background: wgpu_lib::Color::WHITE,
         })
+    }
+
+    /// Sets the clear color used before rendering.
+    pub fn set_background(&mut self, color: [f64; 4]) {
+        self.background = wgpu_lib::Color {
+            r: color[0],
+            g: color[1],
+            b: color[2],
+            a: color[3],
+        };
+    }
+
+    /// Returns a target that clears to transparent.
+    pub fn with_transparent_background(mut self) -> Self {
+        self.background = wgpu_lib::Color::TRANSPARENT;
+        self
+    }
+
+    /// Returns a target with an explicit clear color.
+    pub fn with_background(mut self, color: [f64; 4]) -> Self {
+        self.set_background(color);
+        self
     }
 
     /// Creates a target from a caller-owned texture.
@@ -324,6 +348,7 @@ impl WgpuTarget {
             width,
             height,
             dpi,
+            background: wgpu_lib::Color::WHITE,
         })
     }
 
@@ -414,6 +439,7 @@ impl WgpuTarget {
             width,
             height,
             dpi,
+            background: wgpu_lib::Color::WHITE,
         })
     }
 
@@ -1410,12 +1436,7 @@ impl WgpuBackend {
             depth_slice: None,
             resolve_target: None,
             ops: wgpu_lib::Operations {
-                load: wgpu_lib::LoadOp::Clear(wgpu_lib::Color {
-                    r: 1.0,
-                    g: 1.0,
-                    b: 1.0,
-                    a: 1.0,
-                }),
+                load: wgpu_lib::LoadOp::Clear(target.background),
                 store: wgpu_lib::StoreOp::Store,
             },
         });

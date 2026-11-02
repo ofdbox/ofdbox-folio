@@ -95,7 +95,9 @@ caller-provided `WgpuTarget` and emits a target event instead of readback RGBA.
 `request_fit()` scales and centers a whole page into a requested bitmap size;
 `request_fit_to_target()` combines fit scaling with the no-readback target path;
 `PipelineEvent::Target` carries `width`, `height`, `origin_px` and `dpi` so
-callers do not need to reverse-engineer fit padding or scale.
+callers do not need to reverse-engineer fit padding or scale. Targets can be
+configured with `with_transparent_background()` when padding must be
+see-through.
 
 `service::PipelineService` chains page loading and rendering with priority,
 generation filtering and bounded pending requests. `RenderRequest` and
