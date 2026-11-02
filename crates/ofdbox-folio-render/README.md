@@ -53,8 +53,8 @@ The backend groups consecutive path elements into source-ordered runs, rasterize
 each run into a transparent layer and composites it at the right position, so
 paths, text and images follow the scene tree order. Glyphs are batched into one
 instanced text draw, and all image quads share one render pass. Text glyphs are
-rasterized into an R8 atlas and new glyph bitmaps are uploaded through one
-staging buffer per frame and copied in the main command encoder; images are decoded once and cached as GPU textures. `WgpuBackend::render_page` is the page-level entry point,
+rasterized into a four-layer R8 atlas array and new glyph bitmaps are uploaded
+through one staging buffer per frame and copied in the main command encoder; images are decoded once and cached as GPU textures. `WgpuBackend::render_page` is the page-level entry point,
 `render_page_region` renders a tile of a page for incremental refresh, and
 `examples/wgpu_compare.rs` in the facade renders a page with both backends and
 reports the pixel difference.

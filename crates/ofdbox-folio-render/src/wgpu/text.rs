@@ -38,7 +38,7 @@ impl TextPipeline {
                     visibility: wgpu_lib::ShaderStages::FRAGMENT,
                     ty: wgpu_lib::BindingType::Texture {
                         sample_type: wgpu_lib::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu_lib::TextureViewDimension::D2,
+                        view_dimension: wgpu_lib::TextureViewDimension::D2Array,
                         multisampled: false,
                     },
                     count: None,
@@ -146,6 +146,10 @@ struct Instance {
     _clip_pad: u32,
     ellipse: vec4f,
     radial_end: vec4f,
+    atlas_layer: u32,
+    _atlas_pad0: u32,
+    _atlas_pad1: u32,
+    _atlas_pad2: u32,
 };
 struct Params { size: vec2f, _pad: vec2f };
 struct VOut {
@@ -161,10 +165,11 @@ struct VOut {
     @location(8) @interpolate(flat) clip_rule: u32,
     @location(9) ellipse: vec4f,
     @location(10) radial_end: vec4f,
+    @location(11) @interpolate(flat) atlas_layer: u32,
 };
 
 @group(0) @binding(0) var<storage, read> instances: array<Instance>;
-@group(0) @binding(1) var atlas: texture_2d<f32>;
+@group(0) @binding(1) var atlas: texture_2d_array<f32>;
 @group(0) @binding(2) var atlas_sampler: sampler;
 @group(0) @binding(3) var<uniform> params: Params;
 @group(0) @binding(4) var<storage, read> clip_edges: array<vec4f>;
@@ -210,6 +215,7 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
     out.clip_rule = instance.clip_rule;
     out.ellipse = instance.ellipse;
     out.radial_end = instance.radial_end;
+    out.atlas_layer = instance.atlas_layer;
     return out;
 }
 
@@ -253,7 +259,7 @@ fn fs(in: VOut) -> @location(0) vec4f {
         t = clamp(dot(in.page - in.gradient.xy, axis) / max(dot(axis, axis), 0.0001), 0.0, 1.0);
     }
     let color = mix(in.color, in.end_color, t);
-    let alpha = textureSample(atlas, atlas_sampler, in.uv).r * color.a;
+    let alpha = textureSample(atlas, atlas_sampler, in.uv, in.atlas_layer).r * color.a;
     return vec4f(color.rgb, alpha);
 }
 "#;

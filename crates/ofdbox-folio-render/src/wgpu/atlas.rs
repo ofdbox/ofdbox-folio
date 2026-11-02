@@ -16,6 +16,8 @@ use wgpu27 as wgpu_lib;
 
 use super::enabled::flatten_path;
 
+const LAYERS: u32 = 4;
+
 /// One rasterized glyph.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct GlyphBitmap {
@@ -50,11 +52,14 @@ pub(crate) struct AtlasGlyph {
     pub width: f32,
     /// Height in pixels.
     pub height: f32,
+    /// Atlas array layer.
+    pub layer: u32,
 }
 
 /// Shelf allocator for a single square R8 atlas.
 pub(crate) struct GlyphPacker {
     size: u32,
+    layer: u32,
     next_x: u32,
     next_y: u32,
     row_height: u32,
@@ -63,9 +68,10 @@ pub(crate) struct GlyphPacker {
 
 impl GlyphPacker {
     /// Create an empty atlas of `size × size` texels.
-    pub(crate) fn new(size: u32) -> Self {
+    pub(crate) fn new(size: u32, layer: u32) -> Self {
         Self {
             size,
+            layer,
             next_x: 0,
             next_y: 0,
             row_height: 0,
@@ -120,6 +126,7 @@ impl GlyphPacker {
             top: bitmap.top,
             width: bitmap.width as f32,
             height: bitmap.height as f32,
+            layer: self.layer,
         };
         self.placed.insert((font, glyph, pixel_size, bold), packed);
         Some(packed)
@@ -360,12 +367,14 @@ pub(crate) struct GpuAtlas {
     texture: wgpu_lib::Texture,
     view: wgpu_lib::TextureView,
     sampler: wgpu_lib::Sampler,
-    packer: GlyphPacker,
+    packers: Vec<GlyphPacker>,
+    current: usize,
     full: bool,
     pending: Vec<PendingGlyph>,
 }
 
 struct PendingGlyph {
+    layer: u32,
     x: u32,
     y: u32,
     width: u32,
@@ -381,7 +390,7 @@ impl GpuAtlas {
             size: wgpu_lib::Extent3d {
                 width: size,
                 height: size,
-                depth_or_array_layers: 1,
+                depth_or_array_layers: LAYERS,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -390,7 +399,10 @@ impl GpuAtlas {
             usage: wgpu_lib::TextureUsages::TEXTURE_BINDING | wgpu_lib::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let view = texture.create_view(&wgpu_lib::TextureViewDescriptor::default());
+        let view = texture.create_view(&wgpu_lib::TextureViewDescriptor {
+            dimension: Some(wgpu_lib::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
         let sampler = device.create_sampler(&wgpu_lib::SamplerDescriptor {
             label: Some("ofdbox-glyph-sampler"),
             mag_filter: wgpu_lib::FilterMode::Linear,
@@ -401,7 +413,10 @@ impl GpuAtlas {
             texture,
             view,
             sampler,
-            packer: GlyphPacker::new(size),
+            packers: (0..LAYERS)
+                .map(|layer| GlyphPacker::new(size, layer))
+                .collect(),
+            current: 0,
             full: false,
             pending: Vec::new(),
         }
@@ -422,7 +437,11 @@ impl GpuAtlas {
     /// The texture is not zeroed: old texels are simply no longer referenced and
     /// are overwritten as new glyphs are packed.
     pub(crate) fn clear(&mut self) {
-        self.packer = GlyphPacker::new(self.packer.size);
+        let size = self.packers.first().map_or(0, |packer| packer.size);
+        self.packers = (0..LAYERS)
+            .map(|layer| GlyphPacker::new(size, layer))
+            .collect();
+        self.current = 0;
         self.full = false;
         self.pending.clear();
     }
@@ -434,7 +453,10 @@ impl GpuAtlas {
 
     /// Fraction of the atlas height already used by the packer.
     pub(crate) fn occupancy(&self) -> f32 {
-        self.packer.next_y as f32 / self.packer.size as f32
+        self.packers
+            .iter()
+            .map(|packer| packer.next_y as f32 / packer.size as f32)
+            .fold(0.0, f32::max)
     }
 
     /// Rasterize, pack and upload a glyph if it is not already cached.
@@ -449,15 +471,27 @@ impl GpuAtlas {
         path: &Path,
         units_per_em: u16,
     ) -> Option<AtlasGlyph> {
-        if let Some(packed) = self.packer.get(font, glyph, pixel_size, bold) {
-            return Some(packed);
+        for packer in &self.packers {
+            if let Some(packed) = packer.get(font, glyph, pixel_size, bold) {
+                return Some(packed);
+            }
         }
         let bitmap = if bold {
             rasterize_glyph_bold(path, units_per_em, f64::from(pixel_size), radius_px)?
         } else {
             rasterize_glyph(path, units_per_em, f64::from(pixel_size))?
         };
-        let Some(packed) = self.packer.insert(font, glyph, pixel_size, bold, &bitmap) else {
+        let mut packed = None;
+        while self.current < self.packers.len() {
+            if let Some(value) =
+                self.packers[self.current].insert(font, glyph, pixel_size, bold, &bitmap)
+            {
+                packed = Some(value);
+                break;
+            }
+            self.current += 1;
+        }
+        let Some(packed) = packed else {
             self.full = true;
             return None;
         };
@@ -470,8 +504,9 @@ impl GpuAtlas {
             data[row * padded..row * padded + width as usize].copy_from_slice(source);
         }
         self.pending.push(PendingGlyph {
-            x: (packed.u0 * self.packer.size as f32).round() as u32,
-            y: (packed.v0 * self.packer.size as f32).round() as u32,
+            layer: packed.layer,
+            x: (packed.u0 * self.packers[packed.layer as usize].size as f32).round() as u32,
+            y: (packed.v0 * self.packers[packed.layer as usize].size as f32).round() as u32,
             width,
             height,
             data,
@@ -524,7 +559,7 @@ impl GpuAtlas {
                     origin: wgpu_lib::Origin3d {
                         x: glyph.x,
                         y: glyph.y,
-                        z: 0,
+                        z: glyph.layer,
                     },
                     aspect: wgpu_lib::TextureAspect::All,
                 },
@@ -575,6 +610,9 @@ pub(crate) struct GlyphInstance {
     pub ellipse: [f32; 4],
     /// End center/radius for two-point radial gradients.
     pub radial_end: [f32; 4],
+    /// Atlas array layer.
+    pub atlas_layer: u32,
+    pub _atlas_pad: [u32; 3],
 }
 
 impl GlyphInstance {
@@ -607,6 +645,14 @@ impl GlyphInstance {
             out.extend_from_slice(&value.to_ne_bytes());
         }
         for value in self.radial_end {
+            out.extend_from_slice(&value.to_ne_bytes());
+        }
+        for value in [
+            self.atlas_layer,
+            self._atlas_pad[0],
+            self._atlas_pad[1],
+            self._atlas_pad[2],
+        ] {
             out.extend_from_slice(&value.to_ne_bytes());
         }
     }
@@ -648,7 +694,7 @@ mod tests {
             top: 0.0,
             coverage: vec![255; 16],
         };
-        let mut packer = GlyphPacker::new(16);
+        let mut packer = GlyphPacker::new(16, 0);
         let first = packer.insert(1, 2, 3, false, &bitmap).expect("first");
         let second = packer.insert(4, 5, 6, false, &bitmap).expect("second");
         assert_ne!((first.u0, first.v0), (second.u0, second.v0));

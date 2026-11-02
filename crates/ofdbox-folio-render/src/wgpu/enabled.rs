@@ -2274,6 +2274,8 @@ fn emit_text_instances(
             _clip_pad: 0,
             ellipse: gradient_ellipse,
             radial_end: gradient_radial_end,
+            atlas_layer: packed.layer,
+            _atlas_pad: [0; 3],
         };
         instances.push(instance);
     }
