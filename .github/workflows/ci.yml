@@ -74,6 +74,7 @@ jobs:
       - run: cargo clippy -p ofdbox-folio-render --no-default-features --features tiny-skia --all-targets --locked -- -D warnings
       - run: cargo test -p ofdbox-folio-render --no-default-features --features tiny-skia --locked
       - run: cargo check -p ofdbox-folio --no-default-features --features ofd,layout,tiny-skia --locked
+      - run: cargo check -p ofdbox-folio --features threaded --locked
 
   doc:
     name: doc

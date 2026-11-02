@@ -39,6 +39,8 @@ Non-goals for the first pass:
   command bounds, `DevicePlan` tile culling, spatial index, multi-slot
   `DevicePlanCache`, `PageSnapshotCache` and reader `page_snapshot()` integration
   exist.
+- Page snapshot service: `SnapshotService` exists with compile-time inline and
+  `threaded` implementations; the reader UI integration remains.
 - Phase 3: started. Page cache hits are O(1) via a clock-based LRU,
   and search exposes page progress callbacks; damaged pages have a placeholder
   API and prefetch reports progress and can be cancelled; the background worker remains.

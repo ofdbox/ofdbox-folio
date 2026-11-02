@@ -73,6 +73,18 @@ document.page(0)?;
 - **Independent text layer**: drawing order is not reading order; the text layer stores line boxes, baselines and character mappings, so selection and search do not re-parse the page.
 - **Eager DOCX layout**: DOCX is parsed into Flow IR and fully laid out when opened; page count and layout cost are paid up front, and the page cache then caches laid-out pages. Progressive first-page-first layout is not implemented yet.
 
+## Page Snapshot Service
+
+The optional `threaded` feature provides `service::SnapshotService`:
+
+```text
+without threaded: request() loads on the caller thread
+with threaded:    a worker owns Document and returns PageSnapshot values
+```
+
+Only `Arc<PageSnapshot>` crosses the thread boundary; `Document` remains
+thread-confined and does not need to implement `Send`.
+
 ## Reader Cache
 
 ```rust

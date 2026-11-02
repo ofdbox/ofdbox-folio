@@ -13,6 +13,9 @@
 mod error;
 mod reader;
 
+#[cfg(all(feature = "threaded", target_arch = "wasm32"))]
+compile_error!("the `threaded` feature is not available on wasm32");
+
 /// Unified facade error.
 pub use error::Error;
 /// Common types for cross-page selection and search.
@@ -25,6 +28,15 @@ pub use reader::{
 
 /// Flow IR, Fixed IR and reader contracts.
 pub use ofdbox_folio_ir as ir;
+
+/// Compile-time selectable page-snapshot service.
+#[cfg(any(
+    feature = "cpu",
+    feature = "gpu27",
+    feature = "gpu30",
+    feature = "tiny-skia"
+))]
+pub mod service;
 
 /// System font resolution (family name → local font file), shared by the examples and the CLI.
 pub mod fonts;
