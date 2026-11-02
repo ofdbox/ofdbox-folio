@@ -1,7 +1,7 @@
 //! wgpu compute backend; W0 supports solid-color fill paths.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 #[cfg(all(feature = "wgpu30", not(feature = "wgpu27")))]
@@ -310,6 +310,57 @@ struct CachedImage {
     _image: Arc<ImageAsset>,
     _texture: wgpu_lib::Texture,
     view: wgpu_lib::TextureView,
+    bytes: usize,
+}
+
+/// Byte-budgeted image texture cache with insertion-order eviction.
+struct ImageCache {
+    entries: HashMap<usize, Arc<CachedImage>>,
+    order: VecDeque<usize>,
+    bytes: usize,
+    max_bytes: usize,
+}
+
+impl ImageCache {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+            max_bytes,
+        }
+    }
+
+    fn get(&mut self, key: usize) -> Option<Arc<CachedImage>> {
+        let image = Arc::clone(self.entries.get(&key)?);
+        self.order.retain(|value| *value != key);
+        self.order.push_back(key);
+        Some(image)
+    }
+
+    fn insert(&mut self, key: usize, image: Arc<CachedImage>) {
+        if let Some(previous) = self.entries.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(previous.bytes);
+            self.order.retain(|value| *value != key);
+        }
+        self.bytes = self.bytes.saturating_add(image.bytes);
+        self.order.push_back(key);
+        self.entries.insert(key, image);
+        while self.bytes > self.max_bytes {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(entry.bytes);
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.bytes = 0;
+    }
 }
 
 /// One image quad in page-pixel space.
@@ -392,7 +443,7 @@ pub struct WgpuBackend {
     text_pipeline: TextPipeline,
     image_pipeline: ImagePipeline,
     /// Decoded image textures keyed by `ImageAsset` pointer.
-    image_cache: Mutex<HashMap<usize, Arc<CachedImage>>>,
+    image_cache: Mutex<ImageCache>,
     image_sampler: wgpu_lib::Sampler,
 }
 
@@ -481,7 +532,7 @@ impl WgpuBackend {
             atlas,
             text_pipeline,
             image_pipeline,
-            image_cache: Mutex::new(HashMap::new()),
+            image_cache: Mutex::new(ImageCache::new(64 * 1024 * 1024)),
             image_sampler,
         })
     }
@@ -1195,9 +1246,9 @@ impl WgpuBackend {
             .image_cache
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .get(&key)
+            .get(key)
         {
-            return Some(Arc::clone(cached));
+            return Some(cached);
         }
         let mut decoded = decode_image(image.format, &image.encoded, 64_000_000).ok()?;
         if let Some(mask) = &image.mask
@@ -1259,6 +1310,7 @@ impl WgpuBackend {
             _image: Arc::clone(image),
             _texture: texture,
             view,
+            bytes: width as usize * height as usize * 4,
         });
         self.image_cache
             .lock()

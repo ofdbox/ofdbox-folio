@@ -26,6 +26,8 @@ Non-goals for the first pass:
 - Phase 0: complete.
 - Phase 1: in progress. `PreparedScene` is consumed by the CPU and tiny-skia
   renderers; wgpu and the prepared-scene cache still need to migrate.
+- Phase 2: started. The wgpu image texture cache now has a 64 MiB byte budget;
+  atlas/glyph eviction and configurable budgets remain.
 
 ## Phase 0: Feature matrix and contract correctness
 
