@@ -56,8 +56,24 @@ jobs:
       - run: cargo clippy -p ofdbox-folio-render --no-default-features --features wgpu30 --all-targets --locked -- -D warnings
       - run: cargo check -p ofdbox-folio --no-default-features --features layout,cpu,gpu27 --locked
       - run: cargo check -p ofdbox-folio --no-default-features --features layout,cpu,gpu30 --locked
+      - run: cargo check -p ofdbox-folio --no-default-features --features ofd,layout,gpu27 --locked
+      - run: cargo check -p ofdbox-folio --no-default-features --features ofd,layout,gpu30 --locked
       - run: cargo test -p ofdbox-folio-render --no-default-features --features wgpu27 --locked -- --test-threads=1
       - run: cargo test -p ofdbox-folio-render --no-default-features --features wgpu30 --locked -- --test-threads=1
+
+  tiny-skia:
+    name: tiny-skia
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -p ofdbox-folio-render --no-default-features --features tiny-skia --all-targets --locked -- -D warnings
+      - run: cargo test -p ofdbox-folio-render --no-default-features --features tiny-skia --locked
+      - run: cargo check -p ofdbox-folio --no-default-features --features ofd,layout,tiny-skia --locked
 
   doc:
     name: doc

@@ -58,7 +58,10 @@ reports the pixel difference.
 
 ## Known Limitations
 
-- Radial gradients and blend modes are not yet implemented in the GPU backend.
+- GPU path radial gradients and blend modes are not yet implemented; text
+  radial gradients are supported.
+- The tiny-skia backend currently draws text fills only: text strokes and
+  synthetic bold text are not yet implemented.
 - GPU text supports solid, linear-gradient and radial-gradient fills; synthetic
   bold is rendered by dilating the glyph coverage bitmap.
 - Text and image quads are clipped per fragment against the clip path edges; a

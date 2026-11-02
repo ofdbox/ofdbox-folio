@@ -6,11 +6,13 @@ use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(all(feature = "docx", feature = "layout"))]
+use ofdbox_folio_ir::{FontError, FontRequest};
+
 use ofdbox_folio_ir::{
     AttachmentId, AttachmentInfo, DocumentError, DocumentInfo, DocumentSource, FixedDocument,
-    FixedDocumentSource, FlowDocument, FontError, FontProvider, FontRequest, Metadata, OutlineItem,
-    Page, PageInfo, Point, SearchHit, SearchQuery, Selection, SourceFormat, TextPosition,
-    TextRange,
+    FixedDocumentSource, FlowDocument, FontProvider, Metadata, OutlineItem, Page, PageInfo, Point,
+    SearchHit, SearchQuery, Selection, SourceFormat, TextPosition, TextRange,
 };
 
 use crate::error::Error;
@@ -544,8 +546,10 @@ fn detect_format(bytes: &[u8]) -> Result<SourceFormat, Error> {
 }
 
 /// Font provider used when the caller does not supply one.
+#[cfg(all(feature = "docx", feature = "layout"))]
 struct NoFonts;
 
+#[cfg(all(feature = "docx", feature = "layout"))]
 impl FontProvider for NoFonts {
     fn load(&mut self, _request: &FontRequest<'_>) -> Result<Option<Arc<[u8]>>, FontError> {
         Ok(None)

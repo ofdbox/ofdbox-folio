@@ -31,7 +31,12 @@ pub mod fonts;
 pub use ofdbox_folio_layout as layout;
 
 /// Bitmap rendering of Fixed IR.
-#[cfg(any(feature = "cpu", feature = "gpu"))]
+#[cfg(any(
+    feature = "cpu",
+    feature = "gpu27",
+    feature = "gpu30",
+    feature = "tiny-skia"
+))]
 pub use ofdbox_folio_render as render;
 
 /// Read/write adapter between OFD and Fixed IR.
