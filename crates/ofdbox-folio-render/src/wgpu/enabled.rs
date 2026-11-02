@@ -103,7 +103,7 @@ impl WgpuContext {
 }
 
 /// Resource limits for a wgpu backend.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WgpuOptions {
     /// Byte budget for decoded image textures.
     pub max_image_cache_bytes: usize,
@@ -115,6 +115,8 @@ pub struct WgpuOptions {
     pub max_glyph_cache_entries: usize,
     /// Glyph atlas edge length in pixels.
     pub atlas_size: u32,
+    /// Reset the atlas before a frame when this fraction is already packed.
+    pub atlas_reset_threshold: f32,
 }
 
 /// Detailed cache occupancy for a wgpu backend.
@@ -142,6 +144,7 @@ impl Default for WgpuOptions {
             max_prepared_scenes: 8,
             max_glyph_cache_entries: 16_384,
             atlas_size: 4096,
+            atlas_reset_threshold: 0.9,
         }
     }
 }
@@ -865,7 +868,9 @@ impl WgpuBackend {
         let clip_buffer;
         {
             let mut atlas = self.atlas.lock().unwrap_or_else(|error| error.into_inner());
-            if atlas.is_full() {
+            if atlas.is_full()
+                || atlas.occupancy() > self.options.atlas_reset_threshold.clamp(0.5, 1.0)
+            {
                 atlas.clear();
             }
             let mut instances = Vec::new();
