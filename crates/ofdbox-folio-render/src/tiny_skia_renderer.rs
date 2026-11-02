@@ -8,6 +8,7 @@ use ofdbox_folio_ir::{
     LineCap, LineJoin, Matrix, Page, Paint, Path, PathElement, PathSegment, Point, Rgba, Scene,
     StrokeStyle, TextElement,
 };
+use owned_ttf_parser::AsFaceRef;
 use tiny_skia::{
     Color, FillRule as SkFillRule, IntSize, LinearGradient, Mask, Paint as SkPaint, PathBuilder,
     Pixmap, PixmapPaint, Point as SkPoint, RadialGradient, Shader, SpreadMode, Stroke, Transform,
@@ -24,6 +25,7 @@ pub struct TinySkiaRenderer {
     options: RenderOptions,
     report: Report,
     glyphs: HashMap<(usize, u16), Arc<tiny_skia::Path>>,
+    faces: HashMap<(usize, u32), Arc<owned_ttf_parser::OwnedFace>>,
     images: HashMap<(u64, u32), Arc<Pixmap>>,
     image_order: VecDeque<(u64, u32)>,
     image_bytes: usize,
@@ -43,6 +45,7 @@ impl TinySkiaRenderer {
             options,
             report: Report::default(),
             glyphs: HashMap::new(),
+            faces: HashMap::new(),
             images: HashMap::new(),
             image_order: VecDeque::new(),
             image_bytes: 0,
@@ -78,6 +81,7 @@ impl TinySkiaRenderer {
         self.prepared = None;
         self.device_plans.clear();
         self.glyphs.clear();
+        self.faces.clear();
         self.images.clear();
         self.image_order.clear();
         self.image_bytes = 0;
@@ -222,12 +226,17 @@ impl TinySkiaRenderer {
     ) -> Result<(), RenderError> {
         let width = u32::from(target.width());
         let height = u32::from(target.height());
-        let mut frames = vec![Pixmap::new(width, height).ok_or(RenderError::InvalidPage)?];
+        let mut frames = vec![Some(
+            Pixmap::new(width, height).ok_or(RenderError::InvalidPage)?,
+        )];
         fill_background(
-            frames.last_mut().expect("base frame"),
+            frames
+                .last_mut()
+                .and_then(|frame| frame.as_mut())
+                .expect("base frame"),
             self.options.background,
         );
-        let mut layers: Vec<(Option<PreparedClip>, f32)> = Vec::new();
+        let mut layers: Vec<(Option<PreparedClip>, f32, bool)> = Vec::new();
         for (index, command) in prepared.commands.iter().enumerate() {
             if device_plan.is_some_and(|plan| !plan.is_visible(index)) {
                 continue;
@@ -239,17 +248,28 @@ impl TinySkiaRenderer {
             }
             match command {
                 PreparedCommand::PushLayer { clip, opacity } => {
-                    frames.push(Pixmap::new(width, height).ok_or(RenderError::InvalidPage)?);
-                    layers.push((clip.clone(), *opacity));
+                    let needs_layer = clip.is_some() || *opacity < 1.0;
+                    frames.push(if needs_layer {
+                        Some(Pixmap::new(width, height).ok_or(RenderError::InvalidPage)?)
+                    } else {
+                        None
+                    });
+                    layers.push((clip.clone(), *opacity, needs_layer));
                 }
                 PreparedCommand::PopLayer => {
                     let Some(layer) = frames.pop() else {
                         continue;
                     };
-                    let Some((clip, opacity)) = layers.pop() else {
+                    let Some((clip, opacity, needs_layer)) = layers.pop() else {
                         continue;
                     };
-                    let Some(parent) = frames.last_mut() else {
+                    if !needs_layer {
+                        continue;
+                    }
+                    let Some(layer) = layer else {
+                        continue;
+                    };
+                    let Some(parent) = frames.last_mut().and_then(|frame| frame.as_mut()) else {
                         continue;
                     };
                     let mask = clip.as_ref().map(|clip| {
@@ -295,7 +315,10 @@ impl TinySkiaRenderer {
                         rule: *rule,
                     };
                     self.draw_path(
-                        frames.last_mut().expect("current frame"),
+                        frames
+                            .last_mut()
+                            .and_then(|frame| frame.as_mut())
+                            .expect("current frame"),
                         &element,
                         Matrix::IDENTITY,
                         None,
@@ -315,7 +338,10 @@ impl TinySkiaRenderer {
                         rule: FillRule::NonZero,
                     };
                     self.draw_path(
-                        frames.last_mut().expect("current frame"),
+                        frames
+                            .last_mut()
+                            .and_then(|frame| frame.as_mut())
+                            .expect("current frame"),
                         &element,
                         Matrix::IDENTITY,
                         None,
@@ -335,7 +361,10 @@ impl TinySkiaRenderer {
                         alpha: *alpha,
                     };
                     self.draw_image(
-                        frames.last_mut().expect("current frame"),
+                        frames
+                            .last_mut()
+                            .and_then(|frame| frame.as_mut())
+                            .expect("current frame"),
                         &element,
                         Matrix::IDENTITY,
                         None,
@@ -359,7 +388,10 @@ impl TinySkiaRenderer {
                         stroke: stroke.clone(),
                     };
                     self.draw_text(
-                        frames.last_mut().expect("current frame"),
+                        frames
+                            .last_mut()
+                            .and_then(|frame| frame.as_mut())
+                            .expect("current frame"),
                         &element,
                         Matrix::IDENTITY,
                         None,
@@ -367,7 +399,7 @@ impl TinySkiaRenderer {
                 }
             }
         }
-        let data = frames[0].data();
+        let data = frames[0].as_ref().expect("base frame").data();
         let out = target.data_mut();
         for (target_pixel, source) in out
             .as_chunks_mut::<4>()
@@ -443,10 +475,10 @@ impl TinySkiaRenderer {
         let Some(fill) = &element.fill else {
             return;
         };
-        let Ok(face) = ttf_parser::Face::parse(element.font.data(), element.font.face_index())
-        else {
+        let Some(face) = self.face(&element.font) else {
             return;
         };
+        let face = face.as_face_ref();
         let units = f64::from(face.units_per_em());
         if units == 0.0 {
             return;
@@ -465,7 +497,7 @@ impl TinySkiaRenderer {
             let Ok(glyph_id) = u16::try_from(glyph.id) else {
                 continue;
             };
-            let Some(glyph_path) = self.glyph_path(&element.font, &face, glyph_id) else {
+            let Some(glyph_path) = self.glyph_path(&element.font, face, glyph_id) else {
                 continue;
             };
             let transform = Matrix::scale(glyph_scale, -glyph_scale)
@@ -525,6 +557,18 @@ impl TinySkiaRenderer {
             to_skia_transform(transform),
             mask,
         );
+    }
+
+    fn face(&mut self, font: &Arc<FontAsset>) -> Option<Arc<owned_ttf_parser::OwnedFace>> {
+        let key = (Arc::as_ptr(font) as usize, font.face_index());
+        if let Some(face) = self.faces.get(&key) {
+            return Some(Arc::clone(face));
+        }
+        let face = Arc::new(
+            owned_ttf_parser::OwnedFace::from_vec(font.data().to_vec(), font.face_index()).ok()?,
+        );
+        self.faces.insert(key, Arc::clone(&face));
+        Some(face)
     }
 
     fn glyph_path(
