@@ -557,6 +557,20 @@ impl PageSnapshot {
         }
     }
 
+    /// Builds a render-only snapshot from an already parsed plan.
+    ///
+    /// Text and links are intentionally empty; readers that need them should
+    /// keep their own document session and use this only for rendering.
+    pub fn from_plan(plan: Arc<RenderPlan>) -> Self {
+        Self {
+            info: PageInfo::default(),
+            plan,
+            text: Arc::new(TextLayer::default()),
+            links: Arc::from([]),
+            diagnostics: Vec::new(),
+        }
+    }
+
     /// The render plan.
     pub fn plan(&self) -> &RenderPlan {
         &self.plan
