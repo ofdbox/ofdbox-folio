@@ -50,9 +50,14 @@ Non-goals for the first pass:
   `Started` progress, `cancel()`,
   integration examples and a multi-page benchmark; the reader consumes render
   plans through its own plan scheduler instead of reopening documents.
-- Phase 3: started. Page cache hits are O(1) via a clock-based LRU,
+- Phase 3: in progress. Page cache hits are O(1) via a clock-based LRU,
   and search exposes page progress callbacks; damaged pages have a placeholder
-  API and prefetch reports progress and can be cancelled; the background worker remains.
+  API and prefetch reports progress and can be cancelled. Format page parsing, not
+  plan building, dominates first-visit latency (measured 5–200 ms per OFD/PDF page
+  versus about 1–2 ms for compaction and `RenderPlan` building), and it has to run
+  on the session thread because `Document` is thread-confined; the reader therefore
+  prefetches pages during idle instead of blocking the scroll path, and folio's
+  background `PageLoader` (one worker owns the document source) remains.
 
 ## Phase 0: Feature matrix and contract correctness
 
