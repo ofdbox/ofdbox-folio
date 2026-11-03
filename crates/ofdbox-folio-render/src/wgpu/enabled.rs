@@ -226,7 +226,8 @@ pub struct WgpuOptions {
     pub atlas_size: u32,
     /// Number of glyph atlas array layers.
     pub atlas_layers: u32,
-    /// Reset the atlas before a frame when this fraction is already packed.
+    /// Evict least-recently-used glyphs at frame start while the packed fraction
+    /// of the atlas is above this value.
     pub atlas_reset_threshold: f32,
 }
 
@@ -243,7 +244,7 @@ pub struct WgpuCacheStats {
     pub images: usize,
     /// Image texture bytes.
     pub image_bytes: usize,
-    /// Fraction of the glyph atlas height currently packed.
+    /// Fraction of the glyph atlas area currently packed.
     pub atlas_occupancy: f32,
 }
 
@@ -786,8 +787,6 @@ pub struct WgpuBackend {
     /// Current-tile DevicePlan cache.
     device_plans: Mutex<crate::prepared::DevicePlanCache>,
     atlas: Mutex<GpuAtlas>,
-    /// Scene that owns the glyphs currently packed in the atlas.
-    atlas_scene: Mutex<usize>,
     text_pipeline: TextPipeline,
     image_pipeline: ImagePipeline,
     /// Decoded image textures keyed by `ImageAsset` pointer.
@@ -890,6 +889,7 @@ impl WgpuBackend {
             &context.device,
             options.atlas_size.max(1024),
             options.atlas_layers,
+            options.atlas_reset_threshold,
         ));
         let text_pipeline = TextPipeline::new(&context.device);
         let image_pipeline = ImagePipeline::new(&context.device);
@@ -912,7 +912,6 @@ impl WgpuBackend {
             prepared_cache: Mutex::new(HashMap::new()),
             device_plans: Mutex::new(crate::prepared::DevicePlanCache::default()),
             atlas,
-            atlas_scene: Mutex::new(0),
             text_pipeline,
             image_pipeline,
             image_cache: Mutex::new(ImageCache::new(options.max_image_cache_bytes)),
@@ -951,10 +950,6 @@ impl WgpuBackend {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clear();
-        *self
-            .atlas_scene
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = 0;
         self.atlas
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -1178,21 +1173,7 @@ impl WgpuBackend {
             .create_command_encoder(&Default::default());
         {
             let mut atlas = self.atlas.lock().unwrap_or_else(|error| error.into_inner());
-            let scene_id = Arc::as_ptr(&prepared) as usize;
-            let mut atlas_scene = self
-                .atlas_scene
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if *atlas_scene != scene_id {
-                atlas.clear();
-                *atlas_scene = scene_id;
-            }
-            drop(atlas_scene);
-            if atlas.is_full()
-                || atlas.occupancy() > self.options.atlas_reset_threshold.clamp(0.5, 1.0)
-            {
-                atlas.clear();
-            }
+            atlas.begin_frame();
             let mut instances = Vec::new();
             for decoration in decorations {
                 match decoration {
@@ -1320,6 +1301,7 @@ impl WgpuBackend {
                         contents: &clip_data,
                         usage: wgpu_lib::BufferUsages::STORAGE,
                     });
+            atlas.end_frame();
             atlas.flush(&self.context.device, &self.context.queue, &mut encoder);
             if !instances.is_empty() {
                 let mut instance_data = Vec::with_capacity(instances.len() * 160);
