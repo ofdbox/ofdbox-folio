@@ -5,6 +5,7 @@ use std::io::Cursor;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(all(feature = "docx", feature = "layout"))]
 use ofdbox_folio_ir::{FontError, FontRequest};
@@ -25,6 +26,50 @@ use ofdbox_folio_ir::{
 use ofdbox_folio_render::{PageSnapshot, PageSnapshotCache};
 
 use crate::error::Error;
+
+/// Process-wide document and page parsing counters.
+///
+/// A page is parsed only when it misses every reader cache; these counters make
+/// that observable for benchmarks and regression tests that need to prove a
+/// viewer does not parse the same page twice (for example once for layout and
+/// once for rendering).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ParseStats {
+    /// Documents opened in this process.
+    pub documents_opened: u64,
+    /// Pages parsed from a document source in this process.
+    pub pages_parsed: u64,
+    /// Page snapshots built from a freshly parsed page.
+    pub snapshots_parsed: u64,
+}
+
+static DOCUMENTS_OPENED: AtomicU64 = AtomicU64::new(0);
+static PAGES_PARSED: AtomicU64 = AtomicU64::new(0);
+static SNAPSHOTS_PARSED: AtomicU64 = AtomicU64::new(0);
+
+/// Returns the process-wide document and page parsing counters.
+pub fn parse_stats() -> ParseStats {
+    ParseStats {
+        documents_opened: DOCUMENTS_OPENED.load(Ordering::Relaxed),
+        pages_parsed: PAGES_PARSED.load(Ordering::Relaxed),
+        snapshots_parsed: SNAPSHOTS_PARSED.load(Ordering::Relaxed),
+    }
+}
+
+/// Resets the process-wide document and page parsing counters to zero.
+pub fn reset_parse_stats() {
+    DOCUMENTS_OPENED.store(0, Ordering::Relaxed);
+    PAGES_PARSED.store(0, Ordering::Relaxed);
+    SNAPSHOTS_PARSED.store(0, Ordering::Relaxed);
+}
+
+fn record_document_opened() {
+    DOCUMENTS_OPENED.fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_page_parsed() {
+    PAGES_PARSED.fetch_add(1, Ordering::Relaxed);
+}
 
 /// Page cache options.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -234,6 +279,7 @@ pub struct Document {
 impl Document {
     /// Creates a reader from an existing document source.
     pub fn from_source(source: Box<dyn DocumentSource>, options: ReaderOptions) -> Self {
+        record_document_opened();
         Self {
             source,
             cache: PageCache::new(options.cache.max_bytes),
@@ -351,6 +397,7 @@ impl Document {
                 return Err(Error::UnsupportedFormat(format!("{format:?}")));
             }
         };
+        record_document_opened();
         Ok(Self {
             source,
             cache: PageCache::new(cache.max_bytes),
@@ -411,8 +458,15 @@ impl Document {
         if let Some(page) = self.cache.get(index) {
             return Ok(page);
         }
-        let page = Arc::new(self.source.load_page(index)?);
+        let page = self.load_page(index)?;
         self.cache.insert(index, Arc::clone(&page));
+        Ok(page)
+    }
+
+    /// Parses one page from the document source and records the parse.
+    fn load_page(&mut self, index: usize) -> Result<Arc<Page>, Error> {
+        let page = Arc::new(self.source.load_page(index)?);
+        record_page_parsed();
         Ok(page)
     }
 
@@ -431,6 +485,8 @@ impl Document {
             Arc::new(PageSnapshot::from_page_ref(&page))
         } else {
             let page = self.source.load_page(index)?;
+            record_page_parsed();
+            SNAPSHOTS_PARSED.fetch_add(1, Ordering::Relaxed);
             Arc::new(PageSnapshot::from_page(page))
         };
         self.snapshots.insert(index, Arc::clone(&snapshot));
@@ -474,7 +530,7 @@ impl Document {
         if self.cache.max_bytes == 0 || self.cache.contains(index) {
             return Ok(());
         }
-        let page = Arc::new(self.source.load_page(index)?);
+        let page = self.load_page(index)?;
         self.cache.insert(index, page);
         Ok(())
     }
