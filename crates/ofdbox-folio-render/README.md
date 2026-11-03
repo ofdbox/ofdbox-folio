@@ -10,8 +10,9 @@ Bitmap rendering for [`ofdbox-folio`](../../README.md): it rasterizes Fixed IR p
 - `RenderPlan::from_scene()` resolves a Fixed IR scene into a backend-neutral command list; `PageSnapshot::from_page()` adds the text layer, links and page info for the parse/render thread boundary; `DevicePlan` culls a plan to one DPI/tile; `PageSnapshotCache` and `DevicePlanCache` provide page/tile reuse. with explicit layer/clip commands; `CpuRenderer` and `TinySkiaRenderer` expose `render_plan()` / `render_plan_region()` (and the older `render_prepared*` aliases); the wgpu backend consumes it for path, text and image draws and caches the current page's prepared scene.
 - `CpuRenderer` (`new()` / `with_defaults()`) draws a `Page` or `Scene` with `render_page()` / `render_scene()` into an `RasterTarget`; `render_scene_region()` refreshes one tile using `RenderRegion`. `clear_caches()`, `report()` and `take_report()` expose cache control and per-image diagnostics.
 - `RenderOptions` sets the page background, the maximum decoded image pixels and the decoded-image cache byte budget.
+- `CacheBudget` is a decoded-image byte budget that several renderers can share: `CpuRenderer::with_shared_budget()`, `TinySkiaRenderer::with_shared_budget()` and `WgpuBackend::from_shared_with_budget()` charge their image caches to it, and when the combined size exceeds the limit the oldest entries are evicted across all participating backends. `CacheBudget::used()` and `CacheBudget::limit()` expose the accounting.
 - `decode_image()`, `decode_image_tier()` and `detect_format()` handle PNG, JPEG, BMP, JBIG2 and TIFF bytes; `DecodedImage` can apply a grayscale mask.
-- With the `wgpu` feature (facade feature `gpu`): `WgpuContext` (`new()` uses empty `InstanceFlags`; `new_from_env()` is the opt-in diagnostic path), `WgpuContext::from_device_queue()`, `WgpuTarget`, `WgpuCapabilities`, `WgpuOptions` (image cache bytes, tile cache entries, prepared scenes, glyph entries, atlas size and atlas layers), `WgpuCacheStats` and `WgpuBackend` (`new()` or `from_shared()`); without it, `WgpuBackend` is a placeholder whose `draw()` returns `Unsupported`.
+- With the `wgpu` feature (facade feature `gpu`): `WgpuContext` (`new()` uses empty `InstanceFlags`; `new_from_env()` is the opt-in diagnostic path), `WgpuContext::from_device_queue()`, `WgpuTarget`, `WgpuCapabilities`, `WgpuOptions` (image cache bytes, tile cache entries, prepared scenes, glyph entries, atlas size, atlas layers and the atlas reset threshold), `WgpuCacheStats` and `WgpuBackend` (`new()`, `from_shared()` or the shared-budget constructors); without it, `WgpuBackend` is a placeholder whose `draw()` returns `Unsupported`.
 
 ### Example
 
@@ -28,7 +29,7 @@ let rgba = target.read_rgba(backend.context())?;
 
 ### CPU Renderer
 
-The CPU renderer is built on `vello_cpu` and consumes Fixed IR only; it is unaware of the source document format. It draws Fixed IR scenes (paths, text and images) into RGBA8 targets at a chosen DPI, supports whole-page and tile-sized region rendering for incremental display, and caches decoded images under a byte budget, evicting entries in insertion order once it is exceeded.
+The CPU renderer is built on `vello_cpu` and consumes Fixed IR only; it is unaware of the source document format. It draws Fixed IR scenes (paths, text and images) into RGBA8 targets at a chosen DPI, supports whole-page and tile-sized region rendering for incremental display, and caches decoded images under a byte budget, evicting the least recently used entry once it is exceeded. With `CacheBudget` the decoded-image cache is additionally bounded by the budget shared with other renderers.
 
 ### tiny-skia Backend
 
@@ -55,8 +56,13 @@ The backend groups consecutive path elements into source-ordered runs, rasterize
 each run into a transparent layer and composites it at the right position, so
 paths, text and images follow the scene tree order. Glyphs are batched into one
 instanced text draw, and all image quads share one render pass. Text glyphs are
-rasterized into a four-layer R8 atlas array and new glyph bitmaps are uploaded
-through one staging buffer per frame and copied in the main command encoder; images are decoded once and cached as GPU textures. `WgpuBackend::render_page` is the page-level entry point,
+rasterized into a four-layer R8 atlas array that persists across pages and
+reclaims space by evicting the least recently used glyph into a reused
+rectangle, so changing pages no longer resets the atlas; glyphs used by the
+current frame are never evicted, and a frame-start trim keeps occupancy under
+`WgpuOptions::atlas_reset_threshold`. New glyph bitmaps are uploaded through one
+staging buffer per frame and copied in the main command encoder; images are
+decoded once and cached as GPU textures. `WgpuBackend::render_page` is the page-level entry point,
 `render_page_region` renders a tile of a page for incremental refresh, and
 `examples/wgpu_compare.rs` in the facade renders a page with both backends and
 reports the pixel difference.

@@ -8,6 +8,7 @@
 
 - `CpuRenderer`（`new()` / `with_defaults()`）用 `render_page()` / `render_scene()` 把 `Page` 或 `Scene` 画进 `RasterTarget`；`render_scene_region()` 借助 `RenderRegion` 刷新单个分块。`clear_caches()`、`report()` 与 `take_report()` 提供缓存控制与逐图诊断。
 - `RenderOptions` 设置页面背景色、单图最大解码像素与解码图片缓存的字节预算。
+- `CacheBudget` 是可被多个渲染器共享的解码图片字节预算：`CpuRenderer::with_shared_budget()`、`TinySkiaRenderer::with_shared_budget()` 与 `WgpuBackend::from_shared_with_budget()` 把各自的图片缓存计入该预算，总量超限时跨后端淘汰最旧条目；`used()` / `limit()` 可查询占用。
 - `decode_image()` 与 `detect_format()` 处理 PNG、JPEG、BMP、JBIG2 与 TIFF 字节；`DecodedImage` 可应用灰度蒙版。
 - 启用 `wgpu` feature（门面 feature `gpu`）时提供 `WgpuContext`、`WgpuTarget`、`WgpuCapabilities` 与 `WgpuBackend`；未启用时 `WgpuBackend` 是占位类型，`draw()` 返回 `Unsupported`。
 
@@ -26,7 +27,7 @@ let rgba = target.read_rgba(backend.context())?;
 
 ### CPU Renderer
 
-CPU 渲染器基于 `vello_cpu`，只消费 Fixed IR，不感知源文档格式。它把 Fixed IR 场景（路径、文本与图片）按指定 DPI 画进 RGBA8 目标，支持整页与分块区域渲染以便增量刷新，并按字节预算缓存解码后的图片，超预算后按插入顺序淘汰。
+CPU 渲染器基于 `vello_cpu`，只消费 Fixed IR，不感知源文档格式。它把 Fixed IR 场景（路径、文本与图片）按指定 DPI 画进 RGBA8 目标，支持整页与分块区域渲染以便增量刷新，并按字节预算缓存解码后的图片，超预算后淘汰最久未使用的条目；配合 `CacheBudget` 时还受共享预算约束。
 
 ### GPU Backend
 
@@ -36,7 +37,9 @@ CPU 渲染器基于 `vello_cpu`，只消费 Fixed IR，不感知源文档格式�
 
 后端把连续路径元素按源顺序分段，每段先栅格化到透明 layer 再在正确位置合成，
 因此路径、文字与图片严格遵循场景树顺序。字形合批为一次 instanced text draw，
-图片四边形共用一个 render pass。字形栅格化到 R8 atlas；图片只解码一次并缓存为
+图片四边形共用一个 render pass。字形栅格化到可跨页面复用的 R8 atlas：空间不足时
+淘汰最久未使用的字形并复用其矩形，当前帧用到的字形不会被淘汰，帧开始时按
+`WgpuOptions::atlas_reset_threshold` 裁剪占用率；图片只解码一次并缓存为
 GPU 纹理。页面级入口是
 `WgpuBackend::render_page`，`render_page_region` 用于增量刷新的页面瓦片；门面中的
 `examples/wgpu_compare.rs` 会用两种后端渲染同一页并输出像素差异。

@@ -26,15 +26,17 @@ Non-goals for the first pass:
 - Phase 0: complete.
 - Phase 1: complete. All three renderers consume `PreparedScene` (paths,
   text and images) and cache the current page's prepared scene across tiles.
-- Phase 2: in progress. Font faces and glyph/atlas keys are content-addressed,
-  the wgpu image cache has a configurable byte budget, glyph outlines are an
-  entry-bounded LRU, the CPU/Tiny image caches are LRUs, and all three backends
-  expose cache statistics, the atlas resets before a frame above a configurable
-  occupancy threshold, new glyph bitmaps upload through one staging buffer, and
-  image caches decode into quantized DPI tiers, and the glyph atlas is a
-  four-layer texture array leased per page; a full layer advances to the next
-  one. Fine-grained per-glyph atlas eviction and a shared cross-backend budget
-  remain.
+- Phase 2: complete. Font faces and glyph/atlas keys are content-addressed,
+  glyph outlines are an entry-bounded LRU, the glyph atlas is a four-layer
+  texture array that persists across pages, reclaims space by evicting the
+  least-recently-used glyph and reusing its rectangle through a per-layer
+  free-rect allocator, protects glyphs used by the current frame, and trims
+  occupancy at frame start down to `atlas_reset_threshold`; new glyph bitmaps
+  upload through one staging buffer. Image caches decode into quantized DPI
+  tiers, evict the least recently used entry against their local byte budget,
+  and can share one `CacheBudget` across CPU, tiny-skia and wgpu so a session
+  stays within a single decoded-image limit. All three backends expose cache
+  statistics.
 - Render IR: complete for the current scope — `RenderPlan`, `PageSnapshot`,
   command bounds, `DevicePlan` tile culling, spatial index, multi-slot
   `DevicePlanCache`, `PageSnapshotCache` and reader `page_snapshot()` integration
@@ -46,8 +48,8 @@ Non-goals for the first pass:
   shared wgpu context/service entry points, external/no-readback target output, GPU target copy, fit-to-target previews,
   fit-to-target output with tile metadata and DPI, device-lost error propagation,
   `Started` progress, `cancel()`,
-  integration examples and a multi-page benchmark; the reader UI integration
-  remains.
+  integration examples and a multi-page benchmark; the reader consumes render
+  plans through its own plan scheduler instead of reopening documents.
 - Phase 3: started. Page cache hits are O(1) via a clock-based LRU,
   and search exposes page progress callbacks; damaged pages have a placeholder
   API and prefetch reports progress and can be cancelled; the background worker remains.
