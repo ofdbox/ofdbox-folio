@@ -128,6 +128,17 @@ let stats = document.cache_stats();
 
 The cache is charged by page-structure bytes and evicts in LRU order; `max_bytes = 0` disables it. Fonts and images are document-level shared resources accounted separately, so the budget bounds page structure rather than the whole document footprint.
 
+Parsing is observable through process-wide counters, which lets benchmarks and regression tests prove that a viewer opens a document once and parses every page at most once:
+
+```rust
+let before = ofdbox_folio::parse_stats();
+let _ = document.page(0)?;          // parsed once…
+let _ = document.page(0)?;          // …then a cache hit
+let after = ofdbox_folio::parse_stats();
+assert_eq!(after.pages_parsed - before.pages_parsed, 1);
+// `reset_parse_stats()` clears the counters between measurements.
+```
+
 ## Cross-Page Selection and Search
 
 ```rust
