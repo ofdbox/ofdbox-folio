@@ -12,6 +12,7 @@
 #[cfg(all(feature = "wgpu27", feature = "wgpu30"))]
 compile_error!("enable exactly one of the `wgpu27` and `wgpu30` features");
 
+mod cache_budget;
 mod error;
 mod image;
 mod options;
@@ -21,6 +22,7 @@ mod renderer;
 mod tiny_skia_renderer;
 mod wgpu;
 
+pub use cache_budget::CacheBudget;
 pub use error::RenderError;
 pub use image::{DecodedImage, decode_image, detect_format};
 pub use options::RenderOptions;

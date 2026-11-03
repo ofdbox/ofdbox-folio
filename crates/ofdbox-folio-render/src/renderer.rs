@@ -5,7 +5,7 @@
 //! fonts and images are cached by resource ID.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ofdbox_folio_ir::{
     Diagnostic, DiagnosticCode, FillRule, FontAsset, GradientExtend, GradientStop, ImageElement,
@@ -22,6 +22,7 @@ use vello_cpu::peniko::{
 use vello_cpu::peniko::{Fill, ImageAlphaType};
 use vello_cpu::{Glyph, ImageSource, PaintType, PixelMetadata, Pixmap, RenderContext, Resources};
 
+use crate::cache_budget::{CacheBudget, SharedByteCache};
 use crate::error::RenderError;
 use crate::image::{decode_image, decode_image_tier};
 use crate::options::RenderOptions;
@@ -220,72 +221,11 @@ pub struct CpuRenderer {
     options: RenderOptions,
     resources: Resources,
     fonts: HashMap<u64, FontData>,
-    pixmaps: PixmapCache,
+    /// Decoded image pixmaps; optionally charged to a shared [`CacheBudget`].
+    pixmaps: Arc<Mutex<SharedByteCache<(u64, u32), Pixmap>>>,
     report: Report,
     prepared: Option<(usize, u64, Arc<PreparedScene>)>,
     device_plans: crate::prepared::DevicePlanCache,
-}
-
-/// Decoded image cache: evicted against a byte budget; a budget of 0 disables caching entirely.
-struct PixmapCache {
-    entries: HashMap<(u64, u32), (Arc<Pixmap>, u64)>,
-    clock: u64,
-    bytes: u64,
-    budget: u64,
-}
-
-impl PixmapCache {
-    fn new(budget: u64) -> Self {
-        Self {
-            entries: HashMap::new(),
-            clock: 0,
-            bytes: 0,
-            budget,
-        }
-    }
-
-    fn get(&mut self, id: (u64, u32)) -> Option<Arc<Pixmap>> {
-        self.clock = self.clock.wrapping_add(1);
-        let entry = self.entries.get_mut(&id)?;
-        entry.1 = self.clock;
-        Some(Arc::clone(&entry.0))
-    }
-
-    fn insert(&mut self, id: (u64, u32), pixmap: Arc<Pixmap>) {
-        if self.entries.contains_key(&id) {
-            return;
-        }
-        let size = pixmap_bytes(&pixmap);
-        if self.budget == 0 || size > self.budget {
-            return;
-        }
-        self.clock = self.clock.wrapping_add(1);
-        while self.bytes + size > self.budget {
-            let Some(oldest) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, (_, used))| *used)
-                .map(|(id, _)| *id)
-            else {
-                break;
-            };
-            if let Some((removed, _)) = self.entries.remove(&oldest) {
-                self.bytes = self.bytes.saturating_sub(pixmap_bytes(&removed));
-            }
-        }
-        self.bytes += size;
-        self.entries.insert(id, (pixmap, self.clock));
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.clock = 0;
-        self.bytes = 0;
-    }
-
-    fn stats(&self) -> (usize, u64) {
-        (self.entries.len(), self.bytes)
-    }
 }
 
 fn pixmap_bytes(pixmap: &Pixmap) -> u64 {
@@ -295,11 +235,25 @@ fn pixmap_bytes(pixmap: &Pixmap) -> u64 {
 impl CpuRenderer {
     /// Creates a renderer.
     pub fn new(options: RenderOptions) -> Self {
+        Self::new_with_budget(options, None)
+    }
+
+    /// Creates a renderer whose decoded-image cache shares `budget` with other
+    /// backends.
+    ///
+    /// The local [`RenderOptions::max_image_cache_bytes`] limit still applies;
+    /// the shared budget bounds the combined footprint of every participating
+    /// cache.
+    pub fn with_shared_budget(options: RenderOptions, budget: CacheBudget) -> Self {
+        Self::new_with_budget(options, Some(budget))
+    }
+
+    fn new_with_budget(options: RenderOptions, budget: Option<CacheBudget>) -> Self {
         Self {
             options,
             resources: Resources::new(),
             fonts: HashMap::new(),
-            pixmaps: PixmapCache::new(options.max_image_cache_bytes),
+            pixmaps: SharedByteCache::new(options.max_image_cache_bytes, budget),
             report: Report::new(),
             prepared: None,
             device_plans: crate::prepared::DevicePlanCache::default(),
@@ -313,7 +267,7 @@ impl CpuRenderer {
 
     /// Current cache occupancy.
     pub fn cache_stats(&self) -> RenderCacheStats {
-        let (images, image_bytes) = self.pixmaps.stats();
+        let (images, image_bytes) = SharedByteCache::stats(&self.pixmaps);
         RenderCacheStats {
             fonts: self.fonts.len(),
             glyphs: 0,
@@ -328,7 +282,7 @@ impl CpuRenderer {
         self.prepared = None;
         self.device_plans.clear();
         self.fonts.clear();
-        self.pixmaps.clear();
+        SharedByteCache::clear(&self.pixmaps);
         self.resources = Resources::new();
     }
 
@@ -777,7 +731,7 @@ impl CpuRenderer {
 
     fn pixmap(&mut self, element: &ImageElement, max_dim: u32) -> Result<Arc<Pixmap>, RenderError> {
         let key = (element.image.id().get(), max_dim);
-        if let Some(pixmap) = self.pixmaps.get(key) {
+        if let Some(pixmap) = SharedByteCache::get(&self.pixmaps, &key) {
             return Ok(pixmap);
         }
         let mut decoded = decode_image_tier(
@@ -803,7 +757,8 @@ impl CpuRenderer {
             }
         }
         let pixmap = Arc::new(create_pixmap(&decoded)?);
-        self.pixmaps.insert(key, Arc::clone(&pixmap));
+        let bytes = pixmap_bytes(&pixmap);
+        SharedByteCache::insert(&self.pixmaps, key, Arc::clone(&pixmap), bytes);
         Ok(pixmap)
     }
 }
@@ -1018,14 +973,13 @@ fn to_bez_path(path: &Path) -> BezPath {
 
 #[cfg(test)]
 mod tests {
-    use super::{CpuRenderer, PixelRect, PixmapCache, RasterTarget};
+    use super::{CpuRenderer, PixelRect, RasterTarget};
     use crate::options::RenderOptions;
     use ofdbox_folio_ir::{
         DiagnosticCode, Element, FillRule, Group, ImageAsset, ImageElement, ImageFormat, Matrix,
-        Paint, Path, PathElement, Point, Rect, Rgba, Scene, Size,
+        Paint, Path, PathElement, Point, Rect, ResourceStore, Rgba, Scene, Size,
     };
     use std::sync::Arc;
-    use vello_cpu::Pixmap;
 
     /// Generates a solid-color PNG.
     fn png_bytes(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
@@ -1043,13 +997,17 @@ mod tests {
     }
 
     fn scene_with_image(image: ImageAsset) -> Scene {
+        scene_with_shared_image(Arc::new(image))
+    }
+
+    fn scene_with_shared_image(image: Arc<ImageAsset>) -> Scene {
         let width = f64::from(image.pixel_width.max(1));
         let height = f64::from(image.pixel_height.max(1));
         Scene {
             size: Size::new(10.0, 10.0),
             root: Group {
                 children: vec![Element::Image(ImageElement {
-                    image: Arc::new(image),
+                    image,
                     rect: Rect::default(),
                     transform: Matrix::scale(1.0 / width, 1.0 / height),
                     alpha: 1.0,
@@ -1116,27 +1074,116 @@ mod tests {
     }
 
     #[test]
-    fn evicts_pixmaps_over_budget() {
-        // Two 2×2 RGBA images exactly fill the budget; touching entry 1 makes entry 2 the LRU victim.
-        let mut cache = PixmapCache::new(2 * 2 * 4 * 2);
-        cache.insert((1, 64), Arc::new(Pixmap::new(2, 2)));
-        cache.insert((2, 64), Arc::new(Pixmap::new(2, 2)));
-        assert!(cache.get((1, 64)).is_some());
-        cache.insert((3, 64), Arc::new(Pixmap::new(2, 2)));
+    fn evicts_pixmaps_over_the_local_budget() {
+        let cache = crate::cache_budget::SharedByteCache::new(2 * 2 * 4 * 2, None);
+        crate::cache_budget::SharedByteCache::insert(
+            &cache,
+            (1, 64),
+            Arc::new(vello_cpu::Pixmap::new(2, 2)),
+            2 * 2 * 4,
+        );
+        crate::cache_budget::SharedByteCache::insert(
+            &cache,
+            (2, 64),
+            Arc::new(vello_cpu::Pixmap::new(2, 2)),
+            2 * 2 * 4,
+        );
+        assert!(crate::cache_budget::SharedByteCache::get(&cache, &(1, 64)).is_some());
+        crate::cache_budget::SharedByteCache::insert(
+            &cache,
+            (3, 64),
+            Arc::new(vello_cpu::Pixmap::new(2, 2)),
+            2 * 2 * 4,
+        );
         assert!(
-            cache.get((2, 64)).is_none(),
+            crate::cache_budget::SharedByteCache::get(&cache, &(2, 64)).is_none(),
             "the least recently used entry should be evicted"
         );
-        assert!(cache.get((1, 64)).is_some());
-        assert!(cache.get((3, 64)).is_some());
-        assert!(cache.bytes <= cache.budget);
+        assert!(crate::cache_budget::SharedByteCache::get(&cache, &(1, 64)).is_some());
+        assert!(crate::cache_budget::SharedByteCache::get(&cache, &(3, 64)).is_some());
     }
 
     #[test]
-    fn skips_cache_when_budget_is_zero() {
-        let mut cache = PixmapCache::new(0);
-        cache.insert((1, 64), Arc::new(Pixmap::new(2, 2)));
-        assert!(cache.get((1, 64)).is_none());
+    fn skips_cache_when_the_local_budget_is_zero() {
+        let cache = crate::cache_budget::SharedByteCache::new(0, None);
+        crate::cache_budget::SharedByteCache::insert(
+            &cache,
+            (1, 64),
+            Arc::new(vello_cpu::Pixmap::new(2, 2)),
+            2 * 2 * 4,
+        );
+        assert!(crate::cache_budget::SharedByteCache::get(&cache, &(1, 64)).is_none());
+    }
+
+    #[cfg(feature = "tiny-skia")]
+    #[test]
+    fn shared_budget_evicts_across_cpu_and_tiny_skia() {
+        use crate::CacheBudget;
+        use crate::TinySkiaRenderer;
+
+        let mut store = ResourceStore::new();
+        let first_id = store.add_image(ImageAsset::new(
+            ImageFormat::Png,
+            Arc::from(png_bytes(4, 4, [200, 30, 30, 255])),
+            4,
+            4,
+        ));
+        let second_id = store.add_image(ImageAsset::new(
+            ImageFormat::Png,
+            Arc::from(png_bytes(4, 4, [30, 200, 30, 255])),
+            4,
+            4,
+        ));
+        let third_id = store.add_image(ImageAsset::new(
+            ImageFormat::Png,
+            Arc::from(png_bytes(4, 4, [30, 30, 200, 255])),
+            4,
+            4,
+        ));
+        let first = Arc::clone(store.image(first_id).expect("first image"));
+        let second = Arc::clone(store.image(second_id).expect("second image"));
+        let third = Arc::clone(store.image(third_id).expect("third image"));
+
+        // Probe the decoded byte size of one image through the CPU path.
+        let mut target = RasterTarget::from_size(Size::new(10.0, 10.0), 96.0).expect("target");
+        let mut probe = CpuRenderer::with_defaults();
+        probe
+            .render_scene(&scene_with_shared_image(Arc::clone(&first)), &mut target)
+            .expect("probe render");
+        let image_bytes = probe.cache_stats().image_bytes;
+        assert!(image_bytes > 0);
+
+        let budget = CacheBudget::new(image_bytes * 2);
+        let options = RenderOptions {
+            max_image_cache_bytes: 1 << 20,
+            ..RenderOptions::default()
+        };
+        let mut cpu = CpuRenderer::with_shared_budget(options, budget.clone());
+        let mut skia = TinySkiaRenderer::with_shared_budget(options, budget.clone());
+
+        cpu.render_scene(&scene_with_shared_image(Arc::clone(&first)), &mut target)
+            .expect("cpu render");
+        assert_eq!(budget.used(), image_bytes);
+        skia.render_scene(&scene_with_shared_image(Arc::clone(&second)), &mut target)
+            .expect("skia render");
+        assert_eq!(budget.used(), image_bytes * 2);
+        assert_eq!(cpu.cache_stats().images, 1);
+        assert_eq!(skia.cache_stats().images, 1);
+
+        // A third image exceeds the combined limit and evicts the oldest charge,
+        // which belongs to the CPU renderer.
+        cpu.render_scene(&scene_with_shared_image(Arc::clone(&third)), &mut target)
+            .expect("cpu third render");
+        assert_eq!(budget.used(), image_bytes * 2);
+        assert_eq!(cpu.cache_stats().images, 1);
+        assert_eq!(skia.cache_stats().images, 1);
+
+        // Rendering the first image again evicts the tiny-skia entry, proving
+        // that eviction crosses backends in both directions.
+        cpu.render_scene(&scene_with_shared_image(Arc::clone(&first)), &mut target)
+            .expect("cpu first rerender");
+        assert_eq!(budget.used(), image_bytes * 2);
+        assert_eq!(skia.cache_stats().images, 0);
     }
 
     fn solid_rect_scene() -> Scene {

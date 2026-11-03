@@ -19,6 +19,7 @@ use ofdbox_folio_ir::{
 };
 
 use crate::RenderError;
+use crate::cache_budget::{CacheBudget, SharedByteCache};
 use crate::image::{decode_image, decode_image_tier};
 use crate::prepared::{PreparedClip, PreparedCommand, PreparedScene, scene_fingerprint};
 use crate::renderer::RenderCacheStats;
@@ -642,66 +643,10 @@ struct CachedImage {
     _image: Arc<ImageAsset>,
     _texture: wgpu_lib::Texture,
     view: wgpu_lib::TextureView,
-    bytes: usize,
 }
 
-/// Byte-budgeted image texture cache with insertion-order eviction.
-struct ImageCache {
-    entries: HashMap<(usize, u32), Arc<CachedImage>>,
-    order: VecDeque<(usize, u32)>,
-    bytes: usize,
-    max_bytes: usize,
-}
-
-impl ImageCache {
-    fn new(max_bytes: usize) -> Self {
-        Self {
-            entries: HashMap::new(),
-            order: VecDeque::new(),
-            bytes: 0,
-            max_bytes,
-        }
-    }
-
-    fn get(&mut self, key: (usize, u32)) -> Option<Arc<CachedImage>> {
-        let image = Arc::clone(self.entries.get(&key)?);
-        self.order.retain(|value| *value != key);
-        self.order.push_back(key);
-        Some(image)
-    }
-
-    fn insert(&mut self, key: (usize, u32), image: Arc<CachedImage>) {
-        if let Some(previous) = self.entries.remove(&key) {
-            self.bytes = self.bytes.saturating_sub(previous.bytes);
-            self.order.retain(|value| *value != key);
-        }
-        self.bytes = self.bytes.saturating_add(image.bytes);
-        self.order.push_back(key);
-        self.entries.insert(key, image);
-        while self.bytes > self.max_bytes {
-            let Some(oldest) = self.order.pop_front() else {
-                break;
-            };
-            if let Some(entry) = self.entries.remove(&oldest) {
-                self.bytes = self.bytes.saturating_sub(entry.bytes);
-            }
-        }
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.order.clear();
-        self.bytes = 0;
-    }
-
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    fn bytes(&self) -> usize {
-        self.bytes
-    }
-}
+/// Image textures, optionally charged to a shared [`CacheBudget`].
+type ImageCache = SharedByteCache<(usize, u32), CachedImage>;
 
 /// One image quad in page-pixel space.
 struct ImageDraw {
@@ -791,7 +736,7 @@ pub struct WgpuBackend {
     text_pipeline: TextPipeline,
     image_pipeline: ImagePipeline,
     /// Decoded image textures keyed by `ImageAsset` pointer.
-    image_cache: Mutex<ImageCache>,
+    image_cache: Arc<Mutex<ImageCache>>,
     image_sampler: wgpu_lib::Sampler,
     options: WgpuOptions,
 }
@@ -829,6 +774,29 @@ impl WgpuBackend {
     pub fn from_shared_with_options(
         context: Arc<WgpuContext>,
         options: WgpuOptions,
+    ) -> Result<Self, RenderError> {
+        Self::from_shared_with_options_and_budget(context, options, None)
+    }
+
+    /// Creates a backend from a shared context whose image textures share
+    /// `budget` with other backends.
+    ///
+    /// The local [`WgpuOptions::max_image_cache_bytes`] limit still applies; the
+    /// shared budget bounds the combined footprint of every participating
+    /// cache.
+    pub fn from_shared_with_budget(
+        context: Arc<WgpuContext>,
+        budget: CacheBudget,
+    ) -> Result<Self, RenderError> {
+        Self::from_shared_with_options_and_budget(context, WgpuOptions::default(), Some(budget))
+    }
+
+    /// Creates a backend from a shared context with explicit resource limits
+    /// and an optional shared decoded-image budget.
+    pub fn from_shared_with_options_and_budget(
+        context: Arc<WgpuContext>,
+        options: WgpuOptions,
+        budget: Option<CacheBudget>,
     ) -> Result<Self, RenderError> {
         let module = context
             .device
@@ -915,7 +883,7 @@ impl WgpuBackend {
             atlas_scene: Mutex::new(0),
             text_pipeline,
             image_pipeline,
-            image_cache: Mutex::new(ImageCache::new(options.max_image_cache_bytes)),
+            image_cache: SharedByteCache::new(options.max_image_cache_bytes as u64, budget),
             image_sampler,
             options,
         })
@@ -959,10 +927,7 @@ impl WgpuBackend {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clear();
-        self.image_cache
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clear();
+        SharedByteCache::clear(&self.image_cache);
     }
 
     /// Detailed cache occupancy.
@@ -982,10 +947,7 @@ impl WgpuBackend {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .len();
-        let image_cache = self
-            .image_cache
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let (images, image_bytes) = SharedByteCache::stats(&self.image_cache);
         let atlas_occupancy = self
             .atlas
             .lock()
@@ -995,8 +957,8 @@ impl WgpuBackend {
             glyphs,
             tiles,
             prepared_scenes,
-            images: image_cache.len(),
-            image_bytes: image_cache.bytes(),
+            images,
+            image_bytes: image_bytes as usize,
             atlas_occupancy,
         }
     }
@@ -1765,12 +1727,7 @@ impl WgpuBackend {
     /// Decodes and uploads an image once, then reuses the GPU texture.
     fn cached_image(&self, image: &Arc<ImageAsset>, max_dim: u32) -> Option<Arc<CachedImage>> {
         let key = (Arc::as_ptr(image) as usize, max_dim);
-        if let Some(cached) = self
-            .image_cache
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(key)
-        {
+        if let Some(cached) = SharedByteCache::get(&self.image_cache, &key) {
             return Some(cached);
         }
         let mut decoded =
@@ -1834,12 +1791,9 @@ impl WgpuBackend {
             _image: Arc::clone(image),
             _texture: texture,
             view,
-            bytes: width as usize * height as usize * 4,
         });
-        self.image_cache
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(key, Arc::clone(&cached));
+        let bytes = u64::from(width) * u64::from(height) * 4;
+        SharedByteCache::insert(&self.image_cache, key, Arc::clone(&cached), bytes);
         Some(cached)
     }
 
@@ -3760,5 +3714,71 @@ mod tests {
         let index = ((y * target.width() + x) * 4) as usize;
         assert!(pixels[index] > 200);
         assert!(pixels[index + 1] < 30);
+    }
+
+    #[test]
+    fn shared_budget_charges_image_textures() {
+        use crate::CacheBudget;
+
+        let Ok(context) = WgpuContext::new_blocking() else {
+            return;
+        };
+        let context = std::sync::Arc::new(context);
+        let budget = CacheBudget::new(4 * 4 * 4 * 2);
+        let options = super::WgpuOptions::default();
+        let first = WgpuBackend::from_shared_with_options_and_budget(
+            std::sync::Arc::clone(&context),
+            options,
+            Some(budget.clone()),
+        )
+        .expect("first backend");
+        let second = WgpuBackend::from_shared_with_options_and_budget(
+            std::sync::Arc::clone(&context),
+            options,
+            Some(budget.clone()),
+        )
+        .expect("second backend");
+
+        let mut png = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png, 4, 4);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("png header");
+            writer
+                .write_image_data(&[255, 0, 0, 255].repeat(16))
+                .expect("png data");
+        }
+        let image = std::sync::Arc::new(ofdbox_folio_ir::ImageAsset::new(
+            ofdbox_folio_ir::ImageFormat::Png,
+            std::sync::Arc::from(png),
+            4,
+            4,
+        ));
+        let mut root = Group::default();
+        root.children
+            .push(Element::Image(ofdbox_folio_ir::ImageElement {
+                image,
+                rect: ofdbox_folio_ir::Rect::new(0.0, 0.0, 4.0, 4.0),
+                transform: Matrix::scale(1.0 / 4.0, 1.0 / 4.0),
+                alpha: 1.0,
+            }));
+        let scene = Scene {
+            size: Size::new(10.0, 10.0),
+            root,
+            diagnostics: Vec::new(),
+        };
+        let target = WgpuTarget::new(first.context(), scene.size, 96.0).expect("target");
+        first
+            .render_to_target(&scene, &target)
+            .expect("first render");
+        let after_first = budget.used();
+        assert!(after_first > 0);
+        second
+            .render_to_target(&scene, &target)
+            .expect("second render");
+        assert_eq!(budget.used(), after_first * 2);
+        first.clear_caches();
+        assert_eq!(budget.used(), after_first);
     }
 }

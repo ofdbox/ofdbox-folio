@@ -1,7 +1,7 @@
 //! Software renderer built on `tiny-skia`.
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use ofdbox_folio_ir::{
     Diagnostic, DiagnosticCode, FillRule, FontAsset, GradientExtend, ImageAsset, ImageElement,
@@ -14,6 +14,7 @@ use tiny_skia::{
     Pixmap, PixmapPaint, Point as SkPoint, RadialGradient, Shader, SpreadMode, Stroke, Transform,
 };
 
+use crate::cache_budget::{CacheBudget, SharedByteCache};
 use crate::error::RenderError;
 use crate::image::{decode_image, decode_image_tier};
 use crate::options::RenderOptions;
@@ -26,9 +27,8 @@ pub struct TinySkiaRenderer {
     report: Report,
     glyphs: HashMap<(usize, u16), Arc<tiny_skia::Path>>,
     faces: HashMap<(usize, u32), Arc<owned_ttf_parser::OwnedFace>>,
-    images: HashMap<(u64, u32), Arc<Pixmap>>,
-    image_order: VecDeque<(u64, u32)>,
-    image_bytes: usize,
+    /// Decoded image pixmaps; optionally charged to a shared [`CacheBudget`].
+    images: Arc<Mutex<SharedByteCache<(u64, u32), Pixmap>>>,
     prepared: Option<(usize, u64, Arc<PreparedScene>)>,
     device_plans: crate::prepared::DevicePlanCache,
 }
@@ -41,14 +41,22 @@ struct Report {
 impl TinySkiaRenderer {
     /// Creates a renderer with the given options.
     pub fn new(options: RenderOptions) -> Self {
+        Self::new_with_budget(options, None)
+    }
+
+    /// Creates a renderer whose decoded-image cache shares `budget` with other
+    /// backends.
+    pub fn with_shared_budget(options: RenderOptions, budget: CacheBudget) -> Self {
+        Self::new_with_budget(options, Some(budget))
+    }
+
+    fn new_with_budget(options: RenderOptions, budget: Option<CacheBudget>) -> Self {
         Self {
             options,
             report: Report::default(),
             glyphs: HashMap::new(),
             faces: HashMap::new(),
-            images: HashMap::new(),
-            image_order: VecDeque::new(),
-            image_bytes: 0,
+            images: SharedByteCache::new(options.max_image_cache_bytes, budget),
             prepared: None,
             device_plans: crate::prepared::DevicePlanCache::default(),
         }
@@ -67,11 +75,12 @@ impl TinySkiaRenderer {
 
     /// Current cache occupancy.
     pub fn cache_stats(&self) -> RenderCacheStats {
+        let (images, image_bytes) = SharedByteCache::stats(&self.images);
         RenderCacheStats {
             fonts: 0,
             glyphs: self.glyphs.len(),
-            images: self.images.len(),
-            image_bytes: self.image_bytes as u64,
+            images,
+            image_bytes,
             prepared_scene: self.prepared.is_some(),
         }
     }
@@ -82,9 +91,7 @@ impl TinySkiaRenderer {
         self.device_plans.clear();
         self.glyphs.clear();
         self.faces.clear();
-        self.images.clear();
-        self.image_order.clear();
-        self.image_bytes = 0;
+        SharedByteCache::clear(&self.images);
     }
 
     /// Renders one Fixed IR page into a raster target.
@@ -590,8 +597,8 @@ impl TinySkiaRenderer {
 
     fn image(&mut self, asset: &Arc<ImageAsset>, max_dim: u32) -> Option<Arc<Pixmap>> {
         let key = (asset.id().get(), max_dim);
-        if let Some(image) = self.images.get(&key) {
-            return Some(Arc::clone(image));
+        if let Some(image) = SharedByteCache::get(&self.images, &key) {
+            return Some(image);
         }
         let mut decoded = decode_image_tier(
             asset.format,
@@ -621,21 +628,9 @@ impl TinySkiaRenderer {
             }
         }
         let pixmap = Pixmap::from_vec(data, size)?;
-        let bytes = pixmap.data().len();
+        let bytes = pixmap.data().len() as u64;
         let image = Arc::new(pixmap);
-        if self.options.max_image_cache_bytes > 0 {
-            self.images.insert(key, Arc::clone(&image));
-            self.image_order.push_back(key);
-            self.image_bytes += bytes;
-            while self.image_bytes > self.options.max_image_cache_bytes as usize {
-                let Some(oldest) = self.image_order.pop_front() else {
-                    break;
-                };
-                if let Some(old) = self.images.remove(&oldest) {
-                    self.image_bytes = self.image_bytes.saturating_sub(old.data().len());
-                }
-            }
-        }
+        SharedByteCache::insert(&self.images, key, Arc::clone(&image), bytes);
         Some(image)
     }
 

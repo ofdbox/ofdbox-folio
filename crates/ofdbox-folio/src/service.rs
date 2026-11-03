@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 #[cfg(feature = "threaded")]
 use ofdbox_folio_ir::PageError;
-use ofdbox_folio_render::PageSnapshot;
+use ofdbox_folio_render::{CacheBudget, PageSnapshot};
 
 use crate::error::Error;
 use crate::fonts::SystemFonts;
@@ -1010,17 +1010,32 @@ enum Renderer {
     Wgpu(ofdbox_folio_render::WgpuBackend),
 }
 
+fn cpu_renderer(budget: Option<CacheBudget>) -> ofdbox_folio_render::CpuRenderer {
+    match budget {
+        Some(budget) => ofdbox_folio_render::CpuRenderer::with_shared_budget(
+            ofdbox_folio_render::RenderOptions::default(),
+            budget,
+        ),
+        None => ofdbox_folio_render::CpuRenderer::with_defaults(),
+    }
+}
+
 impl Renderer {
-    fn new(backend: RenderBackend) -> Result<Self, String> {
+    fn new(backend: RenderBackend, budget: Option<CacheBudget>) -> Result<Self, String> {
         match backend {
-            RenderBackend::Cpu => Ok(Self::Cpu(ofdbox_folio_render::CpuRenderer::with_defaults())),
+            RenderBackend::Cpu => Ok(Self::Cpu(cpu_renderer(budget))),
             #[cfg(test)]
             RenderBackend::Failing => Err("intentional backend failure".to_owned()),
             #[cfg(any(feature = "gpu27", feature = "gpu30"))]
             RenderBackend::Wgpu => {
                 let context = ofdbox_folio_render::WgpuContext::new_blocking()
                     .map_err(|error| error.to_string())?;
-                let backend = ofdbox_folio_render::WgpuBackend::new(context)
+                let backend =
+                    ofdbox_folio_render::WgpuBackend::from_shared_with_options_and_budget(
+                        Arc::new(context),
+                        ofdbox_folio_render::WgpuOptions::default(),
+                        budget,
+                    )
                     .map_err(|error| error.to_string())?;
                 Ok(Self::Wgpu(backend))
             }
@@ -1031,11 +1046,17 @@ impl Renderer {
     fn new_shared(
         backend: RenderBackend,
         context: Arc<ofdbox_folio_render::WgpuContext>,
+        budget: Option<CacheBudget>,
     ) -> Result<Self, String> {
         match backend {
-            RenderBackend::Cpu => Ok(Self::Cpu(ofdbox_folio_render::CpuRenderer::with_defaults())),
+            RenderBackend::Cpu => Ok(Self::Cpu(cpu_renderer(budget))),
             RenderBackend::Wgpu => {
-                let backend = ofdbox_folio_render::WgpuBackend::from_shared(context)
+                let backend =
+                    ofdbox_folio_render::WgpuBackend::from_shared_with_options_and_budget(
+                        context,
+                        ofdbox_folio_render::WgpuOptions::default(),
+                        budget,
+                    )
                     .map_err(|error| error.to_string())?;
                 Ok(Self::Wgpu(backend))
             }
@@ -1131,8 +1152,17 @@ impl RenderService {
 
     /// Creates an inline render service for the selected backend.
     pub fn new_with_backend(backend: RenderBackend) -> Result<Self, Error> {
+        Self::new_with_backend_and_budget(backend, None)
+    }
+
+    /// Creates an inline render service whose decoded-image cache shares
+    /// `budget` with other backends.
+    pub fn new_with_backend_and_budget(
+        backend: RenderBackend,
+        budget: Option<CacheBudget>,
+    ) -> Result<Self, Error> {
         Ok(Self {
-            renderer: Renderer::new(backend).map_err(Error::Service)?,
+            renderer: Renderer::new(backend, budget).map_err(Error::Service)?,
             events: VecDeque::new(),
             cancelled: std::collections::HashSet::new(),
             next: 1,
@@ -1145,8 +1175,19 @@ impl RenderService {
         backend: RenderBackend,
         context: Arc<ofdbox_folio_render::WgpuContext>,
     ) -> Result<Self, Error> {
+        Self::new_with_shared_context_and_budget(backend, context, None)
+    }
+
+    /// Creates an inline render service from an existing wgpu context whose
+    /// decoded-image cache shares `budget` with other backends.
+    #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+    pub fn new_with_shared_context_and_budget(
+        backend: RenderBackend,
+        context: Arc<ofdbox_folio_render::WgpuContext>,
+        budget: Option<CacheBudget>,
+    ) -> Result<Self, Error> {
         Ok(Self {
-            renderer: Renderer::new_shared(backend, context).map_err(Error::Service)?,
+            renderer: Renderer::new_shared(backend, context, budget).map_err(Error::Service)?,
             events: VecDeque::new(),
             cancelled: std::collections::HashSet::new(),
             next: 1,
@@ -1272,7 +1313,16 @@ mod render_thread {
     impl RenderService {
         /// Starts a worker with the selected backend.
         pub fn new_with_backend(backend: RenderBackend) -> Result<Self, Error> {
-            Self::new_with_context(backend, None)
+            Self::new_with_backend_and_budget(backend, None)
+        }
+
+        /// Starts a worker with the selected backend whose decoded-image cache
+        /// shares `budget` with other backends.
+        pub fn new_with_backend_and_budget(
+            backend: RenderBackend,
+            budget: Option<CacheBudget>,
+        ) -> Result<Self, Error> {
+            Self::new_with_context(backend, None, budget)
         }
 
         /// Starts a worker from an existing wgpu context.
@@ -1281,12 +1331,24 @@ mod render_thread {
             backend: RenderBackend,
             context: SharedContext,
         ) -> Result<Self, Error> {
-            Self::new_with_context(backend, Some(context))
+            Self::new_with_shared_context_and_budget(backend, context, None)
+        }
+
+        /// Starts a worker from an existing wgpu context whose decoded-image
+        /// cache shares `budget` with other backends.
+        #[cfg(any(feature = "gpu27", feature = "gpu30"))]
+        pub fn new_with_shared_context_and_budget(
+            backend: RenderBackend,
+            context: SharedContext,
+            budget: Option<CacheBudget>,
+        ) -> Result<Self, Error> {
+            Self::new_with_context(backend, Some(context), budget)
         }
 
         fn new_with_context(
             backend: RenderBackend,
             shared: Option<SharedContext>,
+            budget: Option<CacheBudget>,
         ) -> Result<Self, Error> {
             let (command_tx, command_rx) = mpsc::channel::<Command>();
             let (event_tx, event_rx) = mpsc::channel::<RenderEvent>();
@@ -1297,7 +1359,7 @@ mod render_thread {
                     let mut init_error: Option<String> = None;
                     #[cfg(any(feature = "gpu27", feature = "gpu30"))]
                     if let Some(context) = &shared {
-                        match Renderer::new_shared(backend, Arc::clone(context)) {
+                        match Renderer::new_shared(backend, Arc::clone(context), budget.clone()) {
                             Ok(value) => renderer = Some(value),
                             Err(message) => init_error = Some(message),
                         }
@@ -1325,7 +1387,7 @@ mod render_thread {
                                     continue;
                                 }
                                 if renderer.is_none() {
-                                    match Renderer::new(backend) {
+                                    match Renderer::new(backend, budget.clone()) {
                                         Ok(value) => renderer = Some(value),
                                         Err(message) => {
                                             init_error = Some(message.clone());
