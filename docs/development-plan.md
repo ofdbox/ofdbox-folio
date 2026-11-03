@@ -56,8 +56,11 @@ Non-goals for the first pass:
   plan building, dominates first-visit latency (measured 5–200 ms per OFD/PDF page
   versus about 1–2 ms for compaction and `RenderPlan` building), and it has to run
   on the session thread because `Document` is thread-confined; the reader therefore
-  prefetches pages during idle instead of blocking the scroll path, and folio's
-  background `PageLoader` (one worker owns the document source) remains.
+  prefetches pages during idle instead of blocking the scroll path, pays the
+  renderer's lazy device warm-up with one hidden tiny render while the UI is still
+  opening, and keeps its session footprint bounded (a 30-page run measured a flat
+  working set, with the shared decoded-image budget plateauing instead of growing).
+  folio's background `PageLoader` (one worker owns the document source) remains.
 
 ## Phase 0: Feature matrix and contract correctness
 
