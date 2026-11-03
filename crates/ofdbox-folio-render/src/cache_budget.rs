@@ -344,6 +344,25 @@ fn lock<T>(state: &Arc<Mutex<T>>) -> MutexGuard<'_, T> {
     state.lock().unwrap_or_else(|error| error.into_inner())
 }
 
+impl<K, V> Drop for SharedByteCache<K, V>
+where
+    K: Eq + Hash + Clone + Send + Sync + 'static,
+    V: Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        let Some(budget) = &self.budget else {
+            return;
+        };
+        // A cache can be dropped without clear(); release its charges so the
+        // shared budget does not keep accounting for images that are gone.
+        for entry in self.entries.values() {
+            if let Some(charge) = entry.charge {
+                budget.release(charge);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CacheBudget, SharedByteCache};
@@ -415,6 +434,16 @@ mod tests {
         SharedByteCache::clear(&cache);
         assert_eq!(budget.used(), 0);
         assert_eq!(SharedByteCache::stats(&cache), (0, 0));
+    }
+
+    #[test]
+    fn dropping_a_cache_releases_its_charges() {
+        let budget = CacheBudget::new(1000);
+        let cache = cache(u64::MAX, Some(budget.clone()));
+        insert(&cache, 1, 400);
+        assert_eq!(budget.used(), 400);
+        drop(cache);
+        assert_eq!(budget.used(), 0);
     }
 
     #[test]
