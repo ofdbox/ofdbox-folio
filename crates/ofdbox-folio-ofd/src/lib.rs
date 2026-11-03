@@ -24,7 +24,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use ofdbox_core::OfdPackage;
-use ofdbox_core::model::definition::StBox;
+use ofdbox_core::model::definition::{StBox, StLoc};
 use ofdbox_core::model::document::{Document, PageEntry};
 use ofdbox_core::model::page::Page as PageModel;
 use ofdbox_core::store::OfdFile;
@@ -238,6 +238,17 @@ impl OfdDocument {
 
     /// Page size: page Area → template page Area → document PageArea.
     fn page_physical_box(&self, page: &PageEntry) -> Result<Rect, PageError> {
+        // Fast path: page sizes are read for every page while opening (document layout needs
+        // all of them), and a full typed parse of a multi-megabyte page XML just for the
+        // `PhysicalBox` is expensive (newspaper pages are 0.5-2 MB of XML). Scan the raw
+        // entry instead and only fall back to the typed parse when the page inherits its
+        // area from a template or the document defaults.
+        if let Some(physical) = self.raw_page_physical_box(&page.base_loc) {
+            let physical = stbox_rect(physical);
+            if physical.width > 0.0 && physical.height > 0.0 {
+                return Ok(physical);
+            }
+        }
         let loaded = self
             .document
             .context()
@@ -256,6 +267,46 @@ impl OfdDocument {
         } else {
             Ok(Rect::new(0.0, 0.0, 210.0, 297.0))
         }
+    }
+
+    /// Scans the raw page XML for the first `PhysicalBox` element value.
+    ///
+    /// Only the standard child-element form is accepted
+    /// (`<ofd:PhysicalBox>0 0 100 100</ofd:PhysicalBox>`), matching the typed model, so the
+    /// fast path cannot disagree with a later page parse. When the value is missing or
+    /// unusable the caller falls back to the typed parser, which also resolves template and
+    /// document-level defaults.
+    fn raw_page_physical_box(&self, location: &StLoc) -> Option<StBox> {
+        let bytes = self.document.context().read_entry(location).ok()?;
+        let text = std::str::from_utf8(&bytes).ok()?;
+        const NAME: &str = "PhysicalBox";
+        let mut from = 0usize;
+        while let Some(offset) = text[from..].find(NAME) {
+            let at = from + offset + NAME.len();
+            from = at;
+            let rest = text[at..].trim_start();
+            // Attribute form is not part of the typed model; leave it to the parser.
+            let Some(rest) = rest.strip_prefix('>') else {
+                continue;
+            };
+            let Some(end) = rest.find('<') else {
+                continue;
+            };
+            let value = &rest[..end];
+            let mut parts = value.split_whitespace();
+            let (Some(x), Some(y), Some(width), Some(height)) = (
+                parts.next().and_then(|part| part.parse::<f64>().ok()),
+                parts.next().and_then(|part| part.parse::<f64>().ok()),
+                parts.next().and_then(|part| part.parse::<f64>().ok()),
+                parts.next().and_then(|part| part.parse::<f64>().ok()),
+            ) else {
+                continue;
+            };
+            if [x, y, width, height].iter().all(|value| value.is_finite()) {
+                return Some(StBox::new(x, y, width, height));
+            }
+        }
+        None
     }
 
     /// Size of the first Area declared in a template page referenced by the page.
@@ -435,6 +486,85 @@ mod tests {
                 _ => 1,
             })
             .sum()
+    }
+
+    /// An OFD with one page whose `Content.xml` is supplied by the test.
+    fn ofd_with_page(page: &str) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        let entries = [
+            (
+                "OFD.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<ofd:OFD xmlns:ofd="http://www.ofdspec.org/2016" Version="1.0" DocType="OFD">
+  <ofd:DocBody>
+    <ofd:DocInfo><ofd:DocID>size</ofd:DocID><ofd:Creator>test</ofd:Creator></ofd:DocInfo>
+    <ofd:DocRoot>Doc_0/Document.xml</ofd:DocRoot>
+  </ofd:DocBody>
+</ofd:OFD>"#,
+            ),
+            (
+                "Doc_0/Document.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<ofd:Document xmlns:ofd="http://www.ofdspec.org/2016">
+  <ofd:CommonData>
+    <ofd:MaxUnitID>3</ofd:MaxUnitID>
+    <ofd:PageArea><ofd:PhysicalBox>0 0 100 100</ofd:PhysicalBox></ofd:PageArea>
+  </ofd:CommonData>
+  <ofd:Pages><ofd:Page ID="1" BaseLoc="Pages/Page_0/Content.xml"/></ofd:Pages>
+</ofd:Document>"#,
+            ),
+            ("Doc_0/Pages/Page_0/Content.xml", page),
+        ];
+        for (name, content) in entries {
+            zip.start_file(name, options).expect("zip entry");
+            zip.write_all(content.as_bytes()).expect("zip write");
+        }
+        zip.finish().expect("zip finish").into_inner()
+    }
+
+    #[test]
+    fn page_info_reads_declared_size_without_full_page_parse() {
+        let page = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ofd:Page xmlns:ofd="http://www.ofdspec.org/2016">
+  <ofd:Area><ofd:PhysicalBox>0 0 50 60</ofd:PhysicalBox></ofd:Area>
+  <ofd:Content><ofd:Layer ID="2"/></ofd:Content>
+</ofd:Page>"#;
+        let mut document =
+            OfdDocument::open_bytes(ofd_with_page(page), OfdReadOptions::default()).expect("open");
+        let info = document.page_info(0).expect("info");
+        assert_eq!(info.media_box, Rect::new(0.0, 0.0, 50.0, 60.0));
+        let page = document.load_page(0).expect("page");
+        let size = page.display_size();
+        assert_eq!((size.width, size.height), (50.0, 60.0));
+    }
+
+    #[test]
+    fn page_info_reads_default_namespace_size() {
+        let page = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Page xmlns="http://www.ofdspec.org/2016">
+  <Area><PhysicalBox>0 0 70 80</PhysicalBox></Area>
+  <Content><Layer ID="2"/></Content>
+</Page>"#;
+        let mut document =
+            OfdDocument::open_bytes(ofd_with_page(page), OfdReadOptions::default()).expect("open");
+        let info = document.page_info(0).expect("info");
+        assert_eq!(info.media_box, Rect::new(0.0, 0.0, 70.0, 80.0));
+        let page = document.load_page(0).expect("page");
+        let size = page.display_size();
+        assert_eq!((size.width, size.height), (70.0, 80.0));
+    }
+
+    #[test]
+    fn page_info_falls_back_to_document_area() {
+        let page = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ofd:Page xmlns:ofd="http://www.ofdspec.org/2016">
+  <ofd:Content><ofd:Layer ID="2"/></ofd:Content>
+</ofd:Page>"#;
+        let mut document =
+            OfdDocument::open_bytes(ofd_with_page(page), OfdReadOptions::default()).expect("open");
+        let info = document.page_info(0).expect("info");
+        assert_eq!(info.media_box, Rect::new(0.0, 0.0, 100.0, 100.0));
     }
 
     #[test]
