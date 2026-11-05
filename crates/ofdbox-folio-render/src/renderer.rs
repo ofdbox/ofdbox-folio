@@ -656,11 +656,17 @@ impl CpuRenderer {
             x: glyph.x as f32,
             y: glyph.y as f32,
         });
+        // Font sizes are in user units (millimeters) and the text transform scales them up to
+        // device pixels. Hinting/grid-fitting inside the glyph renderer would run at the
+        // un-scaled size and then be upscaled by the transform, which distorts outlines (a
+        // hinted SimSun "M" snapped a point below the baseline). Render unhinted outlines and
+        // let the transform scale them.
         if let Some(fill) = &element.fill {
             context.set_paint(brush(fill));
             let _ = context
                 .glyph_run(&mut self.resources, &font)
                 .font_size(element.font_size as f32)
+                .hint(false)
                 .fill_glyphs(glyphs.clone());
         }
         if let Some(stroke) = &element.stroke {
@@ -669,6 +675,7 @@ impl CpuRenderer {
             let _ = context
                 .glyph_run(&mut self.resources, &font)
                 .font_size(element.font_size as f32)
+                .hint(false)
                 .stroke_glyphs(glyphs);
         }
         Ok(())
