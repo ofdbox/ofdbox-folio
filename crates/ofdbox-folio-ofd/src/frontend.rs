@@ -308,6 +308,72 @@ impl ResourceSet {
         }
     }
 
+    /// Merge `<ofd:Font>` declarations that the typed model dropped.
+    ///
+    /// Real files (the CNOFD invoice samples) contain two `<ofd:Fonts>` elements; the
+    /// strongly typed `Res` keeps a single one, so fonts from the other block were unknown and
+    /// their text rendered with an empty fallback font.
+    fn collect_raw_fonts(&mut self, res: &Rc<Loaded<Res>>) {
+        let Ok(bytes) = res.context().read_entry(res.location()) else {
+            return;
+        };
+        let mut reader = quick_xml::Reader::from_reader(bytes.as_slice());
+        reader.config_mut().trim_text(true);
+        loop {
+            match reader.read_event() {
+                Ok(
+                    quick_xml::events::Event::Start(element)
+                    | quick_xml::events::Event::Empty(element),
+                ) if element.local_name().as_ref() == "Font" => {
+                    let mut id = None;
+                    let mut name = None;
+                    let mut family = None;
+                    let mut file = None;
+                    for attribute in element.attributes().flatten() {
+                        let value = attribute.value.clone().into_owned();
+                        match attribute.key.local_name().as_ref() {
+                            "ID" => id = Some(value),
+                            "FontName" => name = Some(value),
+                            "FamilyName" => family = Some(value),
+                            "FontFile" => file = Some(value),
+                            _ => {}
+                        }
+                    }
+                    let Some(id) = id else {
+                        continue;
+                    };
+                    if self.fonts.contains_key(&id) {
+                        continue;
+                    }
+                    self.fonts.insert(
+                        id.clone(),
+                        FontResource {
+                            id,
+                            file: file
+                                .map(|value| value.trim().to_owned())
+                                .filter(|value| !value.is_empty())
+                                .map(StLoc::new),
+                            name: name
+                                .map(|value| value.trim().to_owned())
+                                .filter(|value| !value.is_empty()),
+                            family: family
+                                .map(|value| value.trim().to_owned())
+                                .filter(|value| !value.is_empty()),
+                            charset: None,
+                            bold: false,
+                            italic: false,
+                            serif: false,
+                            fixed_width: false,
+                            res: Rc::clone(res),
+                        },
+                    );
+                }
+                Ok(quick_xml::events::Event::Eof) | Err(_) => break,
+                _ => {}
+            }
+        }
+    }
+
     fn collect_page(&mut self, page: &Loaded<PageModel>) {
         for location in &page.data.page_res {
             if let Ok(res) = page.context().load_res(location) {
@@ -317,6 +383,10 @@ impl ResourceSet {
     }
 
     fn collect_res(&mut self, res: Rc<Loaded<Res>>) {
+        // Some producers repeat `<ofd:Fonts>`; the typed model keeps only one block, so recover
+        // the remaining declarations from the raw XML (otherwise their text falls back to an
+        // empty font and disappears).
+        self.collect_raw_fonts(&res);
         if let Some(fonts) = &res.data.fonts {
             for font in &fonts.fonts {
                 self.fonts.insert(
