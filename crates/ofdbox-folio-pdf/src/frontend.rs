@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use lopdf::content::{Content, Operation};
+use std::io::Read as _;
+
 use lopdf::{Dictionary, Document, Object, ObjectId};
 
 use ofdbox_folio_ir::{
@@ -1133,25 +1135,38 @@ impl Builder<'_> {
             );
             return Ok(());
         }
-        let filter = stream_value(&stream.dict, b"Filter", b"F").and_then(|object| match object {
-            Object::Name(name) => Some(name.as_slice()),
-            Object::Array(values) => values.first().and_then(|value| value.as_name().ok()),
-            _ => None,
-        });
-        let (format, bytes) = if filter == Some(b"DCTDecode") {
-            (ImageFormat::Jpeg, Arc::<[u8]>::from(stream.content.clone()))
-        } else if filter == Some(b"JPXDecode") {
+        // A stream may carry a filter chain, for example `[/FlateDecode /DCTDecode]` where
+        // Flate wraps the JPEG payload. Decode the leading filters first, then dispatch on the
+        // final encoding.
+        let filters = image_filters(&stream.dict);
+        let (leading, last) = match filters.split_last() {
+            Some((last, leading)) => (leading, Some(last.as_slice())),
+            None => (&[][..], None),
+        };
+        let mut payload = stream.content.clone();
+        for filter in leading {
+            match decode_filter(filter, &payload) {
+                Ok(data) => payload = data,
+                Err(message) => {
+                    self.diagnostic(
+                        DiagnosticCode::Image,
+                        format!("PDF image filter chain not supported yet: {message}"),
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        let (format, bytes) = if last == Some(b"DCTDecode") {
+            (ImageFormat::Jpeg, Arc::<[u8]>::from(payload))
+        } else if last == Some(b"JPXDecode") {
             self.diagnostic(
                 DiagnosticCode::Unsupported,
                 "PDF JPEG2000 images are not supported yet",
             );
             return Ok(());
-        } else if filter == Some(b"JBIG2Decode") {
-            (
-                ImageFormat::Jbig2,
-                Arc::<[u8]>::from(stream.content.clone()),
-            )
-        } else if filter == Some(b"CCITTFaxDecode") {
+        } else if last == Some(b"JBIG2Decode") {
+            (ImageFormat::Jbig2, Arc::<[u8]>::from(payload))
+        } else if last == Some(b"CCITTFaxDecode") && leading.is_empty() {
             match self.ccitt_image(stream, width as u32, height as u32) {
                 Some(bytes) => (ImageFormat::Png, Arc::from(bytes)),
                 None => {
@@ -1159,6 +1174,30 @@ impl Builder<'_> {
                     return Ok(());
                 }
             }
+        } else if last == Some(b"FlateDecode") && !leading.is_empty() {
+            match decode_filter(b"FlateDecode", &payload)
+                .ok()
+                .and_then(|data| {
+                    self.raw_image_data(&stream.dict, width as u32, height as u32, &data)
+                }) {
+                Some(bytes) => (ImageFormat::Png, Arc::from(bytes)),
+                None => {
+                    self.diagnostic(
+                        DiagnosticCode::Image,
+                        "PDF image data cannot be decoded after the filter chain",
+                    );
+                    return Ok(());
+                }
+            }
+        } else if leading.is_empty() && last.is_some() && last != Some(b"FlateDecode") {
+            self.diagnostic(
+                DiagnosticCode::Image,
+                format!(
+                    "PDF image filter not supported yet: {:?}",
+                    last.map(String::from_utf8_lossy)
+                ),
+            );
+            return Ok(());
         } else {
             match self.raw_image_rgba(stream, width as u32, height as u32) {
                 Some(bytes) => (ImageFormat::Png, Arc::from(bytes)),
@@ -1167,7 +1206,9 @@ impl Builder<'_> {
                         DiagnosticCode::Image,
                         format!(
                             "PDF image encoding not supported yet: {:?}",
-                            filter.map(String::from_utf8_lossy)
+                            filters
+                                .first()
+                                .map(|filter| String::from_utf8_lossy(filter))
                         ),
                     );
                     return Ok(());
@@ -1503,15 +1544,26 @@ impl Builder<'_> {
 
     /// Encodes 8-bit, predictor-free raw pixels as an RGBA PNG.
     fn raw_image_rgba(&self, stream: &lopdf::Stream, width: u32, height: u32) -> Option<Vec<u8>> {
-        let bits = stream_number(&stream.dict, b"BitsPerComponent", b"BPC").unwrap_or(8.0);
-        if bits != 8.0 {
-            return None;
-        }
-        let colorspace = stream_value(&stream.dict, b"ColorSpace", b"CS")
-            .and_then(|object| self.color_space(object))?;
         let data = stream
             .decompressed_content()
             .unwrap_or_else(|_| stream.content.clone());
+        self.raw_image_data(&stream.dict, width, height, &data)
+    }
+
+    /// Converts already decoded pixel data into a PNG, applying an optional soft mask.
+    fn raw_image_data(
+        &self,
+        dictionary: &Dictionary,
+        width: u32,
+        height: u32,
+        data: &[u8],
+    ) -> Option<Vec<u8>> {
+        let bits = stream_number(dictionary, b"BitsPerComponent", b"BPC").unwrap_or(8.0);
+        if bits != 8.0 {
+            return None;
+        }
+        let colorspace = stream_value(dictionary, b"ColorSpace", b"CS")
+            .and_then(|object| self.color_space(object))?;
         if data.len() < width as usize * height as usize * colorspace {
             return None;
         }
@@ -1535,7 +1587,7 @@ impl Builder<'_> {
             };
             rgba.extend_from_slice(&[r, g, b, 255]);
         }
-        if let Some(mask) = stream.dict.get(b"SMask").ok()
+        if let Some(mask) = dictionary.get(b"SMask").ok()
             && let Some(mask) = self
                 .resolve(mask)
                 .and_then(|object| object.as_stream().ok())
@@ -1576,6 +1628,98 @@ impl Builder<'_> {
             _ => None,
         }
     }
+}
+
+/// Filters of an image stream in application order.
+fn image_filters(dictionary: &Dictionary) -> Vec<Vec<u8>> {
+    let filter = dictionary
+        .get(b"Filter")
+        .or_else(|_| dictionary.get(b"F"))
+        .ok();
+    match filter {
+        Some(Object::Name(name)) => vec![name.clone()],
+        Some(Object::Array(values)) => values
+            .iter()
+            .filter_map(|value| value.as_name().ok().map(<[u8]>::to_vec))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Decodes one leading filter of an image filter chain.
+fn decode_filter(filter: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
+    match filter {
+        b"FlateDecode" | b"Fl" => {
+            let mut decoder = flate2::read::ZlibDecoder::new(data);
+            let mut output = Vec::new();
+            decoder
+                .read_to_end(&mut output)
+                .map_err(|error| format!("FlateDecode: {error}"))?;
+            Ok(output)
+        }
+        b"ASCIIHexDecode" | b"AHx" => decode_ascii_hex(data),
+        b"ASCII85Decode" | b"A85" => decode_ascii85(data),
+        other => Err(format!("{:?}", String::from_utf8_lossy(other))),
+    }
+}
+
+fn decode_ascii_hex(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut output = Vec::with_capacity(data.len() / 2);
+    let mut pending = None;
+    for &byte in data {
+        match byte {
+            b'>' => break,
+            b' ' | b'\n' | b'\r' | b'\t' | b'\x0c' | b'\x00' => continue,
+            _ => {}
+        }
+        let value = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            other => return Err(format!("ASCIIHexDecode: invalid digit {other:#x}")),
+        };
+        match pending.take() {
+            Some(high) => output.push(high << 4 | value),
+            None => pending = Some(value),
+        }
+    }
+    if let Some(high) = pending {
+        output.push(high << 4);
+    }
+    Ok(output)
+}
+
+fn decode_ascii85(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut output = Vec::with_capacity(data.len() * 4 / 5);
+    let mut group = Vec::with_capacity(5);
+    for &byte in data {
+        match byte {
+            b'~' => break,
+            b' ' | b'\n' | b'\r' | b'\t' | b'\x0c' | b'\x00' => continue,
+            b'z' if group.is_empty() => {
+                output.extend_from_slice(&[0, 0, 0, 0]);
+                continue;
+            }
+            b'!'..=b'u' => {}
+            other => return Err(format!("ASCII85Decode: invalid byte {other:#x}")),
+        }
+        group.push(u32::from(byte - b'!'));
+        if group.len() == 5 {
+            let value = group.iter().fold(0u32, |value, digit| value * 85 + digit);
+            output.extend_from_slice(&value.to_be_bytes());
+            group.clear();
+        }
+    }
+    if !group.is_empty() {
+        let length = group.len();
+        while group.len() < 5 {
+            group.push(84);
+        }
+        let value = group.iter().fold(0u32, |value, digit| value * 85 + digit);
+        let bytes = value.to_be_bytes();
+        output.extend_from_slice(&bytes[..length - 1]);
+    }
+    Ok(output)
 }
 
 fn push_clip(state: &mut State, clip: ClipState) {
@@ -1987,7 +2131,50 @@ fn resolve<'a>(document: &'a Document, object: &'a Object) -> Option<&'a Object>
 
 #[cfg(test)]
 mod tests {
-    use super::{CcittParams, decode_ccitt_rgba};
+    use super::{
+        CcittParams, decode_ascii_hex, decode_ascii85, decode_ccitt_rgba, decode_filter,
+        image_filters,
+    };
+    use lopdf::{Dictionary, Object};
+
+    fn flate_encode(data: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(data).expect("compress");
+        encoder.finish().expect("finish")
+    }
+
+    #[test]
+    fn parses_image_filter_chains() {
+        let mut dictionary = Dictionary::new();
+        dictionary.set(
+            "Filter",
+            Object::Array(vec![
+                Object::Name(b"FlateDecode".to_vec()),
+                Object::Name(b"DCTDecode".to_vec()),
+            ]),
+        );
+        assert_eq!(
+            image_filters(&dictionary),
+            vec![b"FlateDecode".to_vec(), b"DCTDecode".to_vec()]
+        );
+        let jpeg = b"\xff\xd8\xff\xd9";
+        let compressed = flate_encode(jpeg);
+        assert_eq!(
+            decode_filter(b"FlateDecode", &compressed).expect("inflate"),
+            jpeg
+        );
+    }
+
+    #[test]
+    fn decodes_ascii_wrapped_payloads() {
+        assert_eq!(decode_ascii_hex(b"48 65 6c 6c 6f>").expect("hex"), b"Hello");
+        assert_eq!(
+            decode_ascii85(b"87cURD]i,\"Ebo80~>").expect("ascii85"),
+            b"Hello World!"
+        );
+    }
 
     #[test]
     fn decodes_group4_ccitt() {
