@@ -26,8 +26,8 @@ use ofdbox_folio_ir::{
     Align, AssetId, Block, Border, BorderStyle, Cell, Column, ColumnWidth, Diagnostic,
     DiagnosticCode, FlowDocument, FontFamily, ImageAsset, ImageBlock, ImageFormat, Inline,
     InlineImage, LineSpacing, Link, LinkTarget, Margins, Metadata, PageSetup, ParaStyle, Paragraph,
-    Rgba, Row, Severity, Table, TableBorders, TextRun, TextStyle, Twips, detect_image_format,
-    image_dimensions,
+    Rgba, Row, Severity, Table, TableBorders, TableWidth, TextRun, TextStyle, Twips,
+    detect_image_format, image_dimensions,
 };
 
 /// Error returned when a Markdown file cannot be read.
@@ -240,17 +240,52 @@ impl<'a> Parser<'a> {
             lines.push(line.strip_prefix("    ").unwrap_or(line));
             self.index += 1;
         }
-        let mut paragraph_style = body_paragraph_style();
-        paragraph_style.line_spacing = LineSpacing::Single;
-        paragraph_style.space_after = Twips::from_pt(0.0);
-        paragraph_style.left_indent = Twips::from_mm(2.0);
-        paragraph_style.right_indent = Twips::from_mm(2.0);
-        let mut paragraph = Paragraph::new(paragraph_style);
-        paragraph.runs.push(Inline::Text(TextRun::new(
-            lines.join("\n"),
-            self.options.code.clone(),
-        )));
-        self.document.push(Block::Paragraph(paragraph));
+        // Every source line becomes its own paragraph so that blank lines inside the block keep
+        // their height (the layout collapses consecutive forced breaks in a single run).
+        let mut blocks = Vec::with_capacity(lines.len().max(1));
+        for line in &lines {
+            let mut style = body_paragraph_style();
+            style.line_spacing = LineSpacing::Single;
+            style.space_before = Twips::default();
+            style.space_after = Twips::default();
+            style.left_indent = Twips::default();
+            style.right_indent = Twips::default();
+            let mut paragraph = Paragraph::new(style);
+            if !line.is_empty() {
+                paragraph.runs.push(Inline::Text(TextRun::new(
+                    line.clone(),
+                    self.options.code.clone(),
+                )));
+            }
+            blocks.push(Block::Paragraph(paragraph));
+        }
+        if blocks.is_empty() {
+            blocks.push(Block::Paragraph(Paragraph::new(body_paragraph_style())));
+        }
+        // A one-cell shaded table gives the block a background and padding; the table also
+        // provides the gap to the surrounding paragraphs.
+        let mut table = Table::new(vec![Column {
+            width: ColumnWidth::Weight(1),
+        }]);
+        table.width = TableWidth::Percent(100.0);
+        table.cell_padding = Margins::uniform(Twips::from_mm(2.0));
+        let mut cell = Cell::new(blocks);
+        cell.shading = Some(code_block_background());
+        cell.padding = Some(Margins {
+            top: Twips::from_mm(2.0),
+            right: Twips::from_mm(2.5),
+            bottom: Twips::from_mm(2.5),
+            left: Twips::from_mm(2.5),
+        });
+        table.rows.push(Row::new(vec![cell]));
+        self.document.push(Block::Table(table));
+        // Tables carry no block spacing, so a short empty paragraph keeps a gap between the
+        // shaded block and the following text.
+        let mut spacer = body_paragraph_style();
+        spacer.space_before = Twips::default();
+        spacer.space_after = Twips::default();
+        spacer.line_spacing = LineSpacing::Exact(Twips::from_pt(6.0));
+        self.document.push(Block::Paragraph(Paragraph::new(spacer)));
     }
 
     fn parse_blockquote(&mut self) {
@@ -399,6 +434,10 @@ impl<'a> Parser<'a> {
             .report
             .push(Diagnostic::new(Severity::Warning, code, message.to_owned()));
     }
+}
+
+fn code_block_background() -> Rgba {
+    Rgba::from_rgb(0xF4, 0xF4, 0xF4)
 }
 
 fn body_paragraph_style() -> ParaStyle {
@@ -869,6 +908,15 @@ fn write_block(block: &Block, document: &FlowDocument, out: &mut String) {
             out.push_str("\n\n");
         }
         Block::Table(table) => {
+            if let Some(code) = code_block_text(table) {
+                if !out.is_empty() && !out.ends_with("\n\n") {
+                    out.push('\n');
+                }
+                out.push_str("```\n");
+                out.push_str(&code);
+                out.push_str("\n```\n\n");
+                return;
+            }
             write_table(table, document, out);
             out.push('\n');
         }
@@ -920,6 +968,37 @@ fn list_indent(left: Twips) -> String {
     let millimetres = left.to_mm().max(0.0);
     let level = (millimetres / 6.0).floor() as usize;
     "  ".repeat(level)
+}
+
+/// Recognises the one-cell shaded table produced for fenced code blocks.
+fn code_block_text(table: &Table) -> Option<String> {
+    let [row] = table.rows.as_slice() else {
+        return None;
+    };
+    let [cell] = row.cells.as_slice() else {
+        return None;
+    };
+    if cell.shading != Some(code_block_background()) {
+        return None;
+    }
+    let mut lines = Vec::with_capacity(cell.blocks.len());
+    for block in &cell.blocks {
+        let Block::Paragraph(paragraph) = block else {
+            return None;
+        };
+        let mut line = String::new();
+        for inline in &paragraph.runs {
+            let Inline::Text(run) = inline else {
+                return None;
+            };
+            if !is_code_font(&run.style) {
+                return None;
+            }
+            line.push_str(&run.text);
+        }
+        lines.push(line);
+    }
+    Some(lines.join("\n"))
 }
 
 fn write_table(table: &Table, document: &FlowDocument, out: &mut String) {
@@ -1142,8 +1221,12 @@ mod tests {
         let flow = parse("- one\n- two\n\n```rust\nfn main() {}\n```");
         let blocks = &flow.sections[0].blocks;
         assert!(matches!(blocks[0], Block::Paragraph(_)));
-        assert!(matches!(blocks[2], Block::Paragraph(_)));
-        let Block::Paragraph(code) = &blocks[2] else {
+        let Block::Table(table) = &blocks[2] else {
+            panic!("code block table");
+        };
+        let cell = &table.rows[0].cells[0];
+        assert!(cell.shading.is_some());
+        let Block::Paragraph(code) = &cell.blocks[0] else {
             panic!("code paragraph");
         };
         let Inline::Text(run) = &code.runs[0] else {
@@ -1151,6 +1234,31 @@ mod tests {
         };
         assert!(run.text.contains("fn main()"));
         assert_eq!(run.style.family.name, "Courier New");
+    }
+
+    #[test]
+    fn code_blocks_keep_blank_lines() {
+        let flow = parse("```\nlet a = 1;\n\nlet b = 2;\n```");
+        let Block::Table(table) = &flow.sections[0].blocks[0] else {
+            panic!("code block table");
+        };
+        let cell = &table.rows[0].cells[0];
+        assert!(cell.shading.is_some());
+        assert_eq!(cell.blocks.len(), 3, "two code lines and one blank line");
+        let Block::Paragraph(blank) = &cell.blocks[1] else {
+            panic!("blank line paragraph");
+        };
+        assert!(blank.runs.is_empty());
+    }
+
+    #[test]
+    fn writes_code_blocks_as_fences() {
+        let flow = parse("```\nlet a = 1;\n\nlet b = 2;\n```");
+        let markdown = write_markdown(&flow);
+        assert!(
+            markdown.contains("```\nlet a = 1;\n\nlet b = 2;\n```"),
+            "{markdown}"
+        );
     }
 
     #[test]
