@@ -771,21 +771,29 @@ impl CpuRenderer {
 }
 
 /// Quantize the on-screen image size into a cache tier; 0 means full size.
+///
+/// The image local space is the rectangle the renderer fills; when the element leaves it empty
+/// the image's pixel size is used (PDF images are drawn as a unit square scaled by the matrix),
+/// so the tier still follows the on-screen size instead of falling back to full resolution.
 fn image_tier(element: &ImageElement, transform: Matrix) -> u32 {
-    if !(element.rect.width.is_finite()
+    let (width, height) = if element.rect.width.is_finite()
         && element.rect.height.is_finite()
         && element.rect.width > 0.0
-        && element.rect.height > 0.0)
+        && element.rect.height > 0.0
     {
+        (element.rect.width, element.rect.height)
+    } else {
+        (
+            f64::from(element.image.pixel_width),
+            f64::from(element.image.pixel_height),
+        )
+    };
+    if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
         return 0;
     }
-    let scale = (transform.a * transform.d - transform.b * transform.c)
-        .abs()
-        .sqrt();
-    if !(scale.is_finite() && scale > 0.0) {
-        return 0;
-    }
-    let pixels = element.rect.width.max(element.rect.height) * scale;
+    let scale_x = (transform.a * transform.a + transform.b * transform.b).sqrt();
+    let scale_y = (transform.c * transform.c + transform.d * transform.d).sqrt();
+    let pixels = (width * scale_x).max(height * scale_y);
     if !(pixels.is_finite() && pixels >= 1.0) {
         return 0;
     }
@@ -980,7 +988,7 @@ fn to_bez_path(path: &Path) -> BezPath {
 
 #[cfg(test)]
 mod tests {
-    use super::{CpuRenderer, PixelRect, RasterTarget};
+    use super::{CpuRenderer, PixelRect, RasterTarget, image_tier};
     use crate::options::RenderOptions;
     use ofdbox_folio_ir::{
         DiagnosticCode, Element, FillRule, Group, ImageAsset, ImageElement, ImageFormat, Matrix,
@@ -1425,5 +1433,23 @@ mod tests {
         assert_eq!(target.data()[..4], [255, 0, 0, 255]);
         assert_eq!(target.width(), 38);
         assert_eq!(target.height(), 38);
+    }
+
+    #[test]
+    fn image_tier_follows_the_rendered_size_for_unit_square_images() {
+        let store_image = Arc::new(ImageAsset::new(
+            ImageFormat::Png,
+            Arc::from(&[][..]),
+            4000,
+            5000,
+        ));
+        let element = ImageElement {
+            image: store_image,
+            rect: Rect::default(),
+            transform: Matrix::scale(0.1, 0.1),
+            alpha: 1.0,
+        };
+        // 5000 * 0.1 = 500 device pixels -> the next power-of-two tier.
+        assert_eq!(image_tier(&element, Matrix::scale(0.1, 0.1)), 512);
     }
 }

@@ -93,16 +93,101 @@ pub fn decode_image(
 
 /// Decode an image and downscale it so its longest edge is at most `max_dim`.
 ///
-/// The encoded image is decoded at full resolution first; the result is kept
-/// smaller in the decoded cache, which is where most long-session memory lives.
+/// JPEG sources are decoded at a reduced IDCT size when the target is smaller than the
+/// full image, which keeps scanned pages cheap to display; other formats are decoded at
+/// full resolution and resized afterwards.
 pub fn decode_image_tier(
     format: ImageFormat,
     data: &[u8],
     max_pixels: u64,
     max_dim: u32,
 ) -> Result<DecodedImage, RenderError> {
-    let image = decode_image(format, data, max_pixels)?;
+    let image = if format == ImageFormat::Jpeg && max_dim > 0 {
+        decode_jpeg_tier(data, max_pixels, max_dim)?
+    } else {
+        decode_image(format, data, max_pixels)?
+    };
     Ok(resize_rgba(image, max_dim))
+}
+
+/// Decodes a JPEG at a reduced resolution when the IDCT size allows it.
+fn decode_jpeg_tier(
+    data: &[u8],
+    max_pixels: u64,
+    max_dim: u32,
+) -> Result<DecodedImage, RenderError> {
+    let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(data));
+    decoder
+        .read_info()
+        .map_err(|error| RenderError::Image(error.to_string()))?;
+    let header = decoder
+        .info()
+        .ok_or_else(|| RenderError::Image("missing JPEG image info".to_owned()))?;
+    let header_width = u32::from(header.width);
+    let header_height = u32::from(header.height);
+    let pixel_count = u64::from(header_width) * u64::from(header_height);
+    if pixel_count > max_pixels {
+        return Err(RenderError::Image(
+            "image pixel count exceeds the limit".to_owned(),
+        ));
+    }
+    let longest = header_width.max(header_height);
+    if max_dim < longest {
+        let ratio = f64::from(max_dim) / f64::from(longest);
+        let requested_width = (f64::from(header_width) * ratio).round().max(1.0) as u16;
+        let requested_height = (f64::from(header_height) * ratio).round().max(1.0) as u16;
+        // `scale` only supports IDCT sizes the codec can produce; fall back to the full
+        // resolution instead of dropping the image when it refuses.
+        let _ = decoder.scale(requested_width, requested_height);
+    }
+    let pixels = decoder
+        .decode()
+        .map_err(|error| RenderError::Image(error.to_string()))?;
+    let info = decoder
+        .info()
+        .ok_or_else(|| RenderError::Image("missing JPEG image info".to_owned()))?;
+    let pixel_format = info.pixel_format;
+    let width = u32::from(info.width);
+    let height = u32::from(info.height);
+    let rgba = jpeg_to_rgba(pixels, pixel_format);
+    Ok(DecodedImage {
+        width,
+        height,
+        rgba,
+    })
+}
+
+fn jpeg_to_rgba(pixels: Vec<u8>, pixel_format: jpeg_decoder::PixelFormat) -> Vec<u8> {
+    match pixel_format {
+        jpeg_decoder::PixelFormat::L8 => pixels
+            .iter()
+            .flat_map(|value| [*value, *value, *value, 255])
+            .collect(),
+        jpeg_decoder::PixelFormat::RGB24 => pixels
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
+            .collect(),
+        jpeg_decoder::PixelFormat::CMYK32 => pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|pixel| {
+                let c = u16::from(pixel[0]);
+                let m = u16::from(pixel[1]);
+                let y = u16::from(pixel[2]);
+                let k = u16::from(pixel[3]);
+                [
+                    (255 - (c + k).min(255)) as u8,
+                    (255 - (m + k).min(255)) as u8,
+                    (255 - (y + k).min(255)) as u8,
+                    255,
+                ]
+            })
+            .collect(),
+        jpeg_decoder::PixelFormat::L16 => Vec::new(),
+    }
 }
 
 fn resize_rgba(image: DecodedImage, max_dim: u32) -> DecodedImage {
@@ -113,6 +198,9 @@ fn resize_rgba(image: DecodedImage, max_dim: u32) -> DecodedImage {
     let scale = f64::from(max_dim) / f64::from(longest);
     let width = ((f64::from(image.width) * scale).round() as u32).max(1);
     let height = ((f64::from(image.height) * scale).round() as u32).max(1);
+    if scale <= 0.5 {
+        return resize_rgba_box(image, width, height);
+    }
     let mut rgba = vec![0_u8; width as usize * height as usize * 4];
     for y in 0..height {
         let source_y = (f64::from(y) + 0.5) / f64::from(height) * f64::from(image.height) - 0.5;
@@ -214,40 +302,12 @@ fn decode_jpeg(data: &[u8], max_pixels: u64) -> Result<DecodedImage, RenderError
     let info = decoder
         .info()
         .ok_or_else(|| RenderError::Image("missing JPEG image info".to_owned()))?;
-    let rgba = match info.pixel_format {
-        jpeg_decoder::PixelFormat::L8 => pixels
-            .iter()
-            .flat_map(|value| [*value, *value, *value, 255])
-            .collect(),
-        jpeg_decoder::PixelFormat::RGB24 => pixels
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
-            .collect(),
-        jpeg_decoder::PixelFormat::CMYK32 => pixels
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .flat_map(|pixel| {
-                let c = u16::from(pixel[0]);
-                let m = u16::from(pixel[1]);
-                let y = u16::from(pixel[2]);
-                let k = u16::from(pixel[3]);
-                [
-                    (255 - ((c + k).min(255))) as u8,
-                    (255 - ((m + k).min(255))) as u8,
-                    (255 - ((y + k).min(255))) as u8,
-                    255,
-                ]
-            })
-            .collect(),
-        jpeg_decoder::PixelFormat::L16 => {
-            return Err(RenderError::Image(
-                "16-bit grayscale JPEG is not supported".to_owned(),
-            ));
-        }
-    };
+    if info.pixel_format == jpeg_decoder::PixelFormat::L16 {
+        return Err(RenderError::Image(
+            "16-bit grayscale JPEG is not supported".to_owned(),
+        ));
+    }
+    let rgba = jpeg_to_rgba(pixels, info.pixel_format);
     Ok(DecodedImage {
         width: u32::from(info.width),
         height: u32::from(info.height),
@@ -370,6 +430,41 @@ fn decode_jbig2(data: &[u8]) -> Result<DecodedImage, RenderError> {
         height: page.height,
         rgba,
     })
+}
+
+/// Area-averaged downscale: reads every source pixel exactly once.
+fn resize_rgba_box(image: DecodedImage, width: u32, height: u32) -> DecodedImage {
+    let mut rgba = vec![0_u8; width as usize * height as usize * 4];
+    let source_width = image.width as usize;
+    for y in 0..height as usize {
+        let y0 = y * image.height as usize / height as usize;
+        let y1 = ((y + 1) * image.height as usize / height as usize).max(y0 + 1);
+        for x in 0..width as usize {
+            let x0 = x * source_width / width as usize;
+            let x1 = ((x + 1) * source_width / width as usize).max(x0 + 1);
+            let mut sums = [0_u32; 4];
+            let mut count = 0_u32;
+            for sy in y0..y1.min(image.height as usize) {
+                for sx in x0..x1.min(source_width) {
+                    let index = (sy * source_width + sx) * 4;
+                    for channel in 0..4 {
+                        sums[channel] += u32::from(image.rgba[index + channel]);
+                    }
+                    count += 1;
+                }
+            }
+            let count = count.max(1);
+            let target = (y * width as usize + x) * 4;
+            for channel in 0..4 {
+                rgba[target + channel] = ((sums[channel] + count / 2) / count) as u8;
+            }
+        }
+    }
+    DecodedImage {
+        width,
+        height,
+        rgba,
+    }
 }
 
 #[cfg(test)]
