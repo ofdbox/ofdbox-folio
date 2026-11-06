@@ -695,20 +695,23 @@ impl CpuRenderer {
                 return Ok(());
             }
         };
+        // The local rectangle keeps the image's pixel size even when the pixmap was decoded at a
+        // smaller display tier: the brush stretches it over the rectangle, while the fallback to
+        // the pixmap size would shrink the quad by the tier ratio.
         let width = element
             .rect
             .width
             .is_finite()
             .then_some(element.rect.width)
             .filter(|width| *width > 0.0)
-            .unwrap_or_else(|| f64::from(pixmap.width()));
+            .unwrap_or_else(|| f64::from(element.image.pixel_width));
         let height = element
             .rect
             .height
             .is_finite()
             .then_some(element.rect.height)
             .filter(|height| *height > 0.0)
-            .unwrap_or_else(|| f64::from(pixmap.height()));
+            .unwrap_or_else(|| f64::from(element.image.pixel_height));
         let target = element.transform.then(parent);
         context.set_transform(affine(target));
         let image = ImageBrush {
@@ -718,8 +721,15 @@ impl CpuRenderer {
                 ..Default::default()
             },
         };
+        // The decoded pixmap may be a downscaled tier; map its pixel space onto the local
+        // rectangle so the tier ratio does not shrink the drawn quad.
+        context.set_paint_transform(Affine::scale_non_uniform(
+            width / f64::from(pixmap.width()),
+            height / f64::from(pixmap.height()),
+        ));
         context.set_paint(Brush::Image(image));
         context.fill_rect(&KurboRect::new(0.0, 0.0, width, height));
+        context.set_paint_transform(Affine::IDENTITY);
         Ok(())
     }
 
@@ -1433,6 +1443,40 @@ mod tests {
         assert_eq!(target.data()[..4], [255, 0, 0, 255]);
         assert_eq!(target.width(), 38);
         assert_eq!(target.height(), 38);
+    }
+
+    #[test]
+    fn tiered_image_fills_its_whole_local_rectangle() {
+        let store_image = Arc::new(ImageAsset::new(
+            ImageFormat::Png,
+            Arc::from(png_bytes(256, 256, [200, 30, 30, 255])),
+            256,
+            256,
+        ));
+        let transform = Matrix::scale(0.1323, 0.1323);
+        let scene = Scene {
+            size: Size::new(100.0, 100.0),
+            root: Group {
+                children: vec![Element::Image(ImageElement {
+                    image: store_image,
+                    rect: Rect::default(),
+                    transform,
+                    alpha: 1.0,
+                })],
+                ..Group::default()
+            },
+            diagnostics: Vec::new(),
+        };
+        let mut target = RasterTarget::from_size(Size::new(100.0, 100.0), 96.0).expect("target");
+        let mut renderer = CpuRenderer::new(RenderOptions::default());
+        renderer.render_scene(&scene, &mut target).expect("render");
+        let pixel = |x: u32, y: u32| {
+            let index = ((y * u32::from(target.width()) + x) * 4) as usize;
+            target.data()[index..index + 4].to_vec()
+        };
+        // The quad is about 128 px wide; a tiered pixmap must still cover all of it.
+        assert_eq!(pixel(96, 96), [200, 30, 30, 255]);
+        assert_eq!(pixel(200, 200), [255, 255, 255, 255]);
     }
 
     #[test]
