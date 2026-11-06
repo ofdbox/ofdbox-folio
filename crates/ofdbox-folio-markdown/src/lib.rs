@@ -145,7 +145,8 @@ impl<'a> Parser<'a> {
             }
             let line = self.lines[self.index];
             if let Some((fence, info)) = fence_start(line) {
-                self.parse_code_block(fence, info);
+                let indent = line.len() - line.trim_start().len();
+                self.parse_code_block(fence, info, indent);
             } else if let Some((level, heading)) = heading(line) {
                 self.parse_heading(level, heading);
             } else if is_horizontal_rule(line) {
@@ -228,7 +229,7 @@ impl<'a> Parser<'a> {
         self.document.push(Block::Paragraph(paragraph));
     }
 
-    fn parse_code_block(&mut self, fence: &str, _info: &str) {
+    fn parse_code_block(&mut self, fence: &str, _info: &str, fence_indent: usize) {
         self.index += 1;
         let mut lines = Vec::new();
         while self.index < self.lines.len() {
@@ -237,7 +238,15 @@ impl<'a> Parser<'a> {
                 self.index += 1;
                 break;
             }
-            lines.push(line.strip_prefix("    ").unwrap_or(line));
+            // Strip the opening fence's own indentation, then keep everything else: leading
+            // whitespace is meaningful inside a code block.
+            let mut content = line;
+            let mut removed = 0;
+            while removed < fence_indent && content.starts_with(' ') {
+                content = &content[1..];
+                removed += 1;
+            }
+            lines.push(code_line(content));
             self.index += 1;
         }
         // Every source line becomes its own paragraph so that blank lines inside the block keep
@@ -434,6 +443,29 @@ impl<'a> Parser<'a> {
             .report
             .push(Diagnostic::new(Severity::Warning, code, message.to_owned()));
     }
+}
+
+/// Prepares one code line for the Flow IR.
+///
+/// The line breaker trims whitespace at the start of a line, so leading spaces and tabs are
+/// encoded as non-breaking spaces; tabs are expanded (four columns) because the layout has no
+/// tab stops for code blocks.
+fn code_line(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut leading = true;
+    for ch in line.chars() {
+        match ch {
+            '\t' if leading => out.push_str("\u{00A0}\u{00A0}\u{00A0}\u{00A0}"),
+            '\t' => out.push_str("    "),
+            ' ' if leading => out.push('\u{00A0}'),
+            ' ' => out.push(' '),
+            _ => {
+                leading = false;
+                out.push(ch);
+            }
+        }
+    }
+    out
 }
 
 fn code_block_background() -> Rgba {
@@ -994,7 +1026,7 @@ fn code_block_text(table: &Table) -> Option<String> {
             if !is_code_font(&run.style) {
                 return None;
             }
-            line.push_str(&run.text);
+            line.push_str(&run.text.replace('\u{00A0}', " "));
         }
         lines.push(line);
     }
@@ -1259,6 +1291,29 @@ mod tests {
             markdown.contains("```\nlet a = 1;\n\nlet b = 2;\n```"),
             "{markdown}"
         );
+    }
+
+    #[test]
+    fn code_blocks_keep_leading_indentation() {
+        let flow = parse("```\nfn main() {\n    let x = 1;\n}\n```");
+        let Block::Table(table) = &flow.sections[0].blocks[0] else {
+            panic!("code block table");
+        };
+        let cell = &table.rows[0].cells[0];
+        let Block::Paragraph(indented) = &cell.blocks[1] else {
+            panic!("indented line");
+        };
+        let Inline::Text(run) = &indented.runs[0] else {
+            panic!("code run");
+        };
+        assert!(
+            run.text
+                .starts_with("\u{00A0}\u{00A0}\u{00A0}\u{00A0}let x = 1;"),
+            "{:?}",
+            run.text
+        );
+        let markdown = write_markdown(&flow);
+        assert!(markdown.contains("\n    let x = 1;\n"), "{markdown}");
     }
 
     #[test]
