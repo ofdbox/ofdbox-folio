@@ -12,6 +12,8 @@ mod catalog;
 mod cff;
 mod error;
 mod frontend;
+mod glyph_names;
+mod glyph_names_data;
 
 use std::collections::HashMap;
 use std::sync::Arc;

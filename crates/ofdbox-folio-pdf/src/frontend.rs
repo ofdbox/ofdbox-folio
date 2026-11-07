@@ -24,6 +24,7 @@ use ofdbox_folio_ir::{
 
 use crate::cff::{parse_bare_cff, wrap_otf};
 use crate::error::{PdfError, parse_error};
+use crate::glyph_names::{code_unicode_map, default_base_for};
 
 const PT_TO_MM: f64 = 25.4 / 72.0;
 
@@ -72,6 +73,8 @@ pub(crate) struct FontState {
     cff_cid_to_gid: HashMap<u16, u16>,
     /// Character code to glyph index mapping for simple bare CFF fonts.
     cff_code_to_gid: HashMap<u8, u16>,
+    /// Character code to Unicode mapping recovered from `/Encoding` and glyph names.
+    code_unicode: HashMap<u32, char>,
     /// The embedded font was unavailable and an external font was substituted.
     fallback: bool,
 }
@@ -915,7 +918,7 @@ impl Builder<'_> {
     }
 
     fn load_font_inner(&mut self, name: &[u8], resources: &Dictionary) -> Option<Arc<FontState>> {
-        let (base_font, identity, embedded, to_unicode, font_dictionary) = {
+        let (base_font, identity, embedded, to_unicode, font_dictionary, code_unicode) = {
             let fonts = resources
                 .get(b"Font")
                 .ok()
@@ -992,30 +995,62 @@ impl Builder<'_> {
                 .and_then(|stream| stream.decompressed_content().ok())
                 .map(|bytes| parse_to_unicode(&bytes))
                 .unwrap_or_default();
+            let subtype = dictionary
+                .get(b"Subtype")
+                .ok()
+                .and_then(|object| object.as_name().ok())
+                .map(<[u8]>::to_vec)
+                .unwrap_or_default();
+            let code_unicode = if identity {
+                HashMap::new()
+            } else {
+                let encoding = dictionary
+                    .get(b"Encoding")
+                    .ok()
+                    .and_then(|object| self.resolve(object));
+                code_unicode_map(encoding, default_base_for(&subtype))
+            };
             (
                 base_font,
                 identity,
                 embedded,
                 to_unicode,
                 font_dictionary.clone(),
+                code_unicode,
             )
         };
-        let (data, fallback, cff_cid_to_gid, cff_code_to_gid) = match embedded {
+        let (data, fallback, cff_cid_to_gid, cff_code_to_gid, code_unicode) = match embedded {
             Some((bytes, subtype)) if subtype == b"CIDFontType0C" || subtype == b"Type1C" => {
                 match self.wrap_bare_cff(&bytes, &font_dictionary, subtype == b"CIDFontType0C") {
-                    Ok((wrapped, cid_mapping, code_mapping)) => {
-                        (Arc::from(wrapped), false, cid_mapping, code_mapping)
-                    }
+                    Ok((wrapped, cid_mapping, code_mapping)) => (
+                        Arc::from(wrapped),
+                        false,
+                        cid_mapping,
+                        code_mapping,
+                        code_unicode,
+                    ),
                     Err(error) => {
                         self.diagnostic(
                             DiagnosticCode::Font,
                             format!("unsupported embedded CFF font: {error}"),
                         );
-                        (Arc::from(bytes), false, HashMap::new(), HashMap::new())
+                        (
+                            Arc::from(bytes),
+                            false,
+                            HashMap::new(),
+                            HashMap::new(),
+                            code_unicode,
+                        )
                     }
                 }
             }
-            Some((bytes, _)) => (Arc::from(bytes), false, HashMap::new(), HashMap::new()),
+            Some((bytes, _)) => (
+                Arc::from(bytes),
+                false,
+                HashMap::new(),
+                HashMap::new(),
+                code_unicode,
+            ),
             None => {
                 let request = FontRequest {
                     font_id: None,
@@ -1033,7 +1068,7 @@ impl Builder<'_> {
                     .as_mut()
                     .and_then(|provider| provider.load(&request).ok().flatten())
                 {
-                    Some(bytes) => (bytes, true, HashMap::new(), HashMap::new()),
+                    Some(bytes) => (bytes, true, HashMap::new(), HashMap::new(), code_unicode),
                     None => {
                         self.diagnostic(
                             DiagnosticCode::MissingFont,
@@ -1042,7 +1077,13 @@ impl Builder<'_> {
                                 base_font.as_deref().unwrap_or("unnamed")
                             ),
                         );
-                        (Arc::from(&b""[..]), true, HashMap::new(), HashMap::new())
+                        (
+                            Arc::from(&b""[..]),
+                            true,
+                            HashMap::new(),
+                            HashMap::new(),
+                            code_unicode,
+                        )
                     }
                 }
             }
@@ -1059,6 +1100,7 @@ impl Builder<'_> {
             to_unicode,
             cff_cid_to_gid,
             cff_code_to_gid,
+            code_unicode,
             fallback,
         }))
     }
@@ -1124,14 +1166,13 @@ impl Builder<'_> {
             }
         } else {
             for &code in bytes {
-                let codepoint = font_state
+                let character = font_state
                     .to_unicode
                     .get(&u32::from(code))
                     .copied()
-                    .unwrap_or(u32::from(code));
-                let Some(character) = char::from_u32(codepoint) else {
-                    continue;
-                };
+                    .and_then(char::from_u32)
+                    .or_else(|| font_state.code_unicode.get(&u32::from(code)).copied())
+                    .unwrap_or('\u{FFFD}');
                 let glyph_id = if let Some(glyph) = font_state.cff_code_to_gid.get(&code) {
                     u32::from(*glyph)
                 } else {
