@@ -21,6 +21,7 @@ use ofdbox_core::model::page::{
     PatternRelativeTo, ShdSegment, Template, TemplateZOrder, TextObject,
 };
 use ofdbox_core::model::res::{Charset, CompositeGraphicUnit, DrawParam, Res};
+use ofdbox_folio_ir::cff::{parse_bare_cff, wrap_otf};
 use ofdbox_folio_ir::{
     Clip, Cluster, Diagnostic, DiagnosticCode, Element, FillRule, FontAsset, FontProvider,
     FontRequest, Glyph, GlyphRun, GradientExtend, GradientStop, Group, ImageAsset, ImageElement,
@@ -268,6 +269,50 @@ fn font_asset(data: Arc<[u8]>, resource: &FontResource) -> FontAsset {
 pub(crate) struct ResolvedFont {
     asset: Arc<FontAsset>,
     fallback: bool,
+    /// CID to glyph mapping for bare CFF fonts wrapped at load time.
+    cid_to_gid: HashMap<u16, u16>,
+    /// Glyph count of the resolved font (0 when unknown).
+    glyph_count: u16,
+}
+
+/// Wraps a bare CFF table (exported by some OFD producers instead of OpenType) into a minimal
+/// OpenType container so the rasterizer can parse it.
+fn wrap_bare_cff_font(bytes: &[u8]) -> Option<(Vec<u8>, HashMap<u16, u16>, u16)> {
+    // A bare CFF table starts with major version 1 / minor version 0 and has no SFNT magic.
+    if bytes.len() < 4 || bytes[0] != 1 || bytes[1] != 0 {
+        return None;
+    }
+    let cff = parse_bare_cff(bytes).ok()?;
+    let glyphs = cff.glyphs.max(1);
+    let advances = vec![1000_u16; usize::from(glyphs)];
+    let wrapped = wrap_otf(&cff, bytes, &advances, [-500, -250, 1500, 1000]).ok()?;
+    Some((wrapped, cff.cid_to_gid, cff.glyphs))
+}
+
+/// Maps one value from an OFD `CGTransform` glyph list to a real glyph index.
+///
+/// Some producers write CIDs there instead of glyph indices; the CFF charset mapping recovered
+/// when wrapping the font decides which form applies (values outside the glyph count are CIDs).
+fn map_cg_glyph(
+    value: u32,
+    cid_to_gid: &HashMap<u16, u16>,
+    glyph_count: u16,
+    cid_mode: bool,
+) -> u32 {
+    let Ok(value16) = u16::try_from(value) else {
+        return 0;
+    };
+    if cid_mode {
+        if let Some(glyph) = cid_to_gid.get(&value16) {
+            return u32::from(*glyph);
+        }
+        return 0;
+    }
+    if glyph_count > 0 && value16 >= glyph_count {
+        0
+    } else {
+        u32::from(value16)
+    }
 }
 
 #[derive(Clone)]
@@ -1210,8 +1255,13 @@ impl Builder<'_> {
         if all_chars.is_empty() {
             return Vec::new();
         }
-        let (font, used_fallback) = match self.font(&font_id) {
-            Some(resolved) => (resolved.asset, resolved.fallback),
+        let (font, used_fallback, cid_to_gid, glyph_count) = match self.font(&font_id) {
+            Some(resolved) => (
+                resolved.asset,
+                resolved.fallback,
+                resolved.cid_to_gid,
+                resolved.glyph_count,
+            ),
             None => {
                 self.diagnostic(
                     DiagnosticCode::Font,
@@ -1224,7 +1274,7 @@ impl Builder<'_> {
                 };
                 let asset_id = self.store.add_font_asset(asset);
                 match self.store.font(asset_id).cloned() {
-                    Some(font) => (font, true),
+                    Some(font) => (font, true, HashMap::new(), 0),
                     None => return Vec::new(),
                 }
             }
@@ -1279,6 +1329,22 @@ impl Builder<'_> {
         };
 
         let mut slots = glyph_slots(object, all_chars.len());
+        // Provider fonts do not carry a known glyph count; fall back to the parsed face so glyph
+        // indices from CGTransform can still be validated.
+        let glyph_count = if glyph_count > 0 {
+            glyph_count
+        } else {
+            face.as_ref()
+                .map(ttf_parser::Face::number_of_glyphs)
+                .unwrap_or(0)
+        };
+        let highest_glyph = slots.iter().flatten().flatten().copied().max().unwrap_or(0);
+        let cid_mode = !cid_to_gid.is_empty() && highest_glyph >= u32::from(glyph_count.max(1));
+        for glyphs in slots.iter_mut().flatten() {
+            for glyph in glyphs.iter_mut() {
+                *glyph = map_cg_glyph(*glyph, &cid_to_gid, glyph_count, cid_mode);
+            }
+        }
         if used_fallback {
             // The fallback font cannot reuse the glyph indices of the original font, so look glyphs up again by Unicode.
             slots.fill(None);
@@ -1645,29 +1711,45 @@ impl Builder<'_> {
                 .read_res_file(&resource.res, file)
                 .ok()
         });
-        let (data, fallback) = if let Some(bytes) = embedded.filter(|bytes| !bytes.is_empty()) {
-            (Arc::<[u8]>::from(bytes), false)
-        } else {
-            let provider = self.font_provider.as_mut()?;
-            let request = FontRequest {
-                font_id: Some(resource.id.as_str()),
-                font_name: resource.name.as_deref(),
-                family_name: resource.family.as_deref(),
-                charset: resource.charset.as_deref(),
-                bold: resource.bold,
-                italic: resource.italic,
-                serif: resource.serif,
-                fixed_width: resource.fixed_width,
-                font_file: resource.file.as_ref().map(|file| file.as_str()),
+        let (data, fallback, cid_to_gid, glyph_count) =
+            if let Some(bytes) = embedded.filter(|bytes| !bytes.is_empty()) {
+                match wrap_bare_cff_font(&bytes) {
+                    Some((wrapped, mapping, glyphs)) => {
+                        (Arc::<[u8]>::from(wrapped), false, mapping, glyphs)
+                    }
+                    None => {
+                        let glyphs = ttf_parser::Face::parse(&bytes, 0)
+                            .map(|face| face.number_of_glyphs())
+                            .unwrap_or(0);
+                        (Arc::<[u8]>::from(bytes), false, HashMap::new(), glyphs)
+                    }
+                }
+            } else {
+                let provider = self.font_provider.as_mut()?;
+                let request = FontRequest {
+                    font_id: Some(resource.id.as_str()),
+                    font_name: resource.name.as_deref(),
+                    family_name: resource.family.as_deref(),
+                    charset: resource.charset.as_deref(),
+                    bold: resource.bold,
+                    italic: resource.italic,
+                    serif: resource.serif,
+                    fixed_width: resource.fixed_width,
+                    font_file: resource.file.as_ref().map(|file| file.as_str()),
+                };
+                (provider.load(&request).ok()??, true, HashMap::new(), 0)
             };
-            (provider.load(&request).ok()??, true)
-        };
         let asset_id = self.store.add_font_asset(font_asset(data, &resource));
         let asset = self
             .store
             .font(asset_id)
             .cloned()
-            .map(|asset| ResolvedFont { asset, fallback });
+            .map(|asset| ResolvedFont {
+                asset,
+                fallback,
+                cid_to_gid,
+                glyph_count,
+            });
         self.font_cache.insert(key, asset.clone());
         asset
     }
@@ -2901,8 +2983,8 @@ fn image_format_from_path(path: &str) -> ImageFormat {
 mod tests {
     use super::glyph_slots;
     use super::{
-        components_to_rgba, distribute_stops, gradient_axis, gradient_extend, matrix_from_array,
-        parse_color_components, parse_path_data,
+        components_to_rgba, distribute_stops, gradient_axis, gradient_extend, map_cg_glyph,
+        matrix_from_array, parse_color_components, parse_path_data, wrap_bare_cff_font,
     };
     use ofdbox_core::model::definition::{DeltaArray, StArray};
     use ofdbox_core::model::page::{CgTransform, MapType, TextCode, TextObject};
@@ -3147,5 +3229,23 @@ mod tests {
         assert!(parse_path_data("M 0").is_none());
         assert!(parse_path_data("X 0 0").is_none());
         assert!(parse_path_data("M 0 0 L 1").is_none());
+    }
+
+    #[test]
+    fn cg_transform_cid_values_map_through_the_cff_charset() {
+        use std::collections::HashMap;
+
+        let mapping: HashMap<u16, u16> = [(5505, 1)].into_iter().collect();
+        assert_eq!(map_cg_glyph(5505, &mapping, 2, true), 1);
+        assert_eq!(map_cg_glyph(5506, &mapping, 2, true), 0);
+        assert_eq!(map_cg_glyph(5505, &mapping, 2, false), 0);
+        assert_eq!(map_cg_glyph(1, &mapping, 2, false), 1);
+    }
+
+    #[test]
+    fn bare_cff_detection_ignores_sfnt_fonts() {
+        assert!(wrap_bare_cff_font(b"OTTO....").is_none());
+        assert!(wrap_bare_cff_font(b"\x00\x01\x00\x00....").is_none());
+        assert!(wrap_bare_cff_font(b"\x01\x00\x04\x03").is_none());
     }
 }

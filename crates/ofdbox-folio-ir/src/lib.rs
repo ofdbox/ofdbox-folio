@@ -9,6 +9,7 @@
 //! layout algorithms, rendering backends, and format adapters live in other crates.
 
 pub mod asset;
+pub mod cff;
 pub mod fixed;
 pub mod flow;
 pub mod font;

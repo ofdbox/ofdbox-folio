@@ -22,9 +22,9 @@ use ofdbox_folio_ir::{
     Size, StrokePaint, StrokeStyle, TextElement, TextItem, TextLayer, TextLine,
 };
 
-use crate::cff::{parse_bare_cff, wrap_otf};
 use crate::error::{PdfError, parse_error};
 use crate::glyph_names::{code_unicode_map, default_base_for};
+use ofdbox_folio_ir::cff::{parse_bare_cff, wrap_otf};
 
 const PT_TO_MM: f64 = 25.4 / 72.0;
 

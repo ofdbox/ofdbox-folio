@@ -1,12 +1,11 @@
-//! Minimal support for bare CFF fonts embedded as `/FontFile3` (`/CIDFontType0C`).
+//! Minimal support for bare CFF tables embedded by document formats.
 //!
-//! PDF allows a Type0 font to embed a standalone CFF table instead of an OpenType font. The
+//! PDF (`/FontFile3` with `/CIDFontType0C` or `/Type1C`) and OFD (`FontFile` entries with a CFF
+//! header instead of OpenType) both allow a standalone CFF table instead of an SFNT font. The
 //! render pipeline (skrifa / ttf-parser) only understands SFNT fonts, so the CFF table is parsed
 //! here to recover the CID-to-glyph mapping and then wrapped in a minimal OpenType container.
 
 use std::collections::HashMap;
-
-use crate::error::PdfError;
 
 /// Narrow error type for the CFF adapter.
 #[derive(Debug, thiserror::Error)]
@@ -17,7 +16,7 @@ pub enum CffError {
 }
 
 /// A parsed standalone CFF font.
-pub(crate) struct BareCff {
+pub struct BareCff {
     /// Number of glyphs (including `.notdef`).
     pub glyphs: u16,
     /// CID to glyph index mapping; empty for non-CID fonts.
@@ -28,7 +27,8 @@ pub(crate) struct BareCff {
     pub cid_of_gid: Vec<u16>,
 }
 
-pub(crate) fn parse_bare_cff(data: &[u8]) -> Result<BareCff, CffError> {
+/// Parses a standalone CFF table and recovers its glyph count, charset and encoding mappings.
+pub fn parse_bare_cff(data: &[u8]) -> Result<BareCff, CffError> {
     if data.len() < 4 || data[0] != 1 {
         return Err(CffError::Invalid("missing CFF header".to_owned()));
     }
@@ -357,12 +357,12 @@ fn parse_dict(data: &[u8]) -> Result<HashMap<u16, Vec<f64>>, CffError> {
 ///
 /// `advances` holds one advance width per glyph in 1000-unit em space; missing entries fall back
 /// to 1000. `bbox` is the font bounding box in the same units.
-pub(crate) fn wrap_otf(
+pub fn wrap_otf(
     cff: &BareCff,
     data: &[u8],
     advances: &[u16],
     bbox: [i16; 4],
-) -> Result<Vec<u8>, PdfError> {
+) -> Result<Vec<u8>, CffError> {
     let glyphs = cff.glyphs.max(1);
     let mut tables: Vec<(&[u8; 4], Vec<u8>)> = Vec::new();
 
