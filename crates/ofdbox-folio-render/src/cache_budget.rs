@@ -39,11 +39,10 @@ struct BudgetState {
 
 /// A byte budget for decoded images that several render backends can share.
 ///
-/// A [`CpuRenderer`](crate::CpuRenderer), a
-/// [`TinySkiaRenderer`](crate::TinySkiaRenderer) and a
-/// [`WgpuBackend`](crate::WgpuBackend) can charge their decoded-image caches to
-/// the same budget. When the combined size exceeds the limit, the oldest
-/// charges are evicted across all participating backends.
+/// A [`CpuRenderer`](crate::CpuRenderer), a `TinySkiaRenderer` and a
+/// `WgpuBackend` can charge their decoded-image caches to the same budget. When
+/// the combined size exceeds the limit, the oldest charges are evicted across
+/// all participating backends.
 ///
 /// Clones refer to the same budget. A limit of 0 disables decoded-image caching
 /// for every participating backend.

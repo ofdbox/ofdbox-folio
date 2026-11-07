@@ -216,10 +216,10 @@ fn resize_rgba(image: DecodedImage, max_dim: u32) -> DecodedImage {
                 f64::from(image.rgba[((sy * image.width + sx) * 4) as usize + channel])
             };
             let target = ((y * width + x) * 4) as usize;
-            for channel in 0..4 {
+            for (channel, slot) in rgba[target..target + 4].iter_mut().enumerate() {
                 let top = sample(x0, y0, channel) * (1.0 - fx) + sample(x1, y0, channel) * fx;
                 let bottom = sample(x0, y1, channel) * (1.0 - fx) + sample(x1, y1, channel) * fx;
-                rgba[target + channel] = (top * (1.0 - fy) + bottom * fy).round() as u8;
+                *slot = (top * (1.0 - fy) + bottom * fy).round() as u8;
             }
         }
     }
@@ -447,16 +447,16 @@ fn resize_rgba_box(image: DecodedImage, width: u32, height: u32) -> DecodedImage
             for sy in y0..y1.min(image.height as usize) {
                 for sx in x0..x1.min(source_width) {
                     let index = (sy * source_width + sx) * 4;
-                    for channel in 0..4 {
-                        sums[channel] += u32::from(image.rgba[index + channel]);
+                    for (sum, value) in sums.iter_mut().zip(&image.rgba[index..index + 4]) {
+                        *sum += u32::from(*value);
                     }
                     count += 1;
                 }
             }
             let count = count.max(1);
             let target = (y * width as usize + x) * 4;
-            for channel in 0..4 {
-                rgba[target + channel] = ((sums[channel] + count / 2) / count) as u8;
+            for (slot, sum) in rgba[target..target + 4].iter_mut().zip(sums) {
+                *slot = ((sum + count / 2) / count) as u8;
             }
         }
     }

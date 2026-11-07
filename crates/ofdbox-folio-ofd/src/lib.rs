@@ -561,7 +561,7 @@ mod tests {
 <ofd:Page xmlns:ofd="http://www.ofdspec.org/2016">
   <ofd:Content><ofd:Layer ID="2"/></ofd:Content>
 </ofd:Page>"#;
-        let mut document =
+        let document =
             OfdDocument::open_bytes(ofd_with_page(page), OfdReadOptions::default()).expect("open");
         let info = document.page_info(0).expect("info");
         assert_eq!(info.media_box, Rect::new(0.0, 0.0, 100.0, 100.0));

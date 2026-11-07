@@ -1002,7 +1002,7 @@ mod tests {
     use crate::options::RenderOptions;
     use ofdbox_folio_ir::{
         DiagnosticCode, Element, FillRule, Group, ImageAsset, ImageElement, ImageFormat, Matrix,
-        Paint, Path, PathElement, Point, Rect, ResourceStore, Rgba, Scene, Size,
+        Paint, Path, PathElement, Point, Rect, Rgba, Scene, Size,
     };
     use std::sync::Arc;
 
@@ -1145,6 +1145,7 @@ mod tests {
     fn shared_budget_evicts_across_cpu_and_tiny_skia() {
         use crate::CacheBudget;
         use crate::TinySkiaRenderer;
+        use ofdbox_folio_ir::ResourceStore;
 
         let mut store = ResourceStore::new();
         let first_id = store.add_image(ImageAsset::new(
