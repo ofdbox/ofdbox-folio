@@ -22,11 +22,15 @@ use ofdbox_folio_ir::{
     Size, StrokePaint, StrokeStyle, TextElement, TextItem, TextLayer, TextLine,
 };
 
+use crate::cff::{parse_bare_cff, wrap_otf};
 use crate::error::{PdfError, parse_error};
 
 const PT_TO_MM: f64 = 25.4 / 72.0;
 
 type PageBox = (f64, f64, f64, f64);
+
+/// A bare CFF font wrapped as OpenType, plus its CID and character code mappings.
+type WrappedCff = (Vec<u8>, HashMap<u16, u16>, HashMap<u8, u16>);
 
 /// PDF read options.
 #[derive(Clone, Debug)]
@@ -64,6 +68,10 @@ pub(crate) struct FontState {
     font: Arc<FontAsset>,
     identity: bool,
     to_unicode: HashMap<u32, u32>,
+    /// CID to glyph index mapping for bare CFF fonts (empty otherwise).
+    cff_cid_to_gid: HashMap<u16, u16>,
+    /// Character code to glyph index mapping for simple bare CFF fonts.
+    cff_code_to_gid: HashMap<u8, u16>,
     /// The embedded font was unavailable and an external font was substituted.
     fallback: bool,
 }
@@ -762,8 +770,152 @@ impl Builder<'_> {
         loaded
     }
 
+    /// Wraps a bare CFF table into an OpenType font and builds the code/glyph mappings.
+    fn wrap_bare_cff(
+        &mut self,
+        bytes: &[u8],
+        font_dictionary: &Dictionary,
+        is_cid: bool,
+    ) -> Result<WrappedCff, Box<dyn std::error::Error>> {
+        let cff = parse_bare_cff(bytes)?;
+        let mut advances = vec![1000_u16; usize::from(cff.glyphs)];
+        if is_cid {
+            let (default_width, widths) = self.cid_widths(font_dictionary);
+            for (gid, cid) in cff.cid_of_gid.iter().enumerate() {
+                advances[gid] = widths.get(cid).copied().unwrap_or(default_width).max(1);
+            }
+        } else {
+            let (default_width, widths) = self.simple_widths(font_dictionary);
+            for (code, gid) in &cff.code_to_gid {
+                if let Some(advance) = advances.get_mut(usize::from(*gid)) {
+                    *advance = widths.get(code).copied().unwrap_or(default_width).max(1);
+                }
+            }
+        }
+        let bbox = self.font_bbox(font_dictionary);
+        let wrapped = wrap_otf(&cff, bytes, &advances, bbox)?;
+        Ok((wrapped, cff.cid_to_gid, cff.code_to_gid))
+    }
+
+    /// Reads `/FirstChar` and `/Widths` of a simple font dictionary.
+    fn simple_widths(&self, dictionary: &Dictionary) -> (u16, HashMap<u8, u16>) {
+        let default_width = 1000_u16;
+        let first = dictionary
+            .get(b"FirstChar")
+            .ok()
+            .and_then(|object| self.resolve_number(object))
+            .map(|value| value.clamp(0.0, 255.0) as u8)
+            .unwrap_or(0);
+        let mut widths = HashMap::new();
+        let Some(array) = dictionary
+            .get(b"Widths")
+            .ok()
+            .and_then(|object| self.resolve(object))
+            .and_then(|object| object.as_array().ok())
+        else {
+            return (default_width, widths);
+        };
+        for (offset, value) in array.iter().enumerate() {
+            let Ok(code) = u8::try_from(usize::from(first) + offset) else {
+                continue;
+            };
+            let width = self
+                .resolve_number(value)
+                .map(|value| value.clamp(0.0, f64::from(u16::MAX)) as u16)
+                .unwrap_or(default_width);
+            widths.insert(code, width);
+        }
+        (default_width, widths)
+    }
+
+    /// Reads `/DW` and the `/W` array of a CIDFont dictionary.
+    fn cid_widths(&self, dictionary: &Dictionary) -> (u16, HashMap<u16, u16>) {
+        let default_width = dictionary
+            .get(b"DW")
+            .ok()
+            .and_then(|object| self.resolve_number(object))
+            .map(|value| value.clamp(0.0, f64::from(u16::MAX)) as u16)
+            .unwrap_or(1000);
+        let mut widths = HashMap::new();
+        let Some(array) = dictionary
+            .get(b"W")
+            .ok()
+            .and_then(|object| self.resolve(object))
+            .and_then(|object| object.as_array().ok())
+        else {
+            return (default_width, widths);
+        };
+        let mut index = 0_usize;
+        while index < array.len() {
+            let Some(first) = self.resolve_number(&array[index]) else {
+                index += 1;
+                continue;
+            };
+            let first = first.max(0.0) as u16;
+            index += 1;
+            let Some(object) = array
+                .get(index)
+                .map(|object| self.resolve(object).unwrap_or(object))
+            else {
+                break;
+            };
+            if let Ok(values) = object.as_array() {
+                for (offset, value) in values.iter().enumerate() {
+                    let width = self
+                        .resolve_number(value)
+                        .map(|value| value.clamp(0.0, f64::from(u16::MAX)) as u16)
+                        .unwrap_or(default_width);
+                    widths.insert(first.saturating_add(offset as u16), width);
+                }
+                index += 1;
+            } else {
+                let last = self.resolve_number(object).unwrap_or(f64::from(first));
+                let last = last.max(0.0) as u16;
+                let Some(width) = array
+                    .get(index + 1)
+                    .and_then(|value| self.resolve_number(value))
+                else {
+                    break;
+                };
+                let width = width.clamp(0.0, f64::from(u16::MAX)) as u16;
+                for cid in first..=last {
+                    widths.insert(cid, width);
+                }
+                index += 2;
+            }
+        }
+        (default_width, widths)
+    }
+
+    /// Font bounding box in 1000-unit em space, falling back to a default box.
+    fn font_bbox(&self, dictionary: &Dictionary) -> [i16; 4] {
+        let bbox = dictionary
+            .get(b"FontDescriptor")
+            .ok()
+            .and_then(|object| self.resolve(object))
+            .and_then(|object| object.as_dict().ok())
+            .and_then(|descriptor| descriptor.get(b"FontBBox").ok())
+            .and_then(|object| self.resolve(object))
+            .and_then(|object| object.as_array().ok())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| self.resolve_number(value))
+                    .collect::<Vec<_>>()
+            });
+        match bbox {
+            Some(values) if values.len() >= 4 => [
+                round_i16(values[0]),
+                round_i16(values[1]),
+                round_i16(values[2]),
+                round_i16(values[3]),
+            ],
+            _ => [-500, -250, 1500, 1000],
+        }
+    }
+
     fn load_font_inner(&mut self, name: &[u8], resources: &Dictionary) -> Option<Arc<FontState>> {
-        let (base_font, identity, embedded, to_unicode) = {
+        let (base_font, identity, embedded, to_unicode, font_dictionary) = {
             let fonts = resources
                 .get(b"Font")
                 .ok()
@@ -818,10 +970,19 @@ impl Builder<'_> {
                         .and_then(|object| object.as_stream().ok())
                 })
                 .map(|file| {
-                    file.decompressed_content()
-                        .unwrap_or_else(|_| file.content.clone())
+                    let subtype = file
+                        .dict
+                        .get(b"Subtype")
+                        .ok()
+                        .and_then(|object| object.as_name().ok())
+                        .map(<[u8]>::to_vec)
+                        .unwrap_or_default();
+                    let bytes = file
+                        .decompressed_content()
+                        .unwrap_or_else(|_| file.content.clone());
+                    (bytes, subtype)
                 })
-                .filter(|bytes| !bytes.is_empty())
+                .filter(|(bytes, _)| !bytes.is_empty())
             });
             let to_unicode = dictionary
                 .get(b"ToUnicode")
@@ -831,10 +992,30 @@ impl Builder<'_> {
                 .and_then(|stream| stream.decompressed_content().ok())
                 .map(|bytes| parse_to_unicode(&bytes))
                 .unwrap_or_default();
-            (base_font, identity, embedded, to_unicode)
+            (
+                base_font,
+                identity,
+                embedded,
+                to_unicode,
+                font_dictionary.clone(),
+            )
         };
-        let (data, fallback) = match embedded {
-            Some(bytes) => (Arc::from(bytes), false),
+        let (data, fallback, cff_cid_to_gid, cff_code_to_gid) = match embedded {
+            Some((bytes, subtype)) if subtype == b"CIDFontType0C" || subtype == b"Type1C" => {
+                match self.wrap_bare_cff(&bytes, &font_dictionary, subtype == b"CIDFontType0C") {
+                    Ok((wrapped, cid_mapping, code_mapping)) => {
+                        (Arc::from(wrapped), false, cid_mapping, code_mapping)
+                    }
+                    Err(error) => {
+                        self.diagnostic(
+                            DiagnosticCode::Font,
+                            format!("unsupported embedded CFF font: {error}"),
+                        );
+                        (Arc::from(bytes), false, HashMap::new(), HashMap::new())
+                    }
+                }
+            }
+            Some((bytes, _)) => (Arc::from(bytes), false, HashMap::new(), HashMap::new()),
             None => {
                 let request = FontRequest {
                     font_id: None,
@@ -852,7 +1033,7 @@ impl Builder<'_> {
                     .as_mut()
                     .and_then(|provider| provider.load(&request).ok().flatten())
                 {
-                    Some(bytes) => (bytes, true),
+                    Some(bytes) => (bytes, true, HashMap::new(), HashMap::new()),
                     None => {
                         self.diagnostic(
                             DiagnosticCode::MissingFont,
@@ -861,7 +1042,7 @@ impl Builder<'_> {
                                 base_font.as_deref().unwrap_or("unnamed")
                             ),
                         );
-                        (Arc::from(&b""[..]), true)
+                        (Arc::from(&b""[..]), true, HashMap::new(), HashMap::new())
                     }
                 }
             }
@@ -876,6 +1057,8 @@ impl Builder<'_> {
             font,
             identity,
             to_unicode,
+            cff_cid_to_gid,
+            cff_code_to_gid,
             fallback,
         }))
     }
@@ -915,9 +1098,12 @@ impl Builder<'_> {
                         .and_then(|face| face.glyph_index(character))
                         .map(|glyph| u32::from(glyph.0))
                         .unwrap_or(code)
+                } else if let Some(glyph) = font_state.cff_cid_to_gid.get(&(code as u16)) {
+                    u32::from(*glyph)
                 } else {
                     code
                 };
+                let glyph_id = clamp_glyph(face.as_ref(), glyph_id);
                 let advance =
                     glyph_advance(face.as_ref(), glyph_id, size, units) + state.char_spacing;
                 let index = text.chars().count() as u32;
@@ -946,11 +1132,15 @@ impl Builder<'_> {
                 let Some(character) = char::from_u32(codepoint) else {
                     continue;
                 };
-                let glyph_id = face
-                    .as_ref()
-                    .and_then(|face| face.glyph_index(character))
-                    .map(|glyph| u32::from(glyph.0))
-                    .unwrap_or(u32::from(code));
+                let glyph_id = if let Some(glyph) = font_state.cff_code_to_gid.get(&code) {
+                    u32::from(*glyph)
+                } else {
+                    face.as_ref()
+                        .and_then(|face| face.glyph_index(character))
+                        .map(|glyph| u32::from(glyph.0))
+                        .unwrap_or(u32::from(code))
+                };
+                let glyph_id = clamp_glyph(face.as_ref(), glyph_id);
                 let advance = glyph_advance(face.as_ref(), glyph_id, size, units)
                     + state.char_spacing
                     + if character == ' ' {
@@ -1156,7 +1346,25 @@ impl Builder<'_> {
                 }
             }
         }
-        let (format, bytes) = if last == Some(b"DCTDecode") {
+        let image_mask = stream
+            .dict
+            .get(b"ImageMask")
+            .ok()
+            .and_then(|object| object.as_bool().ok())
+            .unwrap_or(false);
+        let (format, bytes) = if image_mask {
+            let color = match &state.fill {
+                Paint::Color(rgba) => *rgba,
+                _ => Rgba::BLACK,
+            };
+            match self.image_mask_png(stream, &payload, last, width as u32, height as u32, color) {
+                Some(bytes) => (ImageFormat::Png, Arc::<[u8]>::from(bytes)),
+                None => {
+                    self.diagnostic(DiagnosticCode::Image, "PDF image mask decoding failed");
+                    return Ok(());
+                }
+            }
+        } else if last == Some(b"DCTDecode") {
             (ImageFormat::Jpeg, Arc::<[u8]>::from(payload))
         } else if last == Some(b"JPXDecode") {
             self.diagnostic(
@@ -1506,8 +1714,48 @@ impl Builder<'_> {
             })
     }
 
-    /// Decodes CCITT G3/G4 fax encoding and converts it to an RGBA PNG.
-    fn ccitt_image(&self, stream: &lopdf::Stream, width: u32, height: u32) -> Option<Vec<u8>> {
+    /// Builds an RGBA PNG for a stencil image mask: decoded samples paint with the current
+    /// nonstroking fill color, everything else stays transparent.
+    fn image_mask_png(
+        &self,
+        stream: &lopdf::Stream,
+        payload: &[u8],
+        last_filter: Option<&[u8]>,
+        width: u32,
+        height: u32,
+        color: Rgba,
+    ) -> Option<Vec<u8>> {
+        let samples = if last_filter == Some(b"CCITTFaxDecode") {
+            decode_ccitt_bits(payload, width, height, self.ccitt_params(stream)?)
+        } else {
+            let data = match last_filter {
+                Some(b"FlateDecode") => decode_filter(b"FlateDecode", payload).ok()?,
+                Some(_) => return None,
+                None => payload.to_vec(),
+            };
+            Some(decode_raw_mask_bits(&data, width, height)?)
+        }?;
+        let decode = self
+            .number_array(&stream.dict, b"Decode")
+            .filter(|values| values.len() >= 2)
+            .unwrap_or_else(|| vec![0.0, 1.0]);
+        let low = decode[0];
+        let high = decode[1];
+        let mut rgba = Vec::with_capacity(samples.len() * 4);
+        for sample in samples {
+            let raw = if sample { 1.0 } else { 0.0 };
+            let value = low + (high - low) * raw;
+            if value.abs() < 0.5 {
+                rgba.extend_from_slice(&[color.r, color.g, color.b, 255]);
+            } else {
+                rgba.extend_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+        encode_rgba_png(width, height, &rgba)
+    }
+
+    /// Decodes the `/DecodeParms` of a CCITT image stream.
+    fn ccitt_params(&self, stream: &lopdf::Stream) -> Option<CcittParams> {
         let params = stream_value(&stream.dict, b"DecodeParms", b"DP")
             .and_then(|object| self.resolve(object))
             .and_then(|object| match object {
@@ -1532,13 +1780,18 @@ impl Builder<'_> {
                 .and_then(|object| object.as_bool().ok())
                 .unwrap_or(default)
         };
-        let settings = CcittParams {
+        Some(CcittParams {
             k: number(b"K").unwrap_or(0.0) as i64,
             black_is_1: boolean(b"BlackIs1", false),
             end_of_line: boolean(b"EndOfLine", false),
             encoded_byte_align: boolean(b"EncodedByteAlign", false),
-        };
-        let rgba = decode_ccitt_rgba(&stream.content, width, height, settings)?;
+        })
+    }
+
+    /// Decodes CCITT G3/G4 fax encoding and converts it to an RGBA PNG.
+    fn ccitt_image(&self, stream: &lopdf::Stream, width: u32, height: u32) -> Option<Vec<u8>> {
+        let params = self.ccitt_params(stream)?;
+        let rgba = decode_ccitt_rgba(&stream.content, width, height, params)?;
         encode_rgba_png(width, height, &rgba)
     }
 
@@ -1797,7 +2050,12 @@ struct CcittParams {
 }
 
 /// Decodes a CCITT G3/G4 bitstream into RGBA8; a 1 bit means black and a 0 bit means white.
-fn decode_ccitt_rgba(data: &[u8], width: u32, height: u32, params: CcittParams) -> Option<Vec<u8>> {
+fn decode_ccitt_bits(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    params: CcittParams,
+) -> Option<Vec<bool>> {
     let encoding = if params.k < 0 {
         hayro_ccitt::EncodingMode::Group4
     } else if params.k == 0 {
@@ -1821,12 +2079,32 @@ fn decode_ccitt_rgba(data: &[u8], width: u32, height: u32, params: CcittParams) 
     if bitmap.pixels.len() < expected {
         return None;
     }
-    let mut rgba = Vec::with_capacity(expected * 4);
-    for white in bitmap.pixels.into_iter().take(expected) {
+    Some(bitmap.pixels.into_iter().take(expected).collect())
+}
+
+fn decode_ccitt_rgba(data: &[u8], width: u32, height: u32, params: CcittParams) -> Option<Vec<u8>> {
+    let pixels = decode_ccitt_bits(data, width, height, params)?;
+    let mut rgba = Vec::with_capacity(pixels.len() * 4);
+    for white in pixels {
         let value = if white { 255 } else { 0 };
         rgba.extend_from_slice(&[value, value, value, 255]);
     }
     Some(rgba)
+}
+
+/// Reads an unpacked 1-bit stencil mask (MSB first).
+fn decode_raw_mask_bits(data: &[u8], width: u32, height: u32) -> Option<Vec<bool>> {
+    let expected = usize::try_from(width).ok()? * usize::try_from(height).ok()?;
+    if data.len() * 8 < expected {
+        return None;
+    }
+    let mut samples = Vec::with_capacity(expected);
+    for index in 0..expected {
+        let byte = data[index / 8];
+        let bit = (byte >> (7 - (index % 8))) & 1;
+        samples.push(bit == 1);
+    }
+    Some(samples)
 }
 
 #[derive(Default)]
@@ -1959,6 +2237,23 @@ fn transform_path(path: &Path, matrix: Matrix) -> Path {
         }
     }
     output
+}
+
+/// Keeps a glyph index inside the face's glyph range (foreign subsets can be sparse).
+fn clamp_glyph(face: Option<&ttf_parser::Face<'_>>, glyph_id: u32) -> u32 {
+    match face {
+        Some(face) if glyph_id >= u32::from(face.number_of_glyphs()) => 0,
+        _ => glyph_id,
+    }
+}
+
+fn round_i16(value: f64) -> i16 {
+    if !value.is_finite() {
+        return 0;
+    }
+    value
+        .round()
+        .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16
 }
 
 fn parse_to_unicode(data: &[u8]) -> HashMap<u32, u32> {
